@@ -189,7 +189,7 @@ def _ukuran_icon_terzoom(
 
 
 def _master_font() -> str:
-    return str(getattr(typography, "MASTER_FONT", "Roboto") or "Roboto")
+    return str(getattr(typography, "get_master_font()", "Roboto") or "Roboto")
 
 
 def _font_family_qss() -> str:

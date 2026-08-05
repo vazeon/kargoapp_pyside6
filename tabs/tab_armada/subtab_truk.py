@@ -23,7 +23,7 @@ import services.database_service as db_service
 
 from themes.modules.kontak_armada import get_armada_styles
 
-from utils.typography import MASTER_FONT, get_global_font_sizes
+from utils.typography import get_master_font, get_global_font_sizes
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 import utils.zoom as zoom_helper
@@ -85,7 +85,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
 
         layout_judul_search = QHBoxLayout()
         self.label_judul = QLabel("🚚 List Data Truk")
-        self.label_judul.setFont(QFont(MASTER_FONT, 14, QFont.Weight.Bold))
+        self.label_judul.setFont(QFont(get_master_font(), 14, QFont.Weight.Bold))
         layout_judul_search.addWidget(self.label_judul)
         layout_judul_search.addStretch()
 
@@ -151,7 +151,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         layout_kanan.setContentsMargins(15, 15, 15, 15)
 
         self.lbl_judul_kanan = QLabel("📋 Detail / Editor truk")
-        self.lbl_judul_kanan.setFont(QFont(MASTER_FONT, 12, QFont.Weight.Bold))
+        self.lbl_judul_kanan.setFont(QFont(get_master_font(), 12, QFont.Weight.Bold))
         self.lbl_judul_kanan.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout_kanan.addWidget(self.lbl_judul_kanan)
 
@@ -842,7 +842,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             "QPushButton:hover { background-color: #cbd5e1; }"
         )
 
-        font_foto = QFont(MASTER_FONT, font_statis_base)
+        font_foto = QFont(get_master_font(), font_statis_base)
         self.btn_pilih_foto.setProperty("zoom_font_key", None)
         self.btn_pilih_foto.setFont(font_foto)
         self.btn_pilih_foto.setMinimumHeight(30)
@@ -851,7 +851,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             style_btn_foto
             + f"""
             QPushButton {{
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 font-size: {font_statis_base}pt;
                 padding: 2px 6px;
             }}
@@ -919,11 +919,11 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             self.input_cari.setFixedWidth(230)
 
             # Judul Panel Kanan
-            font_judul_kanan = QFont(MASTER_FONT, font_base + 1, QFont.Weight.Bold)
+            font_judul_kanan = QFont(get_master_font(), font_base + 1, QFont.Weight.Bold)
             self.lbl_judul_kanan.setFont(font_judul_kanan)
 
             # Label Kanan
-            font_label = QFont(MASTER_FONT, font_base)
+            font_label = QFont(get_master_font(), font_base)
             for label in [
                 self.lbl_jenis,
                 self.lbl_jenis_lain,
@@ -936,7 +936,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
                 label.setFont(font_label)
 
             # Editor Form Input
-            font_input = QFont(MASTER_FONT, ukuran_statis)
+            font_input = QFont(get_master_font(), ukuran_statis)
             line_edits = [
                 self.input_jenis_lain,
                 self.input_nopol,
@@ -963,7 +963,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
                 combo_view.setStyleSheet(
                     f"""
                         QAbstractItemView {{
-                            font-family: '{MASTER_FONT}';
+                            font-family: '{get_master_font()}';
                             font-size: {ukuran_statis}pt;
                         }}
                         QAbstractItemView::item {{
@@ -975,7 +975,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
                 )
 
             # Tombol Aksi Kanan
-            font_btn = QFont(MASTER_FONT, font_base, QFont.Weight.Bold)
+            font_btn = QFont(get_master_font(), font_base, QFont.Weight.Bold)
             self.btn_batal.setFont(font_btn)
             self.btn_batal.setFixedHeight(38)
             self.btn_batal.setStyleSheet(st["btn_batal"])

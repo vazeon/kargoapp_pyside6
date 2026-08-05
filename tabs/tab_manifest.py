@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSplitter,
     QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
@@ -38,6 +37,7 @@ from themes.modules.manifest import (
     get_manifest_styles,
 )
 
+from utils.splitter_helper import buat_splitter
 from utils.printer.print_manifest import cetak_manifest_ke_printer
 from utils.frozen_table_helper import FrozenTableWidget
 from utils.typography import get_global_font_sizes
@@ -134,9 +134,6 @@ class TabManifest(QWidget):
     def init_ui(self):
         layout_utama = QHBoxLayout(self)
         layout_utama.setContentsMargins(0, 0, 0, 0)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setHandleWidth(2)
-        layout_utama.addWidget(self.splitter)
 
         self.panel_kiri = QWidget()
         # Batas lebar panel kiri agar tidak dapat digeser sampai hilang.
@@ -604,13 +601,16 @@ class TabManifest(QWidget):
         )
         layout_kanan.addWidget(self.list_histori)
 
-        self.splitter.addWidget(self.panel_kiri)
-        self.splitter.addWidget(self.panel_kanan)
-        # Cegah kedua panel diciutkan menjadi 0 piksel.
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes([800, 200])
+        self.splitter = buat_splitter(
+            self.panel_kiri,
+            self.panel_kanan,
+            orientation=Qt.Orientation.Horizontal,
+            ukuran_awal=(800, 200),
+            bisa_diciutkan=False,
+            parent=self,
+        )
+
+        layout_utama.addWidget(self.splitter)
 
         self.btn_proses.clicked.connect(self.update_truk_ke_manifest)
         self.refresh_tahun_filter()
@@ -1214,7 +1214,7 @@ class TabManifest(QWidget):
                 child = QTreeWidgetItem(parents[title])
                 child.setText(0, tanggal_ui)
 
-                ukuran_dasar = self.list_histori.font().pointSize()
+                ukuran_dasar = self._ukuran_point_histori_aktif()
                 font_tanggal, warna_abu = get_manifest_history_date_appearance(
                     is_dark,
                     ukuran_dasar,
@@ -1286,6 +1286,42 @@ class TabManifest(QWidget):
         finally:
             self.list_histori.setUpdatesEnabled(True)
             self.list_histori.viewport().update()
+
+    def _ukuran_point_histori_aktif(self):
+        """Menghasilkan ukuran point valid dari font histori aktif."""
+        font_histori = self.list_histori.font()
+        ukuran_point = font_histori.pointSize()
+
+        if ukuran_point > 0:
+            return ukuran_point
+
+        ukuran_pixel = font_histori.pixelSize()
+        if ukuran_pixel <= 0:
+            ukuran_pixel = get_global_font_sizes(0)["sz_base"]
+
+        dpi_y = max(1, self.list_histori.logicalDpiY())
+        return max(1, round(ukuran_pixel * 72 / dpi_y))
+
+    def _sinkronkan_font_item_histori(self, is_dark):
+        """Menyamakan font tanggal histori setelah tema atau zoom berubah."""
+        ukuran_point = self._ukuran_point_histori_aktif()
+        font_tanggal, warna_abu = get_manifest_history_date_appearance(
+            is_dark,
+            ukuran_point,
+        )
+
+        for parent_index in range(self.list_histori.topLevelItemCount()):
+            parent_item = self.list_histori.topLevelItem(parent_index)
+            if parent_item is None:
+                continue
+
+            for child_index in range(parent_item.childCount()):
+                child_item = parent_item.child(child_index)
+                if child_item is None:
+                    continue
+
+                child_item.setFont(0, font_tanggal)
+                child_item.setForeground(0, QBrush(warna_abu))
 
     def update_truk_ke_manifest(self):
         if self._sedang_memproses_manifest:
@@ -1645,7 +1681,6 @@ class TabManifest(QWidget):
         self.panel_kanan.setStyleSheet(styles_statis['panel_kanan'])
         self.lbl_title.setStyleSheet(styles_statis['lbl_title'])
         self.btn_proses.setStyleSheet(styles_statis['btn_proses'])
-        self.splitter.setStyleSheet(styles_statis['splitter'])
 
         for w in [self.txt_jenis_truk_lain, self.txt_no_pol, self.txt_sopir,
                   self.txt_keterangan, self.txt_nama_kapal,
@@ -1762,11 +1797,11 @@ class TabManifest(QWidget):
             )
 
         font = self.tabel_manifest.font()
-        font.setPointSize(font_dinamis["sz_base"])
+        font.setPixelSize(font_dinamis["sz_base"])
         self.tabel_manifest.setFont(font)
 
         header_font = self.tabel_manifest.horizontalHeader().font()
-        header_font.setPointSize(font_dinamis["sz_base"])
+        header_font.setPixelSize(font_dinamis["sz_base"])
         self.tabel_manifest.horizontalHeader().setFont(header_font)
         self.tabel_manifest.verticalHeader().setFont(header_font)
 
@@ -1775,7 +1810,11 @@ class TabManifest(QWidget):
         self.tabel_manifest.verticalHeader().setDefaultSectionSize(tinggi_baris)
 
         if hasattr(self.tabel_manifest, "frozen_table"):
+            frozen_font = self.tabel_manifest.frozen_table.font()
+            frozen_font.setPixelSize(font_dinamis["sz_base"])
+            self.tabel_manifest.frozen_table.setFont(frozen_font)
             self.tabel_manifest.frozen_table.horizontalHeader().setFont(header_font)
+            self.tabel_manifest.frozen_table.verticalHeader().setFont(header_font)
             self.tabel_manifest.frozen_table.verticalHeader().setDefaultSectionSize(
                 tinggi_baris,
             )
@@ -1795,8 +1834,9 @@ class TabManifest(QWidget):
         # Histori Manifest responsif ke zoom
         self.list_histori.setStyleSheet(styles_dinamis['list_histori'])
         font_histori = self.list_histori.font()
-        font_histori.setPointSize(font_dinamis["sz_base"])
+        font_histori.setPixelSize(font_dinamis["sz_base"])
         self.list_histori.setFont(font_histori)
+        self._sinkronkan_font_item_histori(is_dark)
 
     def _settings_kolom(self):
         return QSettings(

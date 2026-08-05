@@ -1,9 +1,7 @@
-# themes/calendar.py
-
+# themes/components/calendar.py
 from PySide6.QtCore import QLocale, Qt
 from PySide6.QtGui import QColor, QTextCharFormat
 from PySide6.QtWidgets import QCalendarWidget, QDateEdit
-
 
 def terapkan_style_kalender(
     date_edit: QDateEdit,

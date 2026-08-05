@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 # Mengambil variabel sesi dan data klien (Tidak pakai ACCOUNTS lagi)
 from config import DATA_CLIENT, CURRENT_SESSION
 from database_manager import init_db
-from utils.typography import get_global_font_sizes, get_master_font
+from utils.typography import get_global_font_sizes
 
 
 class LoginWindow(QWidget):
@@ -36,7 +36,6 @@ class LoginWindow(QWidget):
     def init_ui(self):
         self.setObjectName("LoginWidgetRoot")
 
-        master_font = get_master_font().replace("'", "\\'")
         font_sizes = get_global_font_sizes(0)
 
         self.setStyleSheet(
@@ -46,7 +45,6 @@ class LoginWindow(QWidget):
                 }}
                 QWidget {{
                     color: #1e293b;
-                    font-family: '{master_font}';
                     font-size: {font_sizes['sz_base']}px;
                 }}
                 #LoginCard {{

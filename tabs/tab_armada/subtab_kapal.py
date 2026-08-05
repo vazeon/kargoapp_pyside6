@@ -24,7 +24,7 @@ import services.database_service as db_service
 
 from themes.modules.kontak_armada import get_armada_styles
 
-from utils.typography import MASTER_FONT, get_global_font_sizes
+from utils.typography import get_master_font, get_global_font_sizes
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 import utils.zoom as zoom_helper
@@ -84,7 +84,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
 
         layout_judul_search = QHBoxLayout()
         self.label_judul = QLabel("🚢 List Data Kapal")
-        self.label_judul.setFont(QFont(MASTER_FONT, 14, QFont.Weight.Bold))
+        self.label_judul.setFont(QFont(get_master_font(), 14, QFont.Weight.Bold))
         layout_judul_search.addWidget(self.label_judul)
         layout_judul_search.addStretch()
 
@@ -150,7 +150,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         layout_kanan.setContentsMargins(15, 15, 15, 15)
 
         self.lbl_judul_kanan = QLabel("📋 Detail / Editor Kapal")
-        self.lbl_judul_kanan.setFont(QFont(MASTER_FONT, 12, QFont.Weight.Bold))
+        self.lbl_judul_kanan.setFont(QFont(get_master_font(), 12, QFont.Weight.Bold))
         self.lbl_judul_kanan.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout_kanan.addWidget(self.lbl_judul_kanan)
 
@@ -784,7 +784,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
             "QPushButton:hover { background-color: #cbd5e1; }"
         )
 
-        font_foto = QFont(MASTER_FONT, font_statis_base)
+        font_foto = QFont(get_master_font(), font_statis_base)
         self.btn_pilih_foto.setProperty("zoom_font_key", None)
         self.btn_pilih_foto.setFont(font_foto)
         self.btn_pilih_foto.setMinimumHeight(30)
@@ -793,7 +793,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
             style_btn_foto
             + f"""
             QPushButton {{
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 font-size: {font_statis_base}pt;
                 padding: 2px 6px;
             }}
@@ -861,11 +861,11 @@ class SubTabKapal(QWidget, ZoomTableMixin):
             self.input_cari.setFixedWidth(230)
 
             # Judul Panel Kanan
-            font_judul_kanan = QFont(MASTER_FONT, font_base + 1, QFont.Weight.Bold)
+            font_judul_kanan = QFont(get_master_font(), font_base + 1, QFont.Weight.Bold)
             self.lbl_judul_kanan.setFont(font_judul_kanan)
 
             # Label Kanan
-            font_label = QFont(MASTER_FONT, font_base)
+            font_label = QFont(get_master_font(), font_base)
             for lbl in [
                 self.lbl_nama_kapal,
                 self.lbl_tujuan,
@@ -875,7 +875,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
                 lbl.setFont(font_label)
 
             # Editor Form Input
-            font_input = QFont(MASTER_FONT, ukuran_statis)
+            font_input = QFont(get_master_font(), ukuran_statis)
             for w_input in [
                 self.input_nama_kapal,
                 self.input_tujuan,
@@ -890,7 +890,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
                 w_input.setStyleSheet(style_aktif)
 
             # Tombol Aksi Kanan
-            font_btn = QFont(MASTER_FONT, font_base, QFont.Weight.Bold)
+            font_btn = QFont(get_master_font(), font_base, QFont.Weight.Bold)
             self.btn_batal.setFont(font_btn)
             self.btn_batal.setFixedHeight(38)
             self.btn_batal.setStyleSheet(st["btn_batal"])

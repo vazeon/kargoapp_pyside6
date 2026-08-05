@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 
 from PySide6.QtGui import QColor, QFont
 
-from utils.typography import MASTER_FONT, get_global_font_sizes
+from utils.typography import get_master_font, get_global_font_sizes
 
 
 def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
@@ -54,7 +54,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         color: {title_color};
         font-size: {sz_title}px;
         font-weight: bold;
-        font-family: '{MASTER_FONT}';
+        font-family: '{get_master_font()}';
     """
 
     style_input = f"""
@@ -65,7 +65,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             border: 1px solid {input_border};
             padding: 6px;
             border-radius: 4px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QLineEdit[custom_italic="true"][is_empty="true"] {{
             font-style: italic;
@@ -84,7 +84,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             color: {table_text};
             gridline-color: {table_grid};
             font-size: {sz_base}px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QLineEdit#manifestKetCell {{
             background-color: transparent;
@@ -103,7 +103,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             font-size: {sz_base}px;
             font-weight: bold;
             padding: 6px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QTableWidget::item:selected {{
             background-color: {selected_bg};
@@ -123,18 +123,10 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             border-radius: 6px;
             padding: 5px;
             font-size: {sz_base}px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QTreeView::item {{
             padding: 4px;
-        }}
-    """
-
-    splitter_style = f"""
-        QSplitter::handle {{
-            background-color: {input_border};
-            margin: 14px 1px;
-            border-radius: 1px;
         }}
     """
 
@@ -146,7 +138,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             padding: 7px 20px;
             border-radius: 4px;
             font-size: {sz_base}px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QPushButton:hover {{
             background-color: {warna_btn_hover};
@@ -159,7 +151,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     panel_kiri = f"""
         QLabel {{
             font-size: {sz_base}px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
             color: {panel_text};
             background-color: transparent;
             border: none;
@@ -176,7 +168,6 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         "style_tabel": style_tabel,
         "panel_kiri": panel_kiri,
         "panel_kanan": panel_kanan,
-        "splitter": splitter_style,
     }
 
 
@@ -196,7 +187,7 @@ def get_manifest_history_date_appearance(
     base_point_size: int,
 ) -> Tuple[QFont, QColor]:
     """Font dan warna untuk tanggal pada histori manifest."""
-    font_tanggal = QFont(MASTER_FONT)
+    font_tanggal = QFont(get_master_font())
 
     if base_point_size > 0:
         font_tanggal.setPointSize(max(6, base_point_size - 2))

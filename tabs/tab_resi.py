@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QTableWidget,
     QToolButton,
     QVBoxLayout,
@@ -39,11 +38,9 @@ from PySide6.QtWidgets import (
 
 from config import CURRENT_SESSION
 import services.database_service as db_service
-from themes.components import (
-    FADE_NOTIFICATION_STYLE,
-    terapkan_style_combobox,
-)
-from themes.calendar import terapkan_style_kalender
+from themes.components.notification import FADE_NOTIFICATION_STYLE
+from themes.components.combobox import terapkan_style_combobox
+from themes.components.calendar import terapkan_style_kalender
 from themes.modules.resi import (
     get_btn_simpan_cetak_style,
     get_resi_detail_barang_theme,
@@ -52,6 +49,8 @@ from themes.modules.resi import (
     get_resi_styles,
     get_btn_clear_container_style,
 )
+
+from utils.splitter_helper import buat_splitter
 from utils.printer.print_resi import cetak_resi_ke_printer
 from utils import zoom as zoom_helper
 from utils.date_ind_format import format_tanggal_ke_db, format_tanggal_ke_ui
@@ -68,7 +67,11 @@ from utils.placeholder_helper import (
     terap_semua_placeholder_dinamis,
 )
 from utils.table_helper import buat_tabel_item
-from utils.typography import get_global_font_sizes
+from utils.typography import (
+    APPLICATION_NAME,
+    ORGANIZATION_NAME,
+    get_global_font_sizes,
+)
 from utils.validators import UppercaseValidator, get_decimal_validator
 from utils.widget_helpers import (
     _blokir_signal_sementara,
@@ -174,7 +177,10 @@ class TabResi(ZoomTableMixin, QWidget):
     def __init__(self):
         super().__init__()
         self.kode_cabang = CURRENT_SESSION.get('kode_cabang', 'PUSAT')
-        self.settings = QSettings("AplikasiEkspedisi", "PengaturanUI")
+        self.settings = QSettings(
+            ORGANIZATION_NAME,
+            APPLICATION_NAME,
+        )
         self.current_theme = self.settings.value("theme", "light")
         self.current_resi_data = None
 
@@ -189,9 +195,6 @@ class TabResi(ZoomTableMixin, QWidget):
     def init_ui(self):
         layout_utama_asli = QHBoxLayout(self)
         layout_utama_asli.setContentsMargins(0, 0, 0, 0)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setHandleWidth(2)
-        layout_utama_asli.addWidget(self.splitter)
 
         initial_theme_styles = get_resi_static_styles(
             self.current_theme == "dark"
@@ -636,12 +639,17 @@ class TabResi(ZoomTableMixin, QWidget):
         layout_kanan.addWidget(self.list_histori)
 
         self.scroll_kiri.setWidget(self.widget_kiri)
-        self.splitter.addWidget(self.scroll_kiri)
-        self.splitter.addWidget(self.widget_kanan)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes([856, 256])
+
+        self.splitter = buat_splitter(
+            self.scroll_kiri,
+            self.widget_kanan,
+            orientation=Qt.Orientation.Horizontal,
+            ukuran_awal=(856, 256),
+            bisa_diciutkan=False,
+            parent=self,
+        )
+
+        layout_utama_asli.addWidget(self.splitter)
 
         self.setup_uppercase_hooks()
         self.setup_autocomplete()
@@ -974,7 +982,6 @@ class TabResi(ZoomTableMixin, QWidget):
 
                 # Struktur utama.
                 "scroll_kiri",
-                "splitter",
             ),
             styles_statis,
         )

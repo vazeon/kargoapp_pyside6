@@ -1,5 +1,7 @@
 # tabs/tab_kontak/subtab_penerima.py
 
+import re
+
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
@@ -25,13 +27,16 @@ import services.database_service as db_service
 from themes.modules.kontak_armada import get_kontak_riwayat_styles, get_penerima_blacklist_colors
 
 from utils.number_formatters import format_ke_rupiah
-from utils.typography import MASTER_FONT, get_global_font_sizes
+from utils.typography import get_master_font, get_global_font_sizes
 from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
 from utils.placeholder_helper import terap_semua_placeholder_dinamis
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 from utils.date_ind_format import format_tanggal_ke_ui
 import utils.zoom as zoom_helper
+
+# --- Import Helper Splitter ---
+from utils.splitter_helper import buat_splitter, perbarui_semua_style_splitter
 
 
 class SubTabPenerima(QWidget, ZoomTableMixin):
@@ -72,35 +77,35 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
     def init_ui(self):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        font_sizes = get_global_font_sizes(0)
+        master_font = get_master_font()
+
         layout_utama = QVBoxLayout(self)
         layout_utama.setContentsMargins(8, 8, 8, 8)
         layout_utama.setSpacing(8)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout_utama.addWidget(self.splitter)
-
         # ========================================================
-        # PANEL KIRI: DATA UTAMA
+        # PANEL KIRI: DATA UTAMA (MASTER PANEL)
         # ========================================================
         self.panel_kiri = QWidget()
         self.panel_kiri.setMinimumWidth(400)
         self.panel_kiri.setMaximumWidth(1400)
         layout_kiri = QVBoxLayout(self.panel_kiri)
-        layout_kiri.setContentsMargins(0, 0, 5, 0)
+        layout_kiri.setContentsMargins(10, 10, 10, 10)  # Margin disamakan
         layout_kiri.setSpacing(10)
 
+        # Header Kiri (Utama): Horizontal Layout
         hbox_header_kiri = QHBoxLayout()
-
         self.lbl_judul = QLabel("🏢 List Penerima")
-        self.lbl_judul.setFont(QFont(MASTER_FONT, 14, QFont.Weight.Bold))  # Menggunakan MASTER_FONT
+        self.lbl_judul.setFont(QFont(master_font, font_sizes["sz_title"]))  # 14pt (Besar/Dominan)
         hbox_header_kiri.addWidget(self.lbl_judul)
         hbox_header_kiri.addStretch()
 
         self.txt_cari = QLineEdit()
+        self.txt_cari.setFont(QFont(master_font, font_sizes["sz_input"]))
         self.txt_cari.setPlaceholderText("Cari penerima...")
-        self.txt_cari.setProperty("zoom_font_key", "sz_input")
-        self.txt_cari.setFixedWidth(230)
+        self.txt_cari.setFixedWidth(230)  # Lebar utama 230px
+        self.txt_cari.setFixedHeight(30)
         self.txt_cari.textChanged.connect(lambda _text: helper_paksa_kapital_lineedit(self.txt_cari))
         self.txt_cari.textChanged.connect(self.filter_pencarian_tabel)
         hbox_header_kiri.addWidget(self.txt_cari)
@@ -141,9 +146,9 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         layout_kiri.addWidget(self.tabel_penerima)
 
         # ========================================================
-        # PANEL KANAN: HISTORI TRANSAKSI
+        # PANEL KANAN: HISTORI TRANSAKSI (DETAIL/PENDUKUNG PANEL)
         # ========================================================
-        self.panel_kanan = QFrame()
+        self.panel_kanan = QWidget()  # Diubah menjadi QWidget biasa
         self.panel_kanan.setMinimumWidth(400)
         self.panel_kanan.setMaximumWidth(1400)
         self.panel_kanan.setObjectName("panelHistori")
@@ -152,17 +157,22 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         layout_kanan.setContentsMargins(10, 10, 10, 10)
         layout_kanan.setSpacing(10)
 
+        # Header Kanan (Pendukung): Horizontal Layout
+        hbox_header_kanan = QHBoxLayout()
         self.lbl_judul_histori = QLabel("📦 Riwayat Penerimaan")
-        self.lbl_judul_histori.setFont(QFont(MASTER_FONT, 11, QFont.Weight.Bold))
-        self.lbl_judul_histori.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout_kanan.addWidget(self.lbl_judul_histori)
+        self.lbl_judul_histori.setFont(QFont(master_font, font_sizes["sz_total"]))
+        hbox_header_kanan.addWidget(self.lbl_judul_histori)
+        hbox_header_kanan.addStretch()
 
         self.txt_cari_histori = QLineEdit()
+        self.txt_cari_histori.setFont(QFont(master_font, font_sizes["sz_input"]))
         self.txt_cari_histori.setPlaceholderText("Cari di histori ini...")
-        self.txt_cari_histori.setProperty("zoom_font_key", "sz_input")
+        self.txt_cari_histori.setFixedHeight(30)
+        self.txt_cari_histori.setFixedWidth(180)  # Lebih pendek 180px
         self.txt_cari_histori.textChanged.connect(lambda _t: helper_paksa_kapital_lineedit(self.txt_cari_histori))
         self.txt_cari_histori.textChanged.connect(self.filter_pencarian_histori)
-        layout_kanan.addWidget(self.txt_cari_histori)
+        hbox_header_kanan.addWidget(self.txt_cari_histori)
+        layout_kanan.addLayout(hbox_header_kanan)
 
         self.tabel_histori = QTableWidget()
         self.tabel_histori.setColumnCount(7)
@@ -185,12 +195,17 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         )
         layout_kanan.addWidget(self.tabel_histori)
 
-        self.splitter.addWidget(self.panel_kiri)
-        self.splitter.addWidget(self.panel_kanan)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes([650, 450])
+        # --- GABUNGKAN KE SPLITTER MENGGUNAKAN HELPER ---
+        self.splitter = buat_splitter(
+            self.panel_kiri,
+            self.panel_kanan,
+            orientation=Qt.Orientation.Horizontal,
+            ukuran_awal=[650, 450],
+            bisa_diciutkan=False,
+            parent=self
+        )
+        self.splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout_utama.addWidget(self.splitter)
 
         self.refresh_session_ui()
         self.sesuaikan_tema_lokal()
@@ -218,7 +233,6 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
             self,
             is_dark=is_dark,
         )
-        # Tema dikelola oleh TabKontak.
 
     # ============================================================
     # PENCARIAN
@@ -310,25 +324,32 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
                 pembayaran = str(data[7]).upper() if data[7] else "TF / INVOICE"
                 status = str(data[8]).strip().upper() if data[8] else "NORMAL"
 
-                # 💡 Menggunakan fungsi buat_tabel_item dari util table_helper
                 self.tabel_penerima.setItem(baris, self.KOL_NO,
-                                            buat_tabel_item(baris + 1, editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                            buat_tabel_item(baris + 1, editable=False,
+                                                            alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_ID,
-                                            buat_tabel_item(id_penerima, editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                            buat_tabel_item(id_penerima, editable=False,
+                                                            alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_NAMA_PENERIMA,
-                                            buat_tabel_item(nama, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
-                self.tabel_penerima.setItem(baris, self.KOL_TELEPON, buat_tabel_item(no_hp, alignment=Qt.AlignmentFlag.AlignCenter))
+                                            buat_tabel_item(nama,
+                                                            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+                self.tabel_penerima.setItem(baris, self.KOL_TELEPON,
+                                            buat_tabel_item(no_hp, alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_ALAMAT,
-                                            buat_tabel_item(alamat, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
-                self.tabel_penerima.setItem(baris, self.KOL_KOTA, buat_tabel_item(kota, alignment=Qt.AlignmentFlag.AlignCenter))
+                                            buat_tabel_item(alamat,
+                                                            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
+                self.tabel_penerima.setItem(baris, self.KOL_KOTA,
+                                            buat_tabel_item(kota, alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_PROVINSI,
                                             buat_tabel_item(provinsi, alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_TOTAL_TRANSAKSI,
-                                            buat_tabel_item(total_transaksi, editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                            buat_tabel_item(total_transaksi, editable=False,
+                                                            alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_PEMBAYARAN,
                                             buat_tabel_item(pembayaran, alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_penerima.setItem(baris, self.KOL_STATUS_TAGIHAN,
-                                            buat_tabel_item(status, editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                            buat_tabel_item(status, editable=False,
+                                                            alignment=Qt.AlignmentFlag.AlignCenter))
 
                 # Pewarnaan untuk pelanggan Blacklist
                 if status == "BLACKLIST":
@@ -407,19 +428,22 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
                 self.tabel_histori.insertRow(baris)
                 ongkir_formatted = format_ke_rupiah(h[7]) if h[7] else "0"
 
-                # 💡 Menggunakan buat_tabel_item & format_tanggal_ke_ui
                 self.tabel_histori.setItem(baris, 0, buat_tabel_item(format_tanggal_ke_ui(h[0]), editable=False,
                                                                      alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_histori.setItem(baris, 1,
-                                           buat_tabel_item(str(h[1]), editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                           buat_tabel_item(str(h[1]), editable=False,
+                                                           alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_histori.setItem(baris, 2, buat_tabel_item(str(h[2]).upper(), editable=False,
                                                                      alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
                 self.tabel_histori.setItem(baris, 3,
-                                           buat_tabel_item(str(h[3]), editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                           buat_tabel_item(str(h[3]), editable=False,
+                                                           alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_histori.setItem(baris, 4,
-                                           buat_tabel_item(str(h[4]), editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                           buat_tabel_item(str(h[4]), editable=False,
+                                                           alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_histori.setItem(baris, 5,
-                                           buat_tabel_item(str(h[5]), editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
+                                           buat_tabel_item(str(h[5]), editable=False,
+                                                           alignment=Qt.AlignmentFlag.AlignCenter))
                 self.tabel_histori.setItem(baris, 6, buat_tabel_item(ongkir_formatted, editable=False,
                                                                      alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
 
@@ -437,8 +461,8 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
 
     def simpan_lebar_kolom(self, t):
         if self._sedang_menerapkan_zoom: return
-        widths = self._lebar_dasar_tabel(t)  # 💡 Dari ZoomTableMixin
-        self._perbarui_cache_lebar_zoom(t, widths)  # 💡 Dari ZoomTableMixin
+        widths = self._lebar_dasar_tabel(t)
+        self._perbarui_cache_lebar_zoom(t, widths)
         self._settings_kolom().setValue("lebar_kolom_penerima", widths)
 
     def load_lebar_kolom(self, t):
@@ -458,8 +482,8 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
 
     def simpan_lebar_kolom_histori(self, t):
         if self._sedang_menerapkan_zoom: return
-        widths = self._lebar_dasar_tabel(t)  # 💡 Dari ZoomTableMixin
-        self._perbarui_cache_lebar_zoom(t, widths)  # 💡 Dari ZoomTableMixin
+        widths = self._lebar_dasar_tabel(t)
+        self._perbarui_cache_lebar_zoom(t, widths)
         self._settings_kolom().setValue("lebar_kolom_histori_penerima", widths)
 
     def load_lebar_kolom_histori(self, t):
@@ -481,28 +505,50 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
     # TEMA DAN ZOOM SEMUA ELEMEN
     # ============================================================
 
+    @staticmethod
+    def _style_tanpa_font_size(style):
+        """Pertahankan seluruh QSS tema, tetapi jangan biarkan font-size menimpa konfigurasi global."""
+        return re.sub(
+            r"font-size\s*:\s*[^;}]+;?",
+            "",
+            style or "",
+            flags=re.IGNORECASE,
+        )
+
     def sesuaikan_tema_lokal(self):
         win = self.window()
         is_dark = win.current_theme == "dark" if win and hasattr(win, 'current_theme') else False
         z = zoom_helper.dapatkan_zoom_level("TabKontak")
 
-        # 💡 Mengambil styles dari module terpusat
         st = get_kontak_riwayat_styles(is_dark)
 
-        # Terapkan Style
-        self.panel_kanan.setStyleSheet(st["panel"])
-        self._set_style_dasar_zoom(self.lbl_judul, st["judul"])
-        self._set_style_dasar_zoom(self.lbl_judul_histori, st["judul_histori"])
-        self._set_style_dasar_zoom(self.txt_cari, st["input"])
-        self._set_style_dasar_zoom(self.txt_cari_histori, st["input"])
+        # Perbarui style splitter menggunakan helper
+        perbarui_semua_style_splitter(self, is_dark)
 
-        # --- RESET MARGIN (ANTI-OVERFLOW) ---
-        self.layout().setContentsMargins(10, 10, 10, 10)
-        self.layout().setSpacing(0)
-        self.panel_kiri.layout().setContentsMargins(0, 0, 5, 0)
-        self.panel_kiri.layout().setSpacing(10)
-        self.panel_kanan.layout().setContentsMargins(10, 10, 10, 10)
-        self.panel_kanan.layout().setSpacing(10)
+        self._set_style_dasar_zoom(
+            self.lbl_judul,
+            self._style_tanpa_font_size(st["judul"]),
+        )
+        self._set_style_dasar_zoom(
+            self.lbl_judul_histori,
+            self._style_tanpa_font_size(st["judul_histori"]),
+        )
+        self._set_style_dasar_zoom(
+            self.txt_cari,
+            self._style_tanpa_font_size(st["input"]),
+        )
+        self._set_style_dasar_zoom(
+            self.txt_cari_histori,
+            self._style_tanpa_font_size(st["input"]),
+        )
+
+        # Ukuran font elemen non-tabel mengikuti konfigurasi global.
+        font_sizes = get_global_font_sizes(0)
+        master_font = get_master_font()
+        self.lbl_judul.setFont(QFont(master_font, font_sizes["sz_title"]))
+        self.lbl_judul_histori.setFont(QFont(master_font, font_sizes["sz_total"]))
+        self.txt_cari.setFont(QFont(master_font, font_sizes["sz_input"]))
+        self.txt_cari_histori.setFont(QFont(master_font, font_sizes["sz_input"]))
 
         # Blokir signal tabel sebelum zoom agar lebar tabel tidak "lompat"
         self.tabel_penerima.horizontalHeader().blockSignals(True)
@@ -510,7 +556,17 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
 
         self._sedang_menerapkan_zoom = True
         try:
-            zoom_helper.terapkan_zoom_semua_elemen(container_widget=self, z=z, is_dark=is_dark)
+            # Terapkan style dan zoom hanya pada tabel kiri dan kanan.
+            zoom_helper.terapkan_zoom_semua_elemen(
+                container_widget=self.tabel_penerima,
+                z=z,
+                is_dark=is_dark,
+            )
+            zoom_helper.terapkan_zoom_semua_elemen(
+                container_widget=self.tabel_histori,
+                z=z,
+                is_dark=is_dark,
+            )
         finally:
             self._sedang_menerapkan_zoom = False
             self.tabel_penerima.horizontalHeader().blockSignals(False)
@@ -520,30 +576,6 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         zoom_helper._skalakan_kolom_tableview(self.tabel_penerima, z)
         zoom_helper._skalakan_kolom_tableview(self.tabel_histori, z)
 
-        # --- KUNCI PAKSA INPUT PENCARIAN ---
-        ukuran_statis = int(get_global_font_sizes(0)["sz_input"])
-
-        font_cari_kiri = self.txt_cari.font()
-        font_cari_kiri.setPointSize(ukuran_statis)
-        self.txt_cari.setFont(font_cari_kiri)
-        self.txt_cari.setFixedHeight(30)
-        self.txt_cari.setFixedWidth(230)
-
-        font_cari_kanan = self.txt_cari_histori.font()
-        font_cari_kanan.setPointSize(ukuran_statis)
-        self.txt_cari_histori.setFont(font_cari_kanan)
-        self.txt_cari_histori.setFixedHeight(30)
-
-        # --- KUNCI MATI MARGIN LAYOUT ---
-        self.layout().setContentsMargins(10, 10, 10, 10)
-        self.layout().setSpacing(0)
-        self.panel_kiri.layout().setContentsMargins(0, 0, 5, 0)
-        self.panel_kiri.layout().setSpacing(10)
-        self.panel_kanan.layout().setContentsMargins(10, 10, 10, 10)
-        self.panel_kanan.layout().setSpacing(10)
-
-        # Placeholder miring hanya ketika input kosong.
-        # Saat pengguna mulai mengetik, font kembali normal.
         terap_semua_placeholder_dinamis(
             self,
             is_dark=is_dark,

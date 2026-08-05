@@ -1,13 +1,13 @@
-# themes/top_right.py
+# themes/components/top_right.py
 """Style widget pada bagian kanan atas aplikasi."""
-from utils.typography import MASTER_FONT
+from utils.typography import get_master_font
 
 
 def get_top_right_styles(is_dark: bool) -> tuple:
     if is_dark:
         btn_style = f"""
             QPushButton {{
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 background-color: #1e293b;
                 color: white;
                 border: 1px solid #24334d;
@@ -27,7 +27,7 @@ def get_top_right_styles(is_dark: bool) -> tuple:
     else:
         btn_style = f"""
             QPushButton {{
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 background-color: #edf2f7;
                 color: #2d3748;
                 border: 1px solid #cbd5e1;
@@ -44,7 +44,7 @@ def get_top_right_styles(is_dark: bool) -> tuple:
         """
 
     lbl_style = f"""
-        font-family: '{MASTER_FONT}';
+        font-family: '{get_master_font()}';
         font-size: 13px;
         color: #f59e0b;
         padding: 5px;

@@ -1,7 +1,7 @@
 # themes/shell.py
 """Style ringan untuk kerangka utama aplikasi."""
 
-from utils.typography import MASTER_FONT
+from utils.typography import get_master_font
 
 
 def get_main_shell_styles(is_dark: bool) -> dict:
@@ -58,7 +58,7 @@ def get_main_shell_styles(is_dark: bool) -> dict:
             QTabBar#MainTabBar::tab {{
                 background-color: {bg_tab};
                 color: {text_muted};
-                font-family: "{MASTER_FONT}";
+                font-family: "{get_master_font()}";
                 font-size: 12px;
                 font-weight: 500;
                 min-width: 130px;

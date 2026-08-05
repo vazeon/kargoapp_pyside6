@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -42,9 +41,9 @@ from config import CURRENT_SESSION, muat_pengaturan_sistem
 import services.database_service as db_service
 
 from themes.modules.invoice import get_invoice_styles
-from themes.calendar import terapkan_style_kalender
+from themes.components.calendar import terapkan_style_kalender
 
-from utils import typography
+from utils.splitter_helper import buat_splitter
 from utils.typography import get_global_font_sizes
 from utils.printer.print_invoice import tampilkan_preview_invoice, simpan_invoice_pdf
 from utils import zoom as zoom_helper
@@ -494,9 +493,10 @@ class ColumnDesignerDialog(QDialog):
         layout = QVBoxLayout(self)
 
         title = QLabel("Susun Kolom yang Ditampilkan pada Invoice")
+        ukuran_font_dialog = get_global_font_sizes(0)
         title.setStyleSheet(
             f"""
-                font-size: 15px;
+                font-size: {ukuran_font_dialog["sz_total"]}px;
                 font-weight: bold;
             """
         )
@@ -925,24 +925,20 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
     def init_ui(self):
         layout_utama = QHBoxLayout(self)
-        layout_utama.setContentsMargins(15, 15, 15, 15)
-
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setHandleWidth(2)
-        layout_utama.addWidget(self.splitter)
+        layout_utama.setContentsMargins(8, 8, 8, 8)
 
         # PANEL KIRI
         self.panel_kiri = QWidget()
         self.panel_kiri.setMinimumWidth(260)
         self.panel_kiri.setMaximumWidth(520)
         layout_kiri = QVBoxLayout(self.panel_kiri)
-        layout_kiri.setContentsMargins(0, 0, 10, 0)
+        layout_kiri.setContentsMargins(0, 0, 8, 0)
 
         self.lbl_title_histori = QLabel("📜 Histori Invoice")
         layout_kiri.addWidget(self.lbl_title_histori)
 
         self.txt_cari_invoice = QLineEdit()
-        self.txt_cari_invoice.setPlaceholderText("Cari No. Invoice / Pelanggan...")
+        self.txt_cari_invoice.setPlaceholderText("Cari invoice...")
         layout_kiri.addWidget(self.txt_cari_invoice)
 
         self.tabel_histori_invoice = QTableWidget()
@@ -974,7 +970,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self.panel_kanan.setMinimumWidth(700)
         self.panel_kanan.setMaximumWidth(1800)
         layout_kanan = QVBoxLayout(self.panel_kanan)
-        layout_kanan.setContentsMargins(10, 0, 0, 0)
+        layout_kanan.setContentsMargins(8, 0, 0, 0)
 
         self.lbl_title_editor = QLabel("DRAFT INVOICE BARU")
         layout_kanan.addWidget(self.lbl_title_editor)
@@ -1000,7 +996,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self.date_invoice = QDateEdit(QDate.currentDate())
         self.date_invoice.setCalendarPopup(True)
         self.date_invoice.setDisplayFormat("dd/MM/yyyy")
-        self.date_invoice.setMinimumHeight(34)
 
         self.cmb_tipe_invoice = QComboBox()
         self.cmb_tipe_invoice.addItems(list(self.template_configs.keys()))
@@ -1020,6 +1015,23 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
         self.txt_penanda_tangan = QLineEdit()
         self.txt_penanda_tangan.setPlaceholderText("Nama penanda tangan")
+
+        tinggi_input = 36
+
+        semua_input_invoice = [
+            self.txt_client,
+            self.txt_ship_to,
+            self.txt_no_invoice,
+            self.date_invoice,
+            self.cmb_tipe_invoice,
+            self.cmb_pajak,
+            self.txt_payment_info,
+            self.txt_catatan,
+            self.txt_penanda_tangan,
+        ]
+
+        for widget in semua_input_invoice:
+            widget.setFixedHeight(tinggi_input)
 
         grid_header.addWidget(QLabel("Bill To"), 0, 0)
         grid_header.addWidget(self.txt_client, 0, 1)
@@ -1097,7 +1109,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
         # Tombol aksi
         hbox_aksi = QHBoxLayout()
-        self.btn_preview = QPushButton("👁 Preview")
+        self.btn_preview = QPushButton("Preview")
         self.btn_simpan_db = QPushButton("💾 Simpan Invoice")
         self.btn_cetak = QPushButton("🖨️ Cetak Invoice")
         self.menu_cetak = QMenu(self)
@@ -1123,12 +1135,16 @@ class TabInvoice(ZoomTableMixin, QWidget):
             hbox_aksi.addWidget(button)
         layout_kanan.addLayout(hbox_aksi)
 
-        self.splitter.addWidget(self.panel_kiri)
-        self.splitter.addWidget(self.panel_kanan)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes([340, 1000])
+        self.splitter = buat_splitter(
+            self.panel_kiri,
+            self.panel_kanan,
+            orientation=Qt.Orientation.Horizontal,
+            ukuran_awal=(340, 1000),
+            bisa_diciutkan=False,
+            parent=self,
+        )
+
+        layout_utama.addWidget(self.splitter)
 
         # Signal utama
         self.txt_cari_invoice.textChanged.connect(self.filter_histori_invoice)
@@ -2153,6 +2169,25 @@ class TabInvoice(ZoomTableMixin, QWidget):
             quote=True,
         )
 
+    @staticmethod
+    def _font_family_aplikasi() -> str:
+        """Nama font aktual yang sudah diterapkan ke QApplication."""
+        app = QApplication.instance()
+        if app is None:
+            return "sans-serif"
+
+        nama_font = str(app.font().family() or "").strip()
+        return nama_font or "sans-serif"
+
+    @classmethod
+    def _font_family_css(cls) -> str:
+        """Nama font aktif yang aman disisipkan ke CSS bertanda kutip."""
+        return (
+            cls._font_family_aplikasi()
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+        )
+
     def _visible_rows(self):
         rows = []
         for row in range(self.tabel_item_invoice.rowCount()):
@@ -2273,6 +2308,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
         notes_html = f'<div class="notes"><b>Catatan:</b> {self._esc(notes)}</div>' if notes else ""
         payment_html = self._esc(payment).replace("\n", "<br>") if payment else "-"
+        font_family_css = self._font_family_css()
 
         # PENGGUNAAN HELPER DALAM F-STRING TABEL HTML BAWAH (Rp {format_ke_rupiah(subtotal)})
         return f"""
@@ -2283,7 +2319,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
 <style>
     @page {{ size: A4; margin: 8mm; }}
     * {{ box-sizing: border-box; }}
-    body {{ font-family: "{typography.MASTER_FONT}"; color: #111; font-size: 10pt; margin: 0; }}
+    body {{ font-family: "{font_family_css}"; color: #111; font-size: 10pt; margin: 0; }}
     .page {{ width: 100%; }}
     .company {{ width: 100%; border: 1px solid #111; border-bottom: none; border-collapse: collapse; }}
     .company td {{ padding: 7px 10px; vertical-align: middle; }}
@@ -2411,8 +2447,9 @@ class TabInvoice(ZoomTableMixin, QWidget):
                     "@page { size: A4; margin: 8mm; }",
                     "@page { size: 9.5in 5.5in; margin: 4mm; }",
                 )
+                font_family_css = self._font_family_css()
                 html_content = html_content.replace(
-                    f'body {{ font-family: "{typography.MASTER_FONT}"; color: #111; font-size: 10pt; margin: 0; }}',
+                    f'body {{ font-family: "{font_family_css}"; color: #111; font-size: 10pt; margin: 0; }}',
                     'body { font-family: "Courier New", monospace; color: #000; font-size: 9pt; font-weight: bold; margin: 0; }',
                 )
 
@@ -2498,7 +2535,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self.lbl_subtotal.setStyleSheet(st_fixed["lbl_subtotal"])
         self.lbl_pajak_nominal.setStyleSheet(st_fixed["lbl_subtotal"])
         self.lbl_total_tagihan.setStyleSheet(st_fixed["lbl_total_tagihan"])
-        self.splitter.setStyleSheet(st_fixed["splitter"])
 
         fixed_inputs = [
             self.txt_cari_invoice,
@@ -2513,8 +2549,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             widget.setStyleSheet(st_fixed["input"])
 
         font_qss = f"""
-            font-size:{font_sizes_fixed['sz_input']}px;
-            font-family:'{typography.MASTER_FONT}';
+            font-size: {font_sizes_fixed['sz_input']}px;
         """
         self.cmb_tipe_invoice.setStyleSheet(font_qss)
         self.cmb_pajak.setStyleSheet(font_qss)
@@ -2555,11 +2590,11 @@ class TabInvoice(ZoomTableMixin, QWidget):
         try:
             for tabel, tinggi_dasar in konfigurasi_tabel:
                 font_tabel = tabel.font()
-                font_tabel.setPointSize(font_sizes_zoomed["sz_base"])
+                font_tabel.setPixelSize(font_sizes_zoomed["sz_base"])
                 tabel.setFont(font_tabel)
 
                 font_header = tabel.horizontalHeader().font()
-                font_header.setPointSize(font_sizes_zoomed["sz_base"])
+                font_header.setPixelSize(font_sizes_zoomed["sz_base"])
                 tabel.horizontalHeader().setFont(font_header)
                 tabel.verticalHeader().setFont(font_header)
 

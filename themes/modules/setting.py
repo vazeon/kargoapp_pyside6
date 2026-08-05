@@ -1,5 +1,5 @@
 # themes/modules/setting.py
-from utils.typography import MASTER_FONT
+from utils.typography import get_master_font
 
 
 def get_setting_styles(
@@ -64,7 +64,7 @@ def get_setting_styles(
             QGroupBox {{
                 font-weight: bold;
                 font-size: {sz_title}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 color: {text_title};
                 background-color: {bg_card};
                 border: 1px solid {border};
@@ -87,14 +87,14 @@ def get_setting_styles(
         'form_label': f"""
             color: {lbl_color};
             font-size: {sz_base}px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
             font-weight: 600;
         """,
         'input_readonly': f"""
             QLineEdit {{
                 padding: 8px 12px;
                 font-size: {sz_base}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 border: 1px solid {border};
                 border-radius: 6px;
                 background-color: {bg_alt_row};
@@ -106,7 +106,7 @@ def get_setting_styles(
             QLineEdit, QTextEdit, QComboBox {{
                 padding: 8px 12px;
                 font-size: {sz_input}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 border: 1px solid {border};
                 border-radius: 6px;
                 background-color: {bg_input};
@@ -146,7 +146,7 @@ def get_setting_styles(
                 background-color: #2563eb;
                 color: #ffffff;
                 font-size: {sz_input}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 font-weight: bold;
                 letter-spacing: 0.8px;
                 border: none;
@@ -170,7 +170,7 @@ def get_setting_styles(
                 background-color: transparent;
                 color: #2563eb;
                 font-size: {sz_base}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 font-weight: 600;
                 border: 1px solid #2563eb;
                 border-radius: 6px;
@@ -190,7 +190,7 @@ def get_setting_styles(
                 background-color: transparent;
                 border: none;
                 outline: none;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 font-size: {sz_input}px;
             }}
             QListWidget::item {{
@@ -212,7 +212,7 @@ def get_setting_styles(
             QGroupBox {{
                 font-weight: bold;
                 font-size: {sz_title}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 color: {page_title_color};
                 background-color: transparent;
                 border: none;
@@ -226,7 +226,7 @@ def get_setting_styles(
         'lbl_page_title': f"""
             font-size: {sz_title + 8}px;
             font-weight: bold;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
             margin-bottom: 20px;
             color: {page_title_color};
         """,

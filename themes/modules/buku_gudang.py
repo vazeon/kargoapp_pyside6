@@ -5,11 +5,11 @@ from typing import Dict, Optional, Tuple
 
 from PySide6.QtGui import QColor
 
-from utils.typography import MASTER_FONT
+from utils.typography import get_master_font
 
 DIALOG_PILIH_PENAGIH_STYLE = f"""
     font-size: 13px;
-    font-family: '{MASTER_FONT}';
+    font-family: '{get_master_font()}';
 """
 
 DIALOG_PILIH_PENAGIH_INPUT_STYLE = f"""
@@ -161,7 +161,7 @@ def get_buku_gudang_styles(
     return {
         "lbl_judul": f"""
             color: {title_color};
-            font: bold {sz_title}px '{MASTER_FONT}';
+            font: bold {sz_title}px '{get_master_font()}';
             margin-bottom: 2px;
         """,
 
@@ -173,7 +173,7 @@ def get_buku_gudang_styles(
             border: 1px solid {input_border};
             padding: 6px 12px;
             border-radius: 6px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
 
         "txt_cari": f"""
@@ -183,7 +183,7 @@ def get_buku_gudang_styles(
             border: 1px solid {input_border};
             padding: 6px;
             border-radius: 4px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
 
         "inline_editor": f"""
@@ -203,7 +203,7 @@ def get_buku_gudang_styles(
                 color: {table_text};
                 gridline-color: {table_grid};
                 font-size: {sz_base}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QHeaderView::section {{
                 background-color: {header_bg};
@@ -212,7 +212,7 @@ def get_buku_gudang_styles(
                 font-size: {sz_base}px;
                 font-weight: bold;
                 padding: 6px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QTableWidget::item:selected {{
                 background-color: {selection_bg};
@@ -228,7 +228,7 @@ def get_buku_gudang_menu_style(font_size: Optional[int] = None) -> str:
     return f"""
         QMenu {{
             padding: 5px;
-            {ukuran} font-family: '{MASTER_FONT}';
+            {ukuran} font-family: '{get_master_font()}';
         }}
     """
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from utils.typography import MASTER_FONT
+from utils.typography import get_master_font
 
 
 def get_invoice_styles(
@@ -28,7 +28,7 @@ def get_invoice_styles(
                 color:#f8fafc;
                 gridline-color:#334155;
                 font-size:{size_base}px;
-                font-family:'{MASTER_FONT}';
+                font-family:'{get_master_font()}';
             }}
             QHeaderView::section {{
                 background:#1e293b;
@@ -49,7 +49,7 @@ def get_invoice_styles(
                 color:#f8fafc;
                 gridline-color:#4c525e;
                 font-size:{size_base}px;
-                font-family:'{MASTER_FONT}';
+                font-family:'{get_master_font()}';
             }}
             QHeaderView::section {{
                 background:#2563eb;
@@ -71,7 +71,7 @@ def get_invoice_styles(
                 color:#0f172a;
                 gridline-color:#e2e8f0;
                 font-size:{size_base}px;
-                font-family:'{MASTER_FONT}';
+                font-family:'{get_master_font()}';
             }}
             QHeaderView::section {{
                 background:#243752;
@@ -92,7 +92,7 @@ def get_invoice_styles(
                 color:#0f172a;
                 gridline-color:#cbd5e1;
                 font-size:{size_base}px;
-                font-family:'{MASTER_FONT}';
+                font-family:'{get_master_font()}';
             }}
             QHeaderView::section {{
                 background:#2563eb;
@@ -110,7 +110,7 @@ def get_invoice_styles(
     button_qss = f"""
         QPushButton {{
             font-size:{size_base}px;
-            font-family:'{MASTER_FONT}';
+            font-family:'{get_master_font()}';
             font-weight:600;
             padding:7px 12px;
             border-radius:5px;
@@ -134,31 +134,31 @@ def get_invoice_styles(
         "lbl_title_histori": f"""
             font-size:{size_title}px;
             font-weight:bold;
-            font-family:'{MASTER_FONT}';
+            font-family:'{get_master_font()}';
             color:{title_color};
         """,
         "lbl_title_editor": f"""
             font-size:{size_title + 1}px;
             font-weight:bold;
-            font-family:'{MASTER_FONT}';
+            font-family:'{get_master_font()}';
             color:{accent};
         """,
         "lbl_subtotal": f"""
             font-size:{size_base}px;
             font-weight:bold;
-            font-family:'{MASTER_FONT}';
+            font-family:'{get_master_font()}';
             color:{text_color};
         """,
         "lbl_total_tagihan": f"""
             font-size:{size_total}px;
             font-weight:bold;
-            font-family:'{MASTER_FONT}';
+            font-family:'{get_master_font()}';
             color:#dc2626;
             margin-top:4px;
         """,
         "input": f"""
             font-size:{size_input}px;
-            font-family:'{MASTER_FONT}';
+            font-family:'{get_master_font()}';
             padding:6px;
             background:{input_bg};
             color:{title_color};
@@ -261,11 +261,4 @@ def get_invoice_styles(
             }}
         """,
 
-        "splitter": f"""
-            QSplitter::handle {{
-                background-color: {input_border};
-                margin: 14px 1px;
-                border-radius: 1px;
-            }}
-        """,
     }

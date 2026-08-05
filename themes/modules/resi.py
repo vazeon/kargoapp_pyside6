@@ -1,5 +1,5 @@
 # themes/modules/resi.py
-from utils.typography import MASTER_FONT, get_global_font_sizes
+from utils.typography import get_master_font, get_global_font_sizes
 
 
 def get_resi_static_styles(is_dark: bool) -> dict:
@@ -45,7 +45,7 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
             QGroupBox {{
                 font-weight: bold;
                 font-size: {sz_sm}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 color: {group_text};
                 border: 1px solid {border_card};
                 border-radius: 8px;
@@ -66,7 +66,7 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
             font-size: {sz_card_title}px;
             border: none;
             background: transparent;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
         "label_bottom": f"""
             color: {txt_bottom_color};
@@ -74,7 +74,7 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
             font-weight: normal;
             border: none;
             background: transparent;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
         "card": f"""
             background-color: {bg_card};
@@ -122,7 +122,7 @@ def get_resi_detail_barang_theme(
         "header": f"""
             QHeaderView::section {{
                 font-size: {sz_base}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 background-color: {header_bg};
                 color: #ffffff;
                 font-weight: bold;
@@ -136,7 +136,7 @@ def get_resi_detail_barang_theme(
         "cell_input": f"""
             QLineEdit {{
                 font-size: {sz_base}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 background-color: {table_bg};
                 color: {table_text};
                 border: 1px solid {input_border};
@@ -168,7 +168,7 @@ def get_btn_simpan_cetak_style(z: int = 0) -> str:
             padding: 10px 40px;
             border-radius: 6px;
             border: none;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QPushButton:hover {{
             background-color: #16a34a;
@@ -240,7 +240,7 @@ def get_resi_styles(
             border: 1px solid {c_bord};
             border-radius: 4px;
             padding: 6px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus {{
             border: 1px solid {c_foc};
@@ -268,7 +268,7 @@ def get_resi_styles(
             border-radius: 8px;
             margin-top: 2px;
             padding: 8px 12px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QGroupBox::title {{
             color: {c_text};
@@ -278,7 +278,7 @@ def get_resi_styles(
             font-size: {sz_sm}px;
             font-weight: bold;
             background-color: transparent;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         {input_style}
     """
@@ -293,7 +293,7 @@ def get_resi_styles(
             border-radius: 8px;
             margin-top: 2px;
             padding: 6px 12px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QGroupBox::title {{
             color: {c_text};
@@ -301,7 +301,7 @@ def get_resi_styles(
         QLabel {{
             color: {c_text_mut};
             font-size: {sz_sm}px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
     """
 
@@ -314,25 +314,25 @@ def get_resi_styles(
             font-size: {sz_title}px;
             font-weight: bold;
             margin-bottom: 1px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
         "lbl_tgl_tag": f"""
             color: {c_text_mut};
             font-weight: bold;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
             font-size: {sz_tag}px;
         """,
         "lbl_resi_tag": f"""
             font-size: {sz_sm}px;
             color: {c_text_dim};
             font-weight: bold;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
         "lbl_histori_title": f"""
             color: {c_text};
             font-size: {sz_base + 1}px;
             font-weight: bold;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
         "txt_resi_display": f"""
             background-color: {c_resi_bg};
@@ -343,12 +343,12 @@ def get_resi_styles(
             font-weight: bold;
             font-size: {sz_total}px;
             letter-spacing: 1px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         """,
         "date_input": f"""
             QDateEdit {{
                 font-size: {sz_input}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 padding: 2px 10px;
                 border: 1px solid {c_bord};
                 border-radius: 4px;
@@ -359,7 +359,7 @@ def get_resi_styles(
         "date_histori": f"""
             QDateEdit {{
                 font-size: {sz_input}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
                 padding: 2px 10px;
                 background-color: {c_hist_bg};
                 color: {c_text_mut};
@@ -375,7 +375,7 @@ def get_resi_styles(
                 border-radius: 6px;
                 padding: 5px;
                 font-size: {sz_base}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QListWidget::item {{
                 padding: {6 + (z // 2)}px;
@@ -389,7 +389,7 @@ def get_resi_styles(
                 border: 1px solid {c_bord};
                 border-radius: 4px;
                 padding: 6px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QLineEdit[custom_italic="true"][is_empty="true"] {{
                 font-style: italic;
@@ -408,7 +408,7 @@ def get_resi_styles(
                 border-radius: 4px;
                 padding: 4px;
                 font-size: {sz_sm}px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
                 background-color: #dc2626;
@@ -432,7 +432,7 @@ def get_resi_styles(
                 padding: 6px 12px;
                 border-radius: 4px;
                 font-weight: bold;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
                 background-color: {c_btn_add_hover_bg};
@@ -450,7 +450,7 @@ def get_resi_styles(
                 padding: 6px 12px;
                 border-radius: 4px;
                 font-weight: bold;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
                 background-color: {c_btn_del_hover_bg};
@@ -469,7 +469,7 @@ def get_resi_styles(
                 background-color: {c_bg};
                 border: 1px solid {c_bord};
                 padding: 6px;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QLineEdit[custom_italic="true"][is_empty="true"] {{
                 font-style: italic;
@@ -481,14 +481,6 @@ def get_resi_styles(
         "input_utama": input_style,
         "scroll_kiri": static_styles["scroll_kiri"],
 
-        "splitter": f"""
-            QSplitter::handle {{
-                background-color: {c_bord};
-                margin: 14px 1px;
-                border-radius: 1px;
-            }}
-        """,
-
         "btn_generate_simpan": get_btn_simpan_cetak_style(z),
         "lbl_reset_form": f"""
             QPushButton {{
@@ -499,7 +491,7 @@ def get_resi_styles(
                 padding: 5px 9px;
                 font-weight: 600;
                 text-align: left;
-                font-family: '{MASTER_FONT}';
+                font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
                 color: #b91c1c;
@@ -537,7 +529,7 @@ def get_btn_clear_container_style(is_dark: bool = False, sz_sm: int = 12) -> str
             font-size: 16pt;
             font-weight: 400;
             padding: 0px;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
         QToolButton:hover {{
             color: {hover_color};
@@ -557,6 +549,6 @@ def get_btn_clear_container_style(is_dark: bool = False, sz_sm: int = 12) -> str
             border-radius: 3px;
             font-size: 11px;
             font-weight: normal;
-            font-family: '{MASTER_FONT}';
+            font-family: '{get_master_font()}';
         }}
     """

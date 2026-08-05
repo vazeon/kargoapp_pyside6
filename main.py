@@ -1,10 +1,8 @@
 # main.py
 import sys
-import os
 import faulthandler
 import traceback
 from PySide6.QtCore import QLocale, QSettings, Qt
-from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,13 +20,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from utils.typography import get_master_font
+from utils.typography import (
+    APPLICATION_NAME,
+    ORGANIZATION_NAME,
+    konfigurasi_font_aplikasi,
+)
+from utils.splitter_helper import perbarui_semua_style_splitter
 
 from config import DATA_CLIENT, CURRENT_SESSION, muat_pengaturan_sistem
 
 from themes.base import BASE_STYLE
 from themes.shell import get_main_shell_styles
-from themes.top_right import get_top_right_styles
+from themes.components.top_right import get_top_right_styles
 from themes.palette import get_theme_palette
 from themes.scrollbar import GlobalScrollbarManager
 
@@ -48,8 +51,8 @@ ENABLE_GLOBAL_SCROLLBAR_STYLE = False
 
 
 class MainWindow(QMainWindow):
-    SETTINGS_ORGANIZATION = "AplikasiEkspedisi"
-    SETTINGS_APPLICATION = "PengaturanUI"
+    SETTINGS_ORGANIZATION = ORGANIZATION_NAME
+    SETTINGS_APPLICATION = APPLICATION_NAME
     THEME_LIGHT = "light"
     THEME_DARK = "dark"
     ZOOM_MIN = -4
@@ -492,6 +495,11 @@ class MainWindow(QMainWindow):
                 force=force,
             )
 
+        perbarui_semua_style_splitter(
+            self,
+            is_dark,
+        )
+
     def buka_dasbor_pengaturan(self):
         dialog_lama = getattr(self, "dialog_setting", None)
         if dialog_lama is not None:
@@ -676,48 +684,6 @@ class MainWindow(QMainWindow):
             super().wheelEvent(event)
 
 
-def load_fonts():
-    font_folder = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "assets",
-        "fonts",
-    )
-
-    if not os.path.exists(font_folder):
-        print(
-            f"❌ Folder font tidak ditemukan: {font_folder}"
-        )
-        return
-
-    for filename in sorted(os.listdir(font_folder)):
-        if not filename.lower().endswith((".ttf", ".otf")):
-            continue
-
-        font_path = os.path.join(
-            font_folder,
-            filename,
-        )
-
-        font_id = QFontDatabase.addApplicationFont(
-            font_path
-        )
-
-        if font_id == -1:
-            print(
-                f"❌ Font gagal dimuat: {filename}"
-            )
-            continue
-
-        families = QFontDatabase.applicationFontFamilies(
-            font_id
-        )
-
-        print(
-            f"✅ {filename} → "
-            f"{', '.join(families)}"
-        )
-
-
 def penangkap_error_gaib(error_type, value, traceback_obj):
     import traceback
 
@@ -728,31 +694,6 @@ def penangkap_error_gaib(error_type, value, traceback_obj):
     )
 
 sys.excepthook = penangkap_error_gaib
-
-
-def konfigurasi_font_aplikasi(app):
-    load_fonts()
-
-    font_aktif = get_master_font()
-    font_tersedia = set(QFontDatabase.families())
-
-    if font_aktif not in font_tersedia:
-        print(f"⚠️ Font '{font_aktif}' tidak tersedia.")
-
-        if "Roboto" in font_tersedia:
-            font_aktif = "Roboto"
-        else:
-            font_aktif = app.font().family()
-
-    font_aplikasi = QFont(font_aktif)
-    font_aplikasi.setPointSize(10)
-    font_aplikasi.setWeight(QFont.Weight.Normal)
-    font_aplikasi.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    app.setFont(font_aplikasi)
-
-    print("====================================")
-    print("Font diterapkan:", app.font().family())
-    print("====================================")
 
 
 def jalankan_aplikasi():
