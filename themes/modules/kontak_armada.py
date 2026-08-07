@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-ARMADA_PREVIEW_FOTO_STYLE = f"""
+ARMADA_PREVIEW_FOTO_STYLE = """
     border: 2px dashed #9ca3af;
     border-radius: 8px;
     color: #9ca3af;
@@ -200,7 +200,6 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
             color: white;
             font-weight: bold;
             border-radius: 4px;
-        }}
         }}
         QPushButton:hover {{
             background-color: {warna_btn_utama_hover};

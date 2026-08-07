@@ -29,6 +29,7 @@ from config import CURRENT_SESSION, DATA_CLIENT, refresh_data_client
 import services.database_service as db_service
 
 from themes.modules.setting import get_setting_styles
+from themes.components.combobox import terapkan_popup_bawah_combobox
 
 from utils.typography import (
     get_master_font,
@@ -93,6 +94,13 @@ class TabSettingSistem(QWidget):
         self._build_page_bank()
         self._build_page_cabang()
         self._build_page_font()
+
+        terapkan_popup_bawah_combobox(
+            (
+                self.cmb_format_resi_manual,
+                self.combo_font,
+            )
+        )
 
         self.stacked_widget.addWidget(self.page_general)
         self.stacked_widget.addWidget(self.page_resi)
@@ -164,12 +172,7 @@ class TabSettingSistem(QWidget):
         lbl_hint_logo = QLabel(
             "💡 Teks logo akan tampil dengan satu warna solid yang serasi di seluruh aplikasi.",
         )
-        lbl_hint_logo.setStyleSheet(
-            f"""
-                color: #94a3b8;
-                font-style: italic;
-            """
-        )
+        lbl_hint_logo.setProperty("setting_hint_italic", True)
 
         form_logo.addRow("Teks Logo Utama:", self.txt_logo_aplikasi)
         form_logo.addRow("", lbl_hint_logo)
@@ -445,12 +448,7 @@ class TabSettingSistem(QWidget):
             "Pilih font yang akan digunakan.\n"
             "Restart aplikasi untuk menerapkan."
         )
-        lbl_info.setStyleSheet(
-            f"""
-                color: #94a3b8;
-                font-style: italic;
-            """
-        )
+        lbl_info.setProperty("setting_hint_italic", True)
 
         form_font.addRow(
             "Pilih Font Aplikasi:",
@@ -574,36 +572,22 @@ class TabSettingSistem(QWidget):
         table.setItem(row, 2, QTableWidgetItem(nama))
 
         btn_del = QPushButton("-")
+        btn_del.setProperty("setting_row_delete", True)
 
         if CURRENT_SESSION.get('role', 'ADMIN') != "SUPER_ADMIN":
             btn_del.setEnabled(False)
-            btn_del.setStyleSheet(
-                f"""
-                    color: #94a3b8;
-                    font-size: 26px;
-                    font-weight: bold;
-                    background: transparent;
-                    border: none;
-                """
-            )
         else:
-            font_aktif = get_master_font()
-
-            btn_del.setStyleSheet(
-                f"""
-                    QPushButton {{
-                        color: #ef4444;
-                        font-size: 26px;
-                        font-weight: bold;
-                        background: transparent;
-                        border: none;
-                        font-family: "{font_aktif}";
-                    }}
-                """
-            )
             btn_del.clicked.connect(
                 lambda _, t=table, b=btn_del: self.hapus_baris_via_tombol(t, b),
             )
+
+        styles = getattr(self, "_setting_styles", {})
+        style_key = (
+            "btn_row_delete"
+            if btn_del.isEnabled()
+            else "btn_row_delete_disabled"
+        )
+        btn_del.setStyleSheet(styles.get(style_key, ""))
 
         table.setCellWidget(row, 3, btn_del)
 
@@ -697,6 +681,7 @@ class TabSettingSistem(QWidget):
         sz_base, sz_input, sz_title = 13 + z, 14 + z, 15 + z
 
         s = get_setting_styles(is_dark, sz_base, sz_input, sz_title)
+        self._setting_styles = s
 
         self.sidebar_container.setStyleSheet(s['sidebar_container'])
         self.sidebar_list.setStyleSheet(s['sidebar_list'])
@@ -723,6 +708,8 @@ class TabSettingSistem(QWidget):
         for lbl in self.findChildren(QLabel):
             if lbl.property("is_page_title"):
                 lbl.setStyleSheet(s['lbl_page_title'])
+            elif lbl.property("setting_hint_italic"):
+                lbl.setStyleSheet(s["lbl_info_italic"])
             elif not lbl.property(
                 "is_page_title",
             ) and lbl not in (self._tbl_hint_label,):
@@ -730,10 +717,26 @@ class TabSettingSistem(QWidget):
                     continue
                 lbl.setStyleSheet(s['form_label'])
 
-        # 🎯 FIX INDENTASI: Diikat masuk ke dalam method class
-        for widget_type in (QLineEdit, QTextEdit, QComboBox):
+        # QLineEdit/QTextEdit tetap memakai theme Setting.
+        for widget_type in (QLineEdit, QTextEdit):
             for w in self.findChildren(widget_type):
                 w.setStyleSheet(s['input'])
+
+        # QComboBox sengaja tanpa QSS agar dirender native Fusion/QPalette.
+        # Font tetap mengikuti ukuran TabSetting yang sudah berlaku sebelumnya.
+        for combo in (
+            self.cmb_format_resi_manual,
+            self.combo_font,
+        ):
+            combo.setStyleSheet("")
+            font_combo = combo.font()
+            font_combo.setFamily(get_master_font())
+            font_combo.setPixelSize(max(1, sz_input))
+            combo.setFont(font_combo)
+
+            combo_view = combo.view()
+            if combo_view is not None:
+                combo_view.setFont(font_combo)
 
         self.txt_db_path.setStyleSheet(s['input_readonly'])
 
@@ -744,20 +747,18 @@ class TabSettingSistem(QWidget):
             self.table_np.setStyleSheet(s.get('input', ''))
             self.table_p.setStyleSheet(s.get('input', ''))
 
-            font_aktif = get_master_font()
+            self.btn_add_np.setStyleSheet(s["btn_add_rekening"])
+            self.btn_add_p.setStyleSheet(s["btn_add_rekening"])
 
-            qss_plus = f"""
-                QPushButton {{
-                    color: #3b82f6;
-                    font-size: 26px;
-                    font-weight: bold;
-                    background: transparent;
-                    border: none;
-                    font-family: "{font_aktif}";
-                }}
-            """
-            self.btn_add_np.setStyleSheet(qss_plus)
-            self.btn_add_p.setStyleSheet(qss_plus)
+        for button in self.findChildren(QPushButton):
+            if not button.property("setting_row_delete"):
+                continue
+            style_key = (
+                "btn_row_delete"
+                if button.isEnabled()
+                else "btn_row_delete_disabled"
+            )
+            button.setStyleSheet(s[style_key])
 
         self.validasi_hak_akses_setting()
 

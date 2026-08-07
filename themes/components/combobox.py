@@ -1,55 +1,136 @@
 # themes/components/combobox.py
-
-"""Style QComboBox yang dipakai lintas tab aplikasi."""
-
 from __future__ import annotations
 
+from collections.abc import Iterable
 
-COMBOBOX_STYLE_MARKER = "/* GLOBAL_COMBOBOX_STYLE */"
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QTimer,
+)
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+)
 
 
-def get_combobox_style(is_dark: bool = False) -> str:
-    """Style dropdown QComboBox yang konsisten pada seluruh tab."""
-
-    border = "#4c525e" if is_dark else "#cbd5e1"
-    popup_bg = "#1d2024" if is_dark else "#ffffff"
-    popup_text = "#f8fafc" if is_dark else "#111827"
-
-    return f"""
-        {COMBOBOX_STYLE_MARKER} QComboBox {{
-            padding: 2px;
-        }}
-
-        QComboBox QAbstractItemView {{
-            background-color: {popup_bg};
-            color: {popup_text};
-            border: 1px solid {border};
-            selection-background-color: #2563eb;
-            selection-color: #ffffff;
-            outline: none;
-        }}
+class _PopupBawahFilter(QObject):
+    """
+    Memastikan popup QComboBox selalu dibuka
+    tepat di bawah sisi kiri QComboBox.
     """
 
+    def __init__(self, combo: QComboBox) -> None:
+        super().__init__(combo)
+        self._combo = combo
 
-def terapkan_style_combobox(
-    comboboxes,
-    is_dark: bool = False,
+    def eventFilter(
+        self,
+        watched: QObject,
+        event: QEvent,
+    ) -> bool:
+        if event.type() == QEvent.Type.Show:
+            QTimer.singleShot(
+                0,
+                self._atur_posisi_popup,
+            )
+
+        return False
+
+    def _atur_posisi_popup(self) -> None:
+        combo = self._combo
+
+        if combo is None or not combo.isVisible():
+            return
+
+        view = combo.view()
+
+        if view is None:
+            return
+
+        popup = view.window()
+
+        if popup is None:
+            return
+
+        posisi_bawah = combo.mapToGlobal(
+            QPoint(
+                0,
+                combo.height(),
+            )
+        )
+
+        titik_tengah = combo.mapToGlobal(
+            combo.rect().center()
+        )
+
+        screen = QApplication.screenAt(
+            titik_tengah
+        )
+
+        if screen is None:
+            popup.move(posisi_bawah)
+            return
+
+        area_layar = screen.availableGeometry()
+
+        batas_x_maksimum = (
+            area_layar.right()
+            - popup.width()
+            + 1
+        )
+
+        posisi_x = max(
+            area_layar.left(),
+            min(
+                posisi_bawah.x(),
+                batas_x_maksimum,
+            ),
+        )
+
+        popup.move(
+            posisi_x,
+            posisi_bawah.y(),
+        )
+
+
+def terapkan_popup_bawah_combobox(
+    comboboxes: Iterable[QComboBox],
 ) -> None:
-    """Tambahkan style dropdown tanpa menghapus style dasar modul."""
+    """
+    Memasang pengatur posisi popup pada beberapa QComboBox.
 
-    style_global = get_combobox_style(is_dark)
+    Helper ini tidak mengubah style, ikon, palette,
+    font, atau ukuran QComboBox.
+    """
 
     for combo in comboboxes:
-        if combo is None:
+        if not isinstance(combo, QComboBox):
             continue
 
-        style_dasar = combo.styleSheet().split(
-            COMBOBOX_STYLE_MARKER,
-            1,
-        )[0].rstrip()
+        if getattr(
+            combo,
+            "_popup_bawah_filter",
+            None,
+        ) is not None:
+            continue
 
-        combo.setStyleSheet(
-            f"{style_dasar}\n{style_global}"
-            if style_dasar
-            else style_global
-        )
+        view = combo.view()
+
+        if view is None:
+            continue
+
+        popup = view.window()
+
+        if popup is None:
+            continue
+
+        handler = _PopupBawahFilter(combo)
+
+        popup.installEventFilter(handler)
+
+        # Menjaga instance event filter agar tidak
+        # dibersihkan oleh garbage collector.
+        combo._popup_bawah_filter = handler

@@ -3,7 +3,6 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -15,21 +14,25 @@ from PySide6.QtWidgets import (
 )
 
 from config import CURRENT_SESSION
-
 import services.database_service as db_service
-
 from themes.modules.kontak_armada import get_kontak_riwayat_styles
-
-from utils.typography import get_master_font, get_global_font_sizes
+from utils.typography import get_global_font_sizes_pt, get_master_font
 from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
 from utils.placeholder_helper import terap_semua_placeholder_dinamis
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 from utils.date_ind_format import format_tanggal_ke_ui
+from utils.splitter_helper import buat_splitter, perbarui_semua_style_splitter
 
-# --- Import Helper Splitter ---
-from utils.splitter_helper import buat_splitter
+
+def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
+    """Membuat QFont berbasis point agar konsisten lintas-DPI."""
+    font = QFont(get_master_font())
+    font.setPointSizeF(float(ukuran_pt))
+    font.setBold(tebal)
+    return font
+
 
 class SubTabPengirim(QWidget, ZoomTableMixin):
     KOL_NO = 0
@@ -42,16 +45,11 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     SETTINGS_ORGANIZATION = "EkspedisiApp"
     SETTINGS_APPLICATION = "SubTabMasterPengirim"
 
-    KOLOM_PENCARIAN = (
-        KOL_NAMA_PENGIRIM,
-        KOL_TELEPON,
-        KOL_KOTA,
-        KOL_ALAMAT,
-    )
-
-    # ============================================================
-    # INISIALISASI DAN UI
-    # ============================================================
+    KOLOM_PENCARIAN = (KOL_NAMA_PENGIRIM, KOL_TELEPON, KOL_KOTA, KOL_ALAMAT)
+    HEADER_PENGIRIM = ("NO.", "ID SHIPPER", "NAMA PENGIRIM", "NO. HP", "KOTA", "ALAMAT")
+    HEADER_HISTORI = ("TANGGAL", "NO. RESI", "PENERIMA", "KOLI", "BERAT", "CBM", "ONGKIR")
+    LEBAR_PENGIRIM = (50, 90, 180, 130, 120)
+    LEBAR_HISTORI = (95, 100, 140, 50, 60, 60, 90)
 
     def __init__(self):
         super().__init__()
@@ -60,112 +58,13 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def init_ui(self):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
         layout_utama = QVBoxLayout(self)
         layout_utama.setContentsMargins(0, 0, 0, 0)
         layout_utama.setSpacing(8)
 
-        # --- PANEL KIRI: DATA UTAMA (MASTER PANEL) ---
-        self.panel_kiri = QWidget()
-        self.panel_kiri.setMinimumWidth(400)
-        self.panel_kiri.setMaximumWidth(1400)
-        layout_kiri = QVBoxLayout(self.panel_kiri)
-        layout_kiri.setContentsMargins(8, 8, 8, 8)
-        layout_kiri.setSpacing(8)
+        self.panel_kiri = self._bangun_panel_pengirim()
+        self.panel_kanan = self._bangun_panel_histori()
 
-        # Header Kiri (Utama): Horizontal Layout
-        hbox_header_kiri = QHBoxLayout()
-        self.lbl_judul = QLabel("👤 List Pengirim")
-        self.lbl_judul.setFont(QFont(get_master_font(), 18, QFont.Weight.Bold))  # 14pt (Besar/Dominan)
-        hbox_header_kiri.addWidget(self.lbl_judul)
-        hbox_header_kiri.addStretch()
-
-        self.txt_cari = QLineEdit()
-        self.txt_cari.setPlaceholderText("Cari pengirim...")
-        self.txt_cari.setProperty("zoom_font_key", "sz_input")
-        self.txt_cari.setFixedWidth(230)  # Lebar utama 230px
-        self.txt_cari.setFixedHeight(30)
-        self.txt_cari.textChanged.connect(lambda _t: helper_paksa_kapital_lineedit(self.txt_cari))
-        self.txt_cari.textChanged.connect(self.filter_pencarian_tabel)
-        hbox_header_kiri.addWidget(self.txt_cari)
-        layout_kiri.addLayout(hbox_header_kiri)
-
-        self.tabel_pengirim = QTableWidget()
-        self.tabel_pengirim.setColumnCount(6)
-        self.tabel_pengirim.setHorizontalHeaderLabels([
-            "NO.", "ID SHIPPER", "NAMA PENGIRIM", "NO. HP", "KOTA", "ALAMAT"
-        ])
-        self.tabel_pengirim.verticalHeader().setVisible(False)
-        self.tabel_pengirim.setColumnHidden(self.KOL_ID, True)
-
-        self.tabel_pengirim.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed | QAbstractItemView.EditTrigger.SelectedClicked
-        )
-        self.tabel_pengirim.itemChanged.connect(self.simpan_edit_pengirim_dari_tabel)
-        self.tabel_pengirim.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.tabel_pengirim.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tabel_pengirim.setAlternatingRowColors(True)
-        self.tabel_pengirim.cellClicked.connect(self.pilih_pengirim_tampilkan_histori)
-
-        header_kiri = self.tabel_pengirim.horizontalHeader()
-        header_kiri.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header_kiri.setSectionsClickable(True)
-        header_kiri.setSectionsMovable(False)
-
-        self.load_lebar_kolom(self.tabel_pengirim)
-
-        header_kiri.sectionResized.connect(
-            lambda logicalIndex, oldSize, newSize: self.simpan_lebar_kolom(self.tabel_pengirim)
-        )
-        layout_kiri.addWidget(self.tabel_pengirim)
-
-        # --- PANEL KANAN: HISTORI TRANSAKSI (DETAIL/PENDUKUNG PANEL) ---
-        self.panel_kanan = QWidget()
-        self.panel_kanan.setMinimumWidth(400)
-        self.panel_kanan.setMaximumWidth(1400)
-        self.panel_kanan.setObjectName("panelHistori")
-        layout_kanan = QVBoxLayout(self.panel_kanan)
-        layout_kanan.setContentsMargins(8, 8, 8, 8)
-        layout_kanan.setSpacing(8)
-
-        # Header Kanan (Pendukung): Horizontal Layout dengan hirarki visual lebih rendah
-        hbox_header_kanan = QHBoxLayout()
-        self.lbl_judul_histori = QLabel("📦 Riwayat Pengiriman")
-        self.lbl_judul_histori.setFont(QFont(get_master_font(), 11, QFont.Weight.Bold))  # 11pt (Lebih kecil dari kiri)
-        hbox_header_kanan.addWidget(self.lbl_judul_histori)
-        hbox_header_kanan.addStretch()
-
-        self.txt_cari_histori = QLineEdit()
-        self.txt_cari_histori.setPlaceholderText("Cari di histori ini...")
-        self.txt_cari_histori.setFixedHeight(30)
-        self.txt_cari_histori.setFixedWidth(180)  # Lebih pendek (180px) agar terlihat sekunder
-        self.txt_cari_histori.setProperty("zoom_font_key", "sz_input")
-        self.txt_cari_histori.textChanged.connect(lambda _t: helper_paksa_kapital_lineedit(self.txt_cari_histori))
-        self.txt_cari_histori.textChanged.connect(self.filter_pencarian_histori)
-        hbox_header_kanan.addWidget(self.txt_cari_histori)
-        layout_kanan.addLayout(hbox_header_kanan)
-
-        self.tabel_histori = QTableWidget()
-        self.tabel_histori.setColumnCount(7)
-        self.tabel_histori.setHorizontalHeaderLabels(
-            ["TANGGAL", "NO. RESI", "PENERIMA", "KOLI", "BERAT", "CBM", "ONGKIR"])
-        self.tabel_histori.verticalHeader().setVisible(False)
-        self.tabel_histori.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.tabel_histori.setAlternatingRowColors(True)
-
-        header_kanan = self.tabel_histori.horizontalHeader()
-        header_kanan.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header_kanan.setSectionsClickable(True)
-        header_kanan.setSectionsMovable(False)
-
-        self.load_lebar_kolom_histori(self.tabel_histori)
-
-        header_kanan.sectionResized.connect(
-            lambda logicalIndex, oldSize, newSize: self.simpan_lebar_kolom_histori(self.tabel_histori)
-        )
-        layout_kanan.addWidget(self.tabel_histori)
-
-        # --- GABUNGKAN KE SPLITTER MENGGUNAKAN HELPER ---
         self.splitter = buat_splitter(
             self.panel_kiri,
             self.panel_kanan,
@@ -178,9 +77,105 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         self.refresh_session_ui()
         self.sesuaikan_tema_lokal()
 
-    # ============================================================
-    # REFRESH DAN EVENT
-    # ============================================================
+    def _bangun_panel_pengirim(self):
+        panel = QWidget()
+        panel.setMinimumWidth(400)
+        panel.setMaximumWidth(1400)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.lbl_judul = QLabel("List Pengirim")
+        self.lbl_judul.setFont(
+            _buat_font_pt(get_global_font_sizes_pt(0)["sz_title"], tebal=True)
+        )
+        self.txt_cari = self._buat_input_cari(
+            "Cari pengirim...", 230, self.filter_pencarian_tabel
+        )
+        layout.addLayout(self._buat_header(self.lbl_judul, self.txt_cari))
+
+        self.tabel_pengirim = QTableWidget()
+        self._konfigurasi_tabel(
+            self.tabel_pengirim,
+            self.HEADER_PENGIRIM,
+            editable=True,
+        )
+        self.tabel_pengirim.setColumnHidden(self.KOL_ID, True)
+        self.tabel_pengirim.itemChanged.connect(self.simpan_edit_pengirim_dari_tabel)
+        self.tabel_pengirim.cellClicked.connect(self.pilih_pengirim_tampilkan_histori)
+        self.load_lebar_kolom(self.tabel_pengirim)
+        self.tabel_pengirim.horizontalHeader().sectionResized.connect(
+            lambda _index, _old, _new: self.simpan_lebar_kolom(self.tabel_pengirim)
+        )
+        layout.addWidget(self.tabel_pengirim)
+        return panel
+
+    def _bangun_panel_histori(self):
+        panel = QWidget()
+        panel.setMinimumWidth(400)
+        panel.setMaximumWidth(1400)
+        panel.setObjectName("panelHistori")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.lbl_judul_histori = QLabel("📦 Riwayat Pengiriman")
+        self.lbl_judul_histori.setFont(
+            _buat_font_pt(get_global_font_sizes_pt(0)["sz_total"], tebal=True)
+        )
+        self.txt_cari_histori = self._buat_input_cari(
+            "Cari di histori ini...", 180, self.filter_pencarian_histori
+        )
+        layout.addLayout(self._buat_header(self.lbl_judul_histori, self.txt_cari_histori))
+
+        self.tabel_histori = QTableWidget()
+        self._konfigurasi_tabel(self.tabel_histori, self.HEADER_HISTORI)
+        self.load_lebar_kolom_histori(self.tabel_histori)
+        self.tabel_histori.horizontalHeader().sectionResized.connect(
+            lambda _index, _old, _new: self.simpan_lebar_kolom_histori(self.tabel_histori)
+        )
+        layout.addWidget(self.tabel_histori)
+        return panel
+
+    @staticmethod
+    def _buat_header(label, input_cari):
+        layout = QHBoxLayout()
+        layout.addWidget(label)
+        layout.addStretch()
+        layout.addWidget(input_cari)
+        return layout
+
+    def _buat_input_cari(self, placeholder, lebar, callback):
+        widget = QLineEdit()
+        widget.setPlaceholderText(placeholder)
+        widget.setFixedWidth(lebar)
+        widget.setFixedHeight(30)
+        widget.textChanged.connect(
+            lambda _text, w=widget: helper_paksa_kapital_lineedit(w)
+        )
+        widget.textChanged.connect(callback)
+        return widget
+
+    @staticmethod
+    def _konfigurasi_tabel(tabel, headers, *, editable=False):
+        tabel.setColumnCount(len(headers))
+        tabel.setHorizontalHeaderLabels(list(headers))
+        tabel.verticalHeader().setVisible(False)
+        tabel.setAlternatingRowColors(True)
+        tabel.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+            if editable
+            else QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        if editable:
+            tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        header = tabel.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionsClickable(True)
+        header.setSectionsMovable(False)
 
     def refresh_session_ui(self):
         self.load_data_pengirim()
@@ -188,81 +183,85 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def showEvent(self, event):
         super().showEvent(event)
-
         self.refresh_session_ui()
+        terap_semua_placeholder_dinamis(self, is_dark=self._tema_gelap_aktif())
 
+    def _tema_gelap_aktif(self):
         win = self.window()
-        is_dark = bool(
-            win
-            and hasattr(win, "current_theme")
-            and win.current_theme == "dark"
-        )
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
+        return bool(win and hasattr(win, "current_theme") and win.current_theme == "dark")
 
-    # ============================================================
-    # PENCARIAN
-    # ============================================================
+    @staticmethod
+    def _filter_tabel(tabel, keyword, columns):
+        keyword = keyword.lower().strip()
+        for row in range(tabel.rowCount()):
+            match = any(
+                (item := tabel.item(row, col))
+                and keyword in item.text().lower()
+                for col in columns
+            )
+            tabel.setRowHidden(row, not match)
 
     def filter_pencarian_tabel(self):
-        keyword = self.txt_cari.text().lower().strip()
-        for row in range(self.tabel_pengirim.rowCount()):
-            match = any(
-                self.tabel_pengirim.item(row, col) and keyword in self.tabel_pengirim.item(row, col).text().lower()
-                for col in self.KOLOM_PENCARIAN
-            )
-            self.tabel_pengirim.setRowHidden(row, not match)
+        self._filter_tabel(
+            self.tabel_pengirim,
+            self.txt_cari.text(),
+            self.KOLOM_PENCARIAN,
+        )
 
     def filter_pencarian_histori(self):
-        keyword = self.txt_cari_histori.text().lower().strip()
-        for row in range(self.tabel_histori.rowCount()):
-            match = any(
-                self.tabel_histori.item(row, col) and keyword in self.tabel_histori.item(row, col).text().lower()
-                for col in range(self.tabel_histori.columnCount())
-            )
-            self.tabel_histori.setRowHidden(row, not match)
+        self._filter_tabel(
+            self.tabel_histori,
+            self.txt_cari_histori.text(),
+            range(self.tabel_histori.columnCount()),
+        )
 
-    # ============================================================
-    # DATA PENGIRIM
-    # ============================================================
+    def _isi_baris_pengirim(self, baris, data):
+        nilai = (
+            (self.KOL_NO, baris + 1, False, Qt.AlignmentFlag.AlignCenter),
+            (self.KOL_ID, data[0], False, Qt.AlignmentFlag.AlignCenter),
+            (
+                self.KOL_NAMA_PENGIRIM,
+                data[2],
+                True,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            ),
+            (self.KOL_TELEPON, data[3], True, Qt.AlignmentFlag.AlignCenter),
+            (self.KOL_KOTA, data[5], True, Qt.AlignmentFlag.AlignLeft),
+            (
+                self.KOL_ALAMAT,
+                data[4],
+                True,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            ),
+        )
+        for kolom, teks, editable, alignment in nilai:
+            self.tabel_pengirim.setItem(
+                baris,
+                kolom,
+                buat_tabel_item(teks, editable=editable, alignment=alignment),
+            )
 
     def load_data_pengirim(self):
         self.tabel_pengirim.blockSignals(True)
         self.tabel_pengirim.setRowCount(0)
         self.tabel_histori.setRowCount(0)
-
         try:
-            kode_cabang = CURRENT_SESSION.get('kode_cabang', 'PUSAT')
-            rows = db_service.ambil_semua_master_pengirim(kode_cabang)
-
+            rows = db_service.ambil_semua_master_pengirim(
+                CURRENT_SESSION.get("kode_cabang", "PUSAT")
+            )
             for baris, data in enumerate(rows):
                 self.tabel_pengirim.insertRow(baris)
-
-                self.tabel_pengirim.setItem(baris, self.KOL_NO,
-                                            buat_tabel_item(baris + 1, editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
-                self.tabel_pengirim.setItem(baris, self.KOL_ID,
-                                            buat_tabel_item(data[0], editable=False, alignment=Qt.AlignmentFlag.AlignCenter))
-                self.tabel_pengirim.setItem(baris, self.KOL_NAMA_PENGIRIM,
-                                            buat_tabel_item(data[2], alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
-                self.tabel_pengirim.setItem(baris, self.KOL_TELEPON,
-                                            buat_tabel_item(data[3], alignment=Qt.AlignmentFlag.AlignCenter))
-                self.tabel_pengirim.setItem(baris, self.KOL_KOTA,
-                                            buat_tabel_item(data[5], alignment=Qt.AlignmentFlag.AlignLeft))
-                self.tabel_pengirim.setItem(baris, self.KOL_ALAMAT,
-                                            buat_tabel_item(data[4], alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
-
+                self._isi_baris_pengirim(baris, data)
         except Exception as e:
             print(f"Error Load Pengirim: {e}")
         finally:
             self.tabel_pengirim.blockSignals(False)
 
     def simpan_edit_pengirim_dari_tabel(self, item):
-        if not item or item.column() in [self.KOL_NO, self.KOL_ID]: return
-        row = item.row()
-        kode_cabang = CURRENT_SESSION.get('kode_cabang', 'PUSAT')
+        if not item or item.column() in [self.KOL_NO, self.KOL_ID]:
+            return
 
+        row = item.row()
         try:
             id_pengirim = self.tabel_pengirim.item(row, self.KOL_ID).text().strip()
             nama = self.tabel_pengirim.item(row, self.KOL_NAMA_PENGIRIM).text().strip().upper()
@@ -270,157 +269,149 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             kota = self.tabel_pengirim.item(row, self.KOL_KOTA).text().strip().upper()
             alamat = self.tabel_pengirim.item(row, self.KOL_ALAMAT).text().strip().upper()
 
-            sukses, pesan = db_service.update_master_pengirim_dari_tabel(id_pengirim, kode_cabang, nama, no_hp, kota,
-                                                                         alamat)
+            sukses, _pesan = db_service.update_master_pengirim_dari_tabel(
+                id_pengirim,
+                CURRENT_SESSION.get("kode_cabang", "PUSAT"),
+                nama,
+                no_hp,
+                kota,
+                alamat,
+            )
             if not sukses:
                 self.refresh_session_ui()
                 return
 
             self.tabel_pengirim.blockSignals(True)
             try:
-                self.tabel_pengirim.item(row, self.KOL_NAMA_PENGIRIM).setText(nama)
-                self.tabel_pengirim.item(row, self.KOL_KOTA).setText(kota)
-                self.tabel_pengirim.item(row, self.KOL_ALAMAT).setText(alamat)
+                for kolom, nilai in (
+                    (self.KOL_NAMA_PENGIRIM, nama),
+                    (self.KOL_KOTA, kota),
+                    (self.KOL_ALAMAT, alamat),
+                ):
+                    self.tabel_pengirim.item(row, kolom).setText(nilai)
             finally:
                 self.tabel_pengirim.blockSignals(False)
         except Exception as e:
             print(f"Error simpan edit pengirim: {e}")
             self.refresh_session_ui()
 
-    # ============================================================
-    # HISTORI PENGIRIM
-    # ============================================================
+    def _isi_baris_histori(self, baris, h):
+        ongkir = f"{int(h[6]):,}".replace(",", ".") if h[6] else "0"
+        nilai = (
+            (format_tanggal_ke_ui(h[0]), Qt.AlignmentFlag.AlignCenter),
+            (h[1], Qt.AlignmentFlag.AlignCenter),
+            (h[2], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            (h[3] if h[3] else "-", Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            (h[4] if h[4] else "-", Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            (h[5] if h[5] else "-", Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            (ongkir, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+        )
+        for kolom, (teks, alignment) in enumerate(nilai):
+            self.tabel_histori.setItem(
+                baris,
+                kolom,
+                buat_tabel_item(teks, editable=False, alignment=alignment),
+            )
 
     def pilih_pengirim_tampilkan_histori(self, row, column):
         self.tabel_histori.setRowCount(0)
         item_nama = self.tabel_pengirim.item(row, self.KOL_NAMA_PENGIRIM)
-        if not item_nama: return
+        if not item_nama:
+            return
 
         nama_pengirim = item_nama.text()
-        kode_cabang = CURRENT_SESSION.get('kode_cabang', 'PUSAT')
-
         try:
-            histori_rows = db_service.ambil_histori_transaksi_by_pengirim(nama_pengirim, kode_cabang)
+            histori_rows = db_service.ambil_histori_transaksi_by_pengirim(
+                nama_pengirim,
+                CURRENT_SESSION.get("kode_cabang", "PUSAT"),
+            )
             self.lbl_judul_histori.setText(f"📦 Riwayat Nota: {nama_pengirim}")
-
-            for baris, h in enumerate(histori_rows):
+            for baris, histori in enumerate(histori_rows):
                 self.tabel_histori.insertRow(baris)
-                ongkir_formatted = f"{int(h[6]):,}".replace(",", ".") if h[6] else "0"
-
-                self.tabel_histori.setItem(baris, 0,
-                                           buat_tabel_item(format_tanggal_ke_ui(h[0]), editable=False,
-                                                           alignment=Qt.AlignmentFlag.AlignCenter)) #No.
-                self.tabel_histori.setItem(baris, 1,
-                                           buat_tabel_item(h[1], editable=False,
-                                                           alignment=Qt.AlignmentFlag.AlignCenter)) #Resi
-                self.tabel_histori.setItem(baris, 2,
-                                           buat_tabel_item(h[2], editable=False,
-                                                           alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)) #Penerima
-                # Koli, Berat, CBM, Ongkir -> Rata Kanan
-                for col in range(3, 7):
-                    align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                    val = ongkir_formatted if col == 6 else (h[col] if h[col] else "-")
-                    self.tabel_histori.setItem(baris, col, buat_tabel_item(val, editable=False, alignment=align))
-
+                self._isi_baris_histori(baris, histori)
             self.filter_pencarian_histori()
         except Exception as e:
             print(f"Error Load Histori Pengirim: {e}")
 
-    # ============================================================
-    # LEBAR KOLOM MENGGUNAKAN FUNGSI DARI MIXIN
-    # ============================================================
-
     def _settings_kolom(self):
         return QSettings(self.SETTINGS_ORGANIZATION, self.SETTINGS_APPLICATION)
 
-    def simpan_lebar_kolom(self, t):
+    def _simpan_lebar(self, tabel, key):
         if self._sedang_menerapkan_zoom:
             return
-        widths = self._lebar_dasar_tabel(t)
-        self._perbarui_cache_lebar_zoom(t, widths)
-        self._settings_kolom().setValue("lebar_kolom_pengirim", widths)
+        widths = self._lebar_dasar_tabel(tabel)
+        self._perbarui_cache_lebar_zoom(tabel, widths)
+        self._settings_kolom().setValue(key, widths)
+
+    def _muat_lebar(self, tabel, key, defaults):
+        widths = self._settings_kolom().value(key)
+        if widths:
+            for index, width in enumerate(widths):
+                if index < tabel.columnCount():
+                    tabel.setColumnWidth(index, int(width))
+        else:
+            for index, width in enumerate(defaults):
+                if index < tabel.columnCount():
+                    tabel.setColumnWidth(index, width)
+        self._perbarui_cache_lebar_zoom(
+            tabel,
+            [tabel.columnWidth(i) for i in range(tabel.columnCount())],
+        )
+
+    def simpan_lebar_kolom(self, t):
+        self._simpan_lebar(t, "lebar_kolom_pengirim")
 
     def load_lebar_kolom(self, t):
-        widths = self._settings_kolom().value("lebar_kolom_pengirim")
-        if widths:
-            for i, width in enumerate(widths):
-                if i < t.columnCount(): t.setColumnWidth(i, int(width))
-        else:
-            t.setColumnWidth(self.KOL_NO, 50)
-            t.setColumnWidth(self.KOL_ID, 90)
-            t.setColumnWidth(self.KOL_NAMA_PENGIRIM, 180)
-            t.setColumnWidth(self.KOL_TELEPON, 130)
-            t.setColumnWidth(self.KOL_KOTA, 120)
-
-        t.horizontalHeader().setSectionResizeMode(self.KOL_ALAMAT, QHeaderView.ResizeMode.Stretch)
-        base_widths = [t.columnWidth(i) for i in range(t.columnCount())]
-        self._perbarui_cache_lebar_zoom(t, base_widths)
+        self._muat_lebar(t, "lebar_kolom_pengirim", self.LEBAR_PENGIRIM)
+        t.horizontalHeader().setSectionResizeMode(
+            self.KOL_ALAMAT,
+            QHeaderView.ResizeMode.Stretch,
+        )
+        self._perbarui_cache_lebar_zoom(
+            t,
+            [t.columnWidth(i) for i in range(t.columnCount())],
+        )
 
     def simpan_lebar_kolom_histori(self, t):
-        if self._sedang_menerapkan_zoom:
-            return
-        widths = self._lebar_dasar_tabel(t)
-        self._perbarui_cache_lebar_zoom(t, widths)
-        self._settings_kolom().setValue("lebar_kolom_histori_pengirim", widths)
+        self._simpan_lebar(t, "lebar_kolom_histori_pengirim")
 
     def load_lebar_kolom_histori(self, t):
-        w = self._settings_kolom().value("lebar_kolom_histori_pengirim")
-        if w:
-            for i, width in enumerate(w):
-                if i < t.columnCount(): t.setColumnWidth(i, int(width))
-        else:
-            defaults = [95, 100, 140, 50, 60, 60, 90]
-            for idx, width in enumerate(defaults):
-                if idx < t.columnCount(): t.setColumnWidth(idx, width)
+        self._muat_lebar(t, "lebar_kolom_histori_pengirim", self.LEBAR_HISTORI)
 
-        base_widths = [t.columnWidth(i) for i in range(t.columnCount())]
-        self._perbarui_cache_lebar_zoom(t, base_widths)
-
-    # ============================================================
-    # TEMA DAN ZOOM SEMUA ELEMEN
-    # ============================================================
+    def _terapkan_font_dasar(self):
+        ukuran = get_global_font_sizes_pt(0)
+        for widget, token, tebal in (
+            (self.lbl_judul, "sz_title", True),
+            (self.lbl_judul_histori, "sz_total", True),
+            (self.txt_cari, "sz_input", False),
+            (self.txt_cari_histori, "sz_input", False),
+        ):
+            widget.setFont(_buat_font_pt(ukuran[token], tebal=tebal))
+        self.txt_cari.setFixedHeight(30)
+        self.txt_cari_histori.setFixedHeight(30)
 
     def sesuaikan_tema_lokal(self):
-        win = self.window()
-        is_dark = win.current_theme == "dark" if win and hasattr(win, 'current_theme') else False
+        is_dark = self._tema_gelap_aktif()
         z = zoom_helper.dapatkan_zoom_level("TabKontak")
+        style = get_kontak_riwayat_styles(is_dark)
 
-        st = get_kontak_riwayat_styles(is_dark)
+        for widget, key in (
+            (self.lbl_judul, "judul"),
+            (self.lbl_judul_histori, "judul_histori"),
+            (self.txt_cari, "input"),
+            (self.txt_cari_histori, "input"),
+            (self.panel_kanan, "panel"),
+        ):
+            widget.setStyleSheet(style[key])
 
-        self._set_style_dasar_zoom(self.lbl_judul, st["judul"])
-        self._set_style_dasar_zoom(self.lbl_judul_histori, st["judul_histori"])
-        self._set_style_dasar_zoom(self.txt_cari, st["input"])
-        self._set_style_dasar_zoom(self.txt_cari_histori, st["input"])
-
-        # Blokir signal tabel sebelum zoom agar lebar tabel tidak "lompat"
-        self.tabel_pengirim.horizontalHeader().blockSignals(True)
-        self.tabel_histori.horizontalHeader().blockSignals(True)
+        perbarui_semua_style_splitter(self, is_dark)
+        self._terapkan_font_dasar()
 
         self._sedang_menerapkan_zoom = True
         try:
-            # Terapkan style dan zoom hanya pada tabel panel kiri dan kanan.
-            # Fungsi ini tetap dibutuhkan karena selain zoom, helper juga
-            # menerapkan style dinamis pada tabel dan elemen turunannya.
-            zoom_helper.terapkan_zoom_semua_elemen(
-                container_widget=self.tabel_pengirim,
-                z=z,
-                is_dark=is_dark,
-            )
-            zoom_helper.terapkan_zoom_semua_elemen(
-                container_widget=self.tabel_histori,
-                z=z,
-                is_dark=is_dark,
-            )
-
-            # Paksa skala lebar kolom seperti mekanisme pada kode asli.
-            zoom_helper._skalakan_kolom_tableview(self.tabel_pengirim, z)
-            zoom_helper._skalakan_kolom_tableview(self.tabel_histori, z)
+            for tabel in (self.tabel_pengirim, self.tabel_histori):
+                zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=z)
         finally:
             self._sedang_menerapkan_zoom = False
-            self.tabel_pengirim.horizontalHeader().blockSignals(False)
-            self.tabel_histori.horizontalHeader().blockSignals(False)
 
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
+        terap_semua_placeholder_dinamis(self, is_dark=is_dark)

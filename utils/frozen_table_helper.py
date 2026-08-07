@@ -10,44 +10,47 @@ from PySide6.QtWidgets import (
     QTableWidget,
 )
 
-
 class FrozenTableWidget(QTableWidget):
+    """QTableWidget dengan view bayangan untuk membekukan kolom kiri."""
 
-    def __init__(
-        self,
-        frozen_cols=2,
-        fixed_cols=None,
-        fixed_widths=None,
-        *args,
-        **kwargs,
-    ):
+    def __init__(self, frozen_cols=2, fixed_cols=None, fixed_widths=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.frozen_cols = frozen_cols
         self.fixed_cols = fixed_cols or []
         self.fixed_widths = fixed_widths or {}
 
-        # Tabel bayangan untuk freeze column
         self.frozen_table = QTableView(self)
-        self.frozen_table.setFrameShape(QFrame.Shape.NoFrame)
-        self.frozen_table.setModel(self.model())
-        self.frozen_table.setSelectionModel(self.selectionModel())
-        self.frozen_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.frozen_table.verticalHeader().hide()
-        self.horizontalHeader().geometriesChanged.connect(
-            lambda: self.frozen_table.horizontalHeader().setFixedHeight(
-                self.horizontalHeader().height(),
-            ),
-        )
+        self._konfigurasi_frozen_table()
+        self._konfigurasi_shadow()
+        self._hubungkan_sinkronisasi()
 
-        # Mode header interaktif secara umum
-        self.frozen_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Interactive,
-        )
+    def _konfigurasi_frozen_table(self):
+        frozen = self.frozen_table
+        frozen.setFrameShape(QFrame.Shape.NoFrame)
+        frozen.setModel(self.model())
+        frozen.setSelectionModel(self.selectionModel())
+        frozen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        frozen.verticalHeader().hide()
+
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        frozen.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.viewport().stackUnder(frozen)
 
-        self.viewport().stackUnder(self.frozen_table)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        frozen.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        frozen.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frozen.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frozen.setAlternatingRowColors(True)
+        frozen.show()
 
-        # Efek Drop Shadow Dinamis
+        frozen.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        frozen.horizontalHeader().customContextMenuRequested.connect(
+            self.horizontalHeader().customContextMenuRequested.emit
+        )
+        frozen.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        frozen.customContextMenuRequested.connect(self.customContextMenuRequested.emit)
+
+    def _konfigurasi_shadow(self):
         self.shadow_effect = QGraphicsDropShadowEffect(self)
         self.shadow_effect.setBlurRadius(15)
         self.shadow_effect.setXOffset(5)
@@ -56,82 +59,47 @@ class FrozenTableWidget(QTableWidget):
         self.shadow_effect.setEnabled(False)
         self.frozen_table.setGraphicsEffect(self.shadow_effect)
 
+    def _hubungkan_sinkronisasi(self):
+        frozen = self.frozen_table
+        main_header = self.horizontalHeader()
+        frozen_header = frozen.horizontalHeader()
+        main_vheader = self.verticalHeader()
+        frozen_vheader = frozen.verticalHeader()
+        main_scroll = self.verticalScrollBar()
+        frozen_scroll = frozen.verticalScrollBar()
+
+        main_header.geometriesChanged.connect(self._sinkronkan_tinggi_header)
+        main_header.sectionResized.connect(self.update_section_width)
+        frozen_header.sectionResized.connect(self.update_main_section_width)
+
+        main_vheader.sectionResized.connect(frozen_vheader.resizeSection)
+        frozen_vheader.sectionResized.connect(main_vheader.resizeSection)
+        main_scroll.valueChanged.connect(frozen_scroll.setValue)
+        frozen_scroll.valueChanged.connect(main_scroll.setValue)
+        main_scroll.rangeChanged.connect(frozen_scroll.setRange)
         self.horizontalScrollBar().valueChanged.connect(self.update_shadow)
 
-        # Scrolling Vertikal Presisi 1:1 (ScrollPerPixel)
-        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.frozen_table.setVerticalScrollMode(
-            QAbstractItemView.ScrollMode.ScrollPerPixel,
-        )
-        self.verticalHeader().sectionResized.connect(
-            self.frozen_table.verticalHeader().resizeSection,
-        )
-        self.frozen_table.verticalHeader().sectionResized.connect(
-            self.verticalHeader().resizeSection,
-        )
-
-        self.verticalScrollBar().valueChanged.connect(
-            self.frozen_table.verticalScrollBar().setValue,
-        )
-        self.frozen_table.verticalScrollBar().valueChanged.connect(
-            self.verticalScrollBar().setValue,
-        )
-
-        # Sinkronisasi batas bawah scroll
-        self.verticalScrollBar().rangeChanged.connect(
-            lambda min_v, max_v: self.frozen_table.verticalScrollBar().setRange(
-                min_v,
-                max_v,
-            ),
-        )
-
-        self.frozen_table.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
-        )
-        self.frozen_table.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
-        )
-        self.frozen_table.show()
-
-        # Sinkronisasi 2 arah lebar kolom
-        self.horizontalHeader().sectionResized.connect(self.update_section_width)
-        self.frozen_table.horizontalHeader().sectionResized.connect(
-            self.update_main_section_width,
-        )
-
-        self.frozen_table.setAlternatingRowColors(True)
-
-        # Context Menu (Klik Kanan)
-        self.frozen_table.horizontalHeader().setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu,
-        )
-        self.frozen_table.horizontalHeader().customContextMenuRequested.connect(
-            self.horizontalHeader().customContextMenuRequested.emit
-        )
-        self.frozen_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.frozen_table.customContextMenuRequested.connect(
-            self.customContextMenuRequested.emit
-        )
+    def _sinkronkan_tinggi_header(self):
+        self.frozen_table.horizontalHeader().setFixedHeight(self.horizontalHeader().height())
 
     def update_shadow(self, value):
-        if value > 0:
-            self.shadow_effect.setEnabled(True)
-        else:
-            self.shadow_effect.setEnabled(False)
+        self.shadow_effect.setEnabled(value > 0)
 
     def update_section_width(self, logicalIndex, oldSize, newSize):
-        if logicalIndex < self.frozen_cols:
-            self.frozen_table.blockSignals(True)
-            self.frozen_table.setColumnWidth(logicalIndex, newSize)
-            self.frozen_table.blockSignals(False)
-            self.update_frozen_geometry()
+        if logicalIndex >= self.frozen_cols:
+            return
+        self.frozen_table.blockSignals(True)
+        self.frozen_table.setColumnWidth(logicalIndex, newSize)
+        self.frozen_table.blockSignals(False)
+        self.update_frozen_geometry()
 
     def update_main_section_width(self, logicalIndex, oldSize, newSize):
-        if logicalIndex < self.frozen_cols:
-            self.blockSignals(True)
-            self.setColumnWidth(logicalIndex, newSize)
-            self.blockSignals(False)
-            self.update_frozen_geometry()
+        if logicalIndex >= self.frozen_cols:
+            return
+        self.blockSignals(True)
+        self.setColumnWidth(logicalIndex, newSize)
+        self.blockSignals(False)
+        self.update_frozen_geometry()
 
     def update_frozen_geometry(self):
         total_w = sum(
@@ -139,23 +107,17 @@ class FrozenTableWidget(QTableWidget):
             for col in range(self.frozen_cols)
             if not self.isColumnHidden(col)
         )
-
-        # 1. Pastikan ukuran absolut tinggi horizontal header disinkronkan tepat di sini
         header_height = self.horizontalHeader().height()
         self.frozen_table.horizontalHeader().setFixedHeight(header_height)
-
-        # 2. Gambar frame tabel pada sumbu Y sejajar dengan tepi atas utama
         self.frozen_table.setGeometry(
             self.verticalHeader().width() + self.frameWidth(),
             self.frameWidth(),
             total_w,
-            self.viewport().height() + header_height
+            self.viewport().height() + header_height,
         )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-
-        # Eksekusi sinkronisasi dengan penundaan agar engine render Qt selesai menghitung viewport
         QTimer.singleShot(0, self.update_frozen_geometry)
 
     def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
@@ -164,26 +126,22 @@ class FrozenTableWidget(QTableWidget):
 
     def setColumnCount(self, count):
         super().setColumnCount(count)
-        # Sembunyikan kolom setelah batas frozen_cols pada tabel bayangan
         for col in range(self.frozen_cols, count):
             self.frozen_table.setColumnHidden(col, True)
 
-        # Terapkan penguncian kolom fixed jika dikonfigurasi
-        if count > 0:
-            for col in self.fixed_cols:
-                if col < count:
-                    self.horizontalHeader().setSectionResizeMode(
-                        col,
-                        QHeaderView.ResizeMode.Fixed,
-                    )
-                    self.frozen_table.horizontalHeader().setSectionResizeMode(
-                        col,
-                        QHeaderView.ResizeMode.Fixed,
-                    )
-                    if col in self.fixed_widths:
-                        w = self.fixed_widths[col]
-                        self.setColumnWidth(col, w)
-                        self.frozen_table.setColumnWidth(col, w)
+        if count <= 0:
+            return
+        for col in self.fixed_cols:
+            if col >= count:
+                continue
+            self.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.frozen_table.horizontalHeader().setSectionResizeMode(
+                col, QHeaderView.ResizeMode.Fixed
+            )
+            if col in self.fixed_widths:
+                width = self.fixed_widths[col]
+                self.setColumnWidth(col, width)
+                self.frozen_table.setColumnWidth(col, width)
 
     def setColumnWidth(self, column, width):
         super().setColumnWidth(column, width)
@@ -196,20 +154,16 @@ class FrozenTableWidget(QTableWidget):
         self.frozen_table.setRowHidden(row, hide)
 
     def setStyleSheet(self, styleSheet):
-        super().setStyleSheet(styleSheet)
-        style_tabel_bayangan = styleSheet.replace("QTableWidget", "QTableView")
-
-        css_center_checkbox = f"""
+        style_frozen = styleSheet.replace("QTableWidget", "QTableView")
+        css_center_checkbox = """
             QTableWidget::indicator, QTableView::indicator {{
                 subcontrol-origin: padding;
                 subcontrol-position: center;
             }}
         """
-
-        self.frozen_table.setStyleSheet(style_tabel_bayangan + css_center_checkbox)
+        self.frozen_table.setStyleSheet(style_frozen + css_center_checkbox)
         self.frozen_table.setPalette(self.palette())
         self.frozen_table.setGridStyle(self.gridStyle())
-
         super().setStyleSheet(styleSheet + css_center_checkbox)
 
     def setSelectionMode(self, mode):

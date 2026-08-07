@@ -24,6 +24,8 @@ from utils.typography import (
     APPLICATION_NAME,
     ORGANIZATION_NAME,
     konfigurasi_font_aplikasi,
+    konversi_font_qss_ke_point,
+    konversi_style_font_ke_point,
 )
 from utils.splitter_helper import perbarui_semua_style_splitter
 
@@ -60,24 +62,11 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-
         self.settings = QSettings(
             self.SETTINGS_ORGANIZATION,
             self.SETTINGS_APPLICATION,
         )
-        tema_tersimpan = str(
-            self.settings.value(
-                "theme",
-                self.THEME_LIGHT,
-            )
-            or self.THEME_LIGHT
-        ).strip().lower()
-        self.current_theme = (
-            tema_tersimpan
-            if tema_tersimpan in {self.THEME_LIGHT, self.THEME_DARK}
-            else self.THEME_LIGHT
-        )
-
+        self.current_theme = self._muat_tema_tersimpan()
         self._sedang_ganti_tema = False
         self._cache_tema_tab = {}
         self._tema_tab_sedang_diterapkan = set()
@@ -85,29 +74,42 @@ class MainWindow(QMainWindow):
         self._setting_access_overlay = None
 
         app = QApplication.instance()
-        if app is not None:
-            if not bool(app.property("_base_style_terpasang")):
-                app.setStyleSheet(BASE_STYLE)
-                app.setProperty("_base_style_terpasang", True)
-
-            app.setPalette(
-                get_theme_palette(
-                    self.current_theme == "dark"
-                )
-            )
-
-        self.scrollbar_manager = None
-
-        if ENABLE_GLOBAL_SCROLLBAR_STYLE and app is not None:
-            self.scrollbar_manager = GlobalScrollbarManager(
-                root_widget=self,
-            )
-            self.scrollbar_manager.install(app)
-
+        self._siapkan_tema_aplikasi(app)
+        self._siapkan_scrollbar_global(app)
         self.init_ui()
         self._session_signature_terakhir = self._buat_signature_session()
 
+    def _muat_tema_tersimpan(self):
+        tema = str(
+            self.settings.value("theme", self.THEME_LIGHT)
+            or self.THEME_LIGHT
+        ).strip().lower()
+        return tema if tema in {self.THEME_LIGHT, self.THEME_DARK} else self.THEME_LIGHT
+
+    def _siapkan_tema_aplikasi(self, app):
+        if app is None:
+            return
+        if not bool(app.property("_base_style_terpasang")):
+            app.setStyleSheet(konversi_font_qss_ke_point(BASE_STYLE))
+            app.setProperty("_base_style_terpasang", True)
+        app.setPalette(get_theme_palette(self.current_theme == self.THEME_DARK))
+
+    def _siapkan_scrollbar_global(self, app):
+        self.scrollbar_manager = None
+        if ENABLE_GLOBAL_SCROLLBAR_STYLE and app is not None:
+            self.scrollbar_manager = GlobalScrollbarManager(root_widget=self)
+            self.scrollbar_manager.install(app)
+
+
     def init_ui(self):
+        self._bangun_shell_utama()
+        self._bangun_kontrol_kanan()
+        self._bangun_tab_utama()
+        self._konfigurasi_scrolling()
+        self.tabs.currentChanged.connect(self.refresh_tab_utama_diklik)
+        self.apply_theme()
+
+    def _bangun_shell_utama(self):
         self.central_widget = QWidget(self)
         self.central_widget.setObjectName("CentralWidget")
         self.setCentralWidget(self.central_widget)
@@ -117,8 +119,7 @@ class MainWindow(QMainWindow):
         self.main_layout.setSpacing(0)
 
         self.tabs = QTabWidget(self)
-        # Alias dipertahankan untuk modul yang mencari nama tabs_utama.
-        self.tabs_utama = self.tabs
+        self.tabs_utama = self.tabs  # Alias kompatibilitas modul lama.
         self.tabs.setObjectName("MainTabs")
         self.custom_tab_bar = QTabBar(self)
         self.custom_tab_bar.setObjectName("MainTabBar")
@@ -127,86 +128,82 @@ class MainWindow(QMainWindow):
         self.tabs.setUsesScrollButtons(True)
         self.main_layout.addWidget(self.tabs)
 
+    def _buat_tombol_top_right(self, text, slot, *, size=None, width=None):
+        button = QPushButton(text) if text else QPushButton(self)
+        if size is not None:
+            button.setFixedSize(*size)
+        if width is not None:
+            button.setFixedWidth(width)
+            button.setFixedHeight(32)
+        button.clicked.connect(slot)
+        return button
+
+    def _bangun_kontrol_kanan(self):
         self.container_top_right = QWidget(self)
-        hbox_top_right = QHBoxLayout(self.container_top_right)
-        hbox_top_right.setContentsMargins(0, 4, 15, 4)
-        hbox_top_right.setSpacing(6)
+        layout = QHBoxLayout(self.container_top_right)
+        layout.setContentsMargins(0, 4, 15, 4)
+        layout.setSpacing(6)
 
         self.lbl_info_cabang = QLabel("🏢 PUSAT")
-
-        self.btn_zoom_out = QPushButton("🔍-")
-        self.btn_zoom_out.setFixedSize(40, 32)
-        self.btn_zoom_out.clicked.connect(lambda: self.ubah_zoom(-1))
-
-        self.btn_zoom_in = QPushButton("🔍+")
-        self.btn_zoom_in.setFixedSize(40, 32)
-        self.btn_zoom_in.clicked.connect(lambda: self.ubah_zoom(1))
-
-        self.btn_theme = QPushButton(self)
-        self.btn_theme.setFixedWidth(120)
-        self.btn_theme.setFixedHeight(32)
-        self.btn_theme.clicked.connect(self.toggle_theme)
-
-        self.btn_setting = QPushButton("⚙️")
-        self.btn_setting.setFixedSize(40, 32)
+        self.btn_zoom_out = self._buat_tombol_top_right(
+            "🔍-", lambda: self.ubah_zoom(-1), size=(40, 32)
+        )
+        self.btn_zoom_in = self._buat_tombol_top_right(
+            "🔍+", lambda: self.ubah_zoom(1), size=(40, 32)
+        )
+        self.btn_theme = self._buat_tombol_top_right(
+            "", self.toggle_theme, width=120
+        )
+        self.btn_setting = self._buat_tombol_top_right(
+            "⛭", self.buka_dasbor_pengaturan, size=(40, 32)
+        )
         self.btn_setting.setToolTip("Pengaturan Sistem (Super Admin)")
-        self.btn_setting.clicked.connect(self.buka_dasbor_pengaturan)
 
-        hbox_top_right.addWidget(self.lbl_info_cabang)
-        hbox_top_right.addWidget(self.btn_zoom_out)
-        hbox_top_right.addWidget(self.btn_zoom_in)
-        hbox_top_right.addWidget(self.btn_theme)
-        hbox_top_right.addWidget(self.btn_setting)
+        for widget in (
+            self.lbl_info_cabang,
+            self.btn_zoom_out,
+            self.btn_zoom_in,
+            self.btn_theme,
+            self.btn_setting,
+        ):
+            layout.addWidget(widget)
         self.tabs.setCornerWidget(self.container_top_right, Qt.Corner.TopRightCorner)
 
+    def _bangun_tab_utama(self):
         self.tab_resi_widget = TabResi()
         self.tabs.addTab(self.tab_resi_widget, "📦 Data Resi")
-
         self.tab_buku_gudang = TabBukuGudang()
         self.tabs.addTab(self.tab_buku_gudang, "🏭 Buku Gudang")
-
         self.tab_manifest = TabManifest()
         self.tabs.addTab(self.tab_manifest, "📋 Manifest")
-
         self.tab_invoice = TabInvoice()
         self.tabs.addTab(self.tab_invoice, "🧾 Invoice")
-
         self.tab_kontak = TabKontak()
         self.tabs.addTab(self.tab_kontak, "👥 Kontak")
-
         self.tab_armada = TabArmada()
         self.tabs.addTab(self.tab_armada, "🚛🚢 Armada")
 
-        # Per-pixel scrolling tetap dipertahankan.
-        for table in self.findChildren(QTableWidget):
+    def _konfigurasi_scrolling(self):
+        tables = self.findChildren(QTableWidget)
+        for table in tables:
             table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
             table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
-        # Gesture QScroller tidak dibutuhkan pada desktop mouse/keyboard.
-        # Event filter native QScroller pada banyak viewport dapat membuat
-        # penghancuran widget tidak stabil saat aplikasi ditutup.
+        # QScroller desktop dinonaktifkan karena native event filter dapat
+        # membuat penghancuran banyak viewport tidak stabil saat shutdown.
         self._touch_scroll_aktif = False
         self._viewport_scroller = []
+        if not self._touch_scroll_aktif:
+            return
 
-        if self._touch_scroll_aktif:
-            for widget in self.findChildren(QScrollArea):
-                viewport = widget.viewport()
-                QScroller.grabGesture(
-                    viewport,
-                    QScroller.ScrollerGestureType.LeftMouseButtonGesture,
-                )
-                self._viewport_scroller.append(viewport)
+        for widget in (*self.findChildren(QScrollArea), *tables):
+            viewport = widget.viewport()
+            QScroller.grabGesture(
+                viewport,
+                QScroller.ScrollerGestureType.LeftMouseButtonGesture,
+            )
+            self._viewport_scroller.append(viewport)
 
-            for table in self.findChildren(QTableWidget):
-                viewport = table.viewport()
-                QScroller.grabGesture(
-                    viewport,
-                    QScroller.ScrollerGestureType.LeftMouseButtonGesture,
-                )
-                self._viewport_scroller.append(viewport)
-
-        self.tabs.currentChanged.connect(self.refresh_tab_utama_diklik)
-        self.apply_theme()
 
     def _signature_tema_tab(self, tab_widget):
         if tab_widget is None:
@@ -293,32 +290,22 @@ class MainWindow(QMainWindow):
     def refresh_tab_utama_diklik(self, index):
         if index < 0 or index >= self.tabs.count():
             return
-
         tab_aktif = self.tabs.widget(index)
         if tab_aktif is None:
             return
 
         self._terapkan_tema_lokal(tab_aktif)
-
         if tab_aktif is self.tab_resi_widget:
-            fungsi_refresh = getattr(
-                self.tab_resi_widget,
-                "auto_refresh_histori",
-                None,
-            )
-
-            if callable(fungsi_refresh):
-                fungsi_refresh()
-
+            self._panggil_opsional(tab_aktif, "auto_refresh_histori")
         elif tab_aktif is self.tab_manifest:
-            fungsi_refresh_manifest = getattr(
-                self.tab_manifest,
-                "setup_autocomplete_truk",
-                None,
-            )
+            self._panggil_opsional(tab_aktif, "setup_autocomplete_truk")
 
-            if callable(fungsi_refresh_manifest):
-                fungsi_refresh_manifest()
+    @staticmethod
+    def _panggil_opsional(widget, nama_method):
+        fungsi = getattr(widget, nama_method, None)
+        if callable(fungsi):
+            fungsi()
+
 
     @staticmethod
     def _buat_signature_session():
@@ -347,16 +334,11 @@ class MainWindow(QMainWindow):
         if callable(refresh_session):
             refresh_session()
             return
-
         if widget is self.tab_resi_widget:
-            refresh_resi = getattr(widget, "auto_refresh_histori", None)
-            if callable(refresh_resi):
-                refresh_resi()
-
+            self._panggil_opsional(widget, "auto_refresh_histori")
         elif widget is self.tab_manifest:
-            refresh_manifest = getattr(widget, "setup_autocomplete_truk", None)
-            if callable(refresh_manifest):
-                refresh_manifest()
+            self._panggil_opsional(widget, "setup_autocomplete_truk")
+
 
     def update_session_ui(self):
         nama_perusahaan = DATA_CLIENT.get(
@@ -433,141 +415,57 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self, force=False):
         is_dark = self.current_theme == self.THEME_DARK
-        style_btn, style_label = get_top_right_styles(
-            is_dark
+        style_btn, style_label = konversi_style_font_ke_point(
+            get_top_right_styles(is_dark)
         )
-
-        app = QApplication.instance()
-
         self.setUpdatesEnabled(False)
-
         try:
-            if app is not None:
-                app.setPalette(
-                    get_theme_palette(is_dark)
-                )
-
-            shell_styles = get_main_shell_styles(
-                is_dark
-            )
-            self.central_widget.setStyleSheet(
-                shell_styles["central"]
-            )
-            self.tabs.setStyleSheet(
-                shell_styles["tabs"]
-            )
-            self.custom_tab_bar.setStyleSheet(
-                shell_styles["tab_bar"]
-            )
-            self.container_top_right.setStyleSheet(
-                shell_styles["corner"]
-            )
-
-            self.btn_theme.setText(
-                "☀️ Mode Terang"
-                if is_dark
-                else "🌙 Mode Gelap"
-            )
-
-            self.lbl_info_cabang.setStyleSheet(
-                style_label
-            )
-
-            for button in (
-                self.btn_theme,
-                self.btn_zoom_in,
-                self.btn_zoom_out,
-                self.btn_setting,
-            ):
-                button.setStyleSheet(style_btn)
-
+            self._terapkan_tema_shell(is_dark, style_btn, style_label)
         finally:
             self.setUpdatesEnabled(True)
             self.update()
 
         tab_aktif = self.tabs.currentWidget()
-
         if tab_aktif is not None:
-            # Hindari callback lambda tertunda yang dapat tersisa ketika
-            # widget atau QApplication sedang dihancurkan.
-            self._terapkan_tema_lokal(
-                tab_aktif,
-                force=force,
-            )
+            self._terapkan_tema_lokal(tab_aktif, force=force)
+        perbarui_semua_style_splitter(self, is_dark)
 
-        perbarui_semua_style_splitter(
-            self,
-            is_dark,
-        )
+    def _terapkan_tema_shell(self, is_dark, style_btn, style_label):
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(get_theme_palette(is_dark))
+
+        styles = konversi_style_font_ke_point(get_main_shell_styles(is_dark))
+        self.central_widget.setStyleSheet(styles["central"])
+        self.tabs.setStyleSheet(styles["tabs"])
+        self.custom_tab_bar.setStyleSheet(styles["tab_bar"])
+        self.container_top_right.setStyleSheet(styles["corner"])
+        self.btn_theme.setText("☀️ Mode Terang" if is_dark else "🌙 Mode Gelap")
+        self.lbl_info_cabang.setStyleSheet(style_label)
+        for button in (
+            self.btn_theme,
+            self.btn_zoom_in,
+            self.btn_zoom_out,
+            self.btn_setting,
+        ):
+            button.setStyleSheet(style_btn)
+
 
     def buka_dasbor_pengaturan(self):
-        dialog_lama = getattr(self, "dialog_setting", None)
-        if dialog_lama is not None:
-            try:
-                if dialog_lama.isVisible():
-                    dialog_lama.raise_()
-                    dialog_lama.activateWindow()
-                    return
-            except RuntimeError:
-                self.dialog_setting = None
+        if self._aktifkan_dialog_setting_lama():
+            return
 
         self.dialog_setting = QDialog(self)
         self.dialog_setting.setWindowTitle("PENGATURAN")
         self.dialog_setting.setMinimumSize(800, 600)
-
-        main_layout = QVBoxLayout(self.dialog_setting)
+        layout = QVBoxLayout(self.dialog_setting)
         widget_setting = TabSettingSistem(self.dialog_setting)
-        main_layout.addWidget(widget_setting)
+        layout.addWidget(widget_setting)
 
-        role_aktif = str(CURRENT_SESSION.get('role', '')).strip().upper()
-        boleh_mengubah = role_aktif in {"SUPER_ADMIN", "OWNER"}
-
+        role_aktif = str(CURRENT_SESSION.get("role", "")).strip().upper()
         self._setting_access_overlay = None
-
-        if not boleh_mengubah:
-            widget_setting.setEnabled(False)
-
-            overlay = QWidget(self.dialog_setting)
-            overlay.setObjectName("SettingAccessOverlay")
-            overlay.setStyleSheet(
-                f"""
-                    QWidget#SettingAccessOverlay {{
-                        background-color: rgba(25, 25, 30, 0.9);
-                        border-radius: 6px;
-                    }}
-                """
-            )
-            overlay.resize(
-                self.dialog_setting.width(),
-                self.dialog_setting.height(),
-            )
-
-            lbl_warning = QLabel(
-                "🔒 AKSES TERBATAS\n\n"
-                "Hanya akun SUPER ADMIN / OWNER yang memiliki otoritas\n"
-                "untuk mengubah struktur data perusahaan.\n\n"
-                f"(Role Anda Saat Ini: "
-                f"{role_aktif if role_aktif else 'TIDAK DIKETAHUI'})",
-                overlay,
-            )
-            lbl_warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_warning.setStyleSheet(
-                f"""
-                    color: #ff4d4d;
-                    font-size: 16px;
-                    font-weight: bold;
-                    line-height: 150%;
-                """
-            )
-
-            overlay_layout = QVBoxLayout(overlay)
-            overlay_layout.addWidget(lbl_warning)
-            overlay.raise_()
-            self._setting_access_overlay = overlay
-
-            if hasattr(widget_setting, 'btn_simpan_all'):
-                widget_setting.btn_simpan_all.setEnabled(False)
-                widget_setting.btn_simpan_all.setText("❌ AKSES DITOLAK")
+        if role_aktif not in {"SUPER_ADMIN", "OWNER"}:
+            self._pasang_overlay_akses_setting(widget_setting, role_aktif)
 
         try:
             self.dialog_setting.exec()
@@ -578,39 +476,85 @@ class MainWindow(QMainWindow):
             if dialog is not None:
                 dialog.deleteLater()
 
+    def _aktifkan_dialog_setting_lama(self):
+        dialog = getattr(self, "dialog_setting", None)
+        if dialog is None:
+            return False
+        try:
+            if dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                return True
+        except RuntimeError:
+            self.dialog_setting = None
+        return False
+
+    def _pasang_overlay_akses_setting(self, widget_setting, role_aktif):
+        widget_setting.setEnabled(False)
+        overlay = QWidget(self.dialog_setting)
+        overlay.setObjectName("SettingAccessOverlay")
+        overlay.setStyleSheet(
+            "QWidget#SettingAccessOverlay {"
+            "background-color: rgba(25, 25, 30, 0.9);"
+            "border-radius: 6px;}"
+        )
+        overlay.resize(self.dialog_setting.width(), self.dialog_setting.height())
+
+        label = QLabel(
+            "🔒 AKSES TERBATAS\n\n"
+            "Hanya akun SUPER ADMIN / OWNER yang memiliki otoritas\n"
+            "untuk mengubah struktur data perusahaan.\n\n"
+            f"(Role Anda Saat Ini: {role_aktif if role_aktif else 'TIDAK DIKETAHUI'})",
+            overlay,
+        )
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(
+            "color: #ff4d4d; font-size: 12pt; font-weight: bold; line-height: 150%;"
+        )
+        QVBoxLayout(overlay).addWidget(label)
+        overlay.raise_()
+        self._setting_access_overlay = overlay
+
+        if hasattr(widget_setting, "btn_simpan_all"):
+            widget_setting.btn_simpan_all.setEnabled(False)
+            widget_setting.btn_simpan_all.setText("❌ AKSES DITOLAK")
+
+
     def closeEvent(self, event):
         """Melepas resource native sebelum MainWindow dihancurkan."""
         try:
-            for viewport in getattr(self, "_viewport_scroller", []):
-                try:
-                    QScroller.ungrabGesture(viewport)
-                except (RuntimeError, TypeError):
-                    pass
-
-            self._viewport_scroller = []
-
-            scrollbar_manager = getattr(self, "scrollbar_manager", None)
-            uninstall_scrollbar = getattr(scrollbar_manager, "uninstall", None)
-            if callable(uninstall_scrollbar):
-                try:
-                    uninstall_scrollbar()
-                except (RuntimeError, TypeError):
-                    pass
-
-            dialog = getattr(self, "dialog_setting", None)
-            if dialog is not None:
-                try:
-                    dialog.close()
-                except RuntimeError:
-                    pass
-
-            self.dialog_setting = None
-            self._setting_access_overlay = None
-            self._cache_tema_tab.clear()
-            self._tema_tab_sedang_diterapkan.clear()
-
+            self._lepas_resource_native()
         finally:
             super().closeEvent(event)
+
+    def _lepas_resource_native(self):
+        for viewport in getattr(self, "_viewport_scroller", []):
+            try:
+                QScroller.ungrabGesture(viewport)
+            except (RuntimeError, TypeError):
+                pass
+        self._viewport_scroller = []
+
+        manager = getattr(self, "scrollbar_manager", None)
+        uninstall = getattr(manager, "uninstall", None)
+        if callable(uninstall):
+            try:
+                uninstall()
+            except (RuntimeError, TypeError):
+                pass
+
+        dialog = getattr(self, "dialog_setting", None)
+        if dialog is not None:
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass
+
+        self.dialog_setting = None
+        self._setting_access_overlay = None
+        self._cache_tema_tab.clear()
+        self._tema_tab_sedang_diterapkan.clear()
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -630,48 +574,28 @@ class MainWindow(QMainWindow):
 
     def ubah_zoom(self, step):
         active_tab = self.tabs.currentWidget()
-
         if active_tab is None:
             return
-
         try:
             step = int(step)
         except (TypeError, ValueError):
             return
-
         if step == 0:
             return
 
-        tab_name = active_tab.__class__.__name__
-
+        key = f"zoom_{active_tab.__class__.__name__}"
         try:
-            current_z = int(
-                self.settings.value(
-                    f"zoom_{tab_name}",
-                    0,
-                )
-            )
+            current_z = int(self.settings.value(key, 0))
         except (TypeError, ValueError):
             current_z = 0
-
-        new_z = max(
-            self.ZOOM_MIN,
-            min(current_z + step, self.ZOOM_MAX),
-        )
-
+        new_z = max(self.ZOOM_MIN, min(current_z + step, self.ZOOM_MAX))
         if new_z == current_z:
             return
 
-        self.settings.setValue(
-            f"zoom_{tab_name}",
-            new_z,
-        )
+        self.settings.setValue(key, new_z)
         self.settings.sync()
+        self._terapkan_tema_lokal(active_tab, force=True)
 
-        self._terapkan_tema_lokal(
-            active_tab,
-            force=True,
-        )
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -685,8 +609,6 @@ class MainWindow(QMainWindow):
 
 
 def penangkap_error_gaib(error_type, value, traceback_obj):
-    import traceback
-
     traceback.print_exception(
         error_type,
         value,

@@ -103,7 +103,7 @@ def get_setting_styles(
             }}
         """,
         'input': f"""
-            QLineEdit, QTextEdit, QComboBox {{
+            QLineEdit, QTextEdit {{
                 padding: 8px 12px;
                 font-size: {sz_input}px;
                 font-family: '{get_master_font()}';
@@ -113,7 +113,7 @@ def get_setting_styles(
                 color: {text_primary};
                 selection-background-color: #3b82f6;
             }}
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{
+            QLineEdit:focus, QTextEdit:focus {{
                 border: 1px solid {border_focus};
                 background-color: {bg_input_foc};
             }}
@@ -124,10 +124,6 @@ def get_setting_styles(
             QTextEdit {{
                 padding: 6px 10px;
                 line-height: 1.4;
-            }}
-            QDateEdit {{
-                font-size: {sz_input}px;
-                padding: 2px 10px;
             }}
             /* FIX: Tambahkan font-size agar placeholder terzoom */
             QLineEdit[custom_italic="true"][is_empty="true"],
@@ -233,6 +229,40 @@ def get_setting_styles(
         'lbl_hint': f"""
             color: {text_muted};
             font-size: {sz_base - 1}px;
+        """,
+        'lbl_info_italic': """
+            color: #94a3b8;
+            font-style: italic;
+        """,
+        'btn_add_rekening': f"""
+            QPushButton {{
+                color: #3b82f6;
+                font-size: 26px;
+                font-weight: bold;
+                background: transparent;
+                border: none;
+                font-family: "{get_master_font()}";
+            }}
+        """,
+        'btn_row_delete': f"""
+            QPushButton {{
+                color: #ef4444;
+                font-size: 26px;
+                font-weight: bold;
+                background: transparent;
+                border: none;
+                font-family: "{get_master_font()}";
+            }}
+        """,
+        'btn_row_delete_disabled': f"""
+            QPushButton {{
+                color: #94a3b8;
+                font-size: 26px;
+                font-weight: bold;
+                background: transparent;
+                border: none;
+                font-family: "{get_master_font()}";
+            }}
         """,
         'lbl_menu': f"""
             font-weight: bold;

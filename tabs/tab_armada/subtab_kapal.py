@@ -23,18 +23,19 @@ from PySide6.QtWidgets import (
 import services.database_service as db_service
 
 from themes.modules.kontak_armada import get_armada_styles
-
-from utils.typography import get_master_font, get_global_font_sizes
+from utils.typography import get_master_font, get_global_font_sizes_pt
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 import utils.zoom as zoom_helper
-from utils.widget_helpers import (
-    paksa_kapital_lineedit as helper_paksa_kapital_lineedit,
-    terapkan_popup_combobox_bawah,
-)
-from utils.placeholder_helper import (
-    terap_semua_placeholder_dinamis,
-)
+from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
+from utils.placeholder_helper import terap_semua_placeholder_dinamis
+
+def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
+    """Membuat QFont berbasis point untuk elemen UI statis."""
+    font = QFont(get_master_font())
+    font.setPointSizeF(float(ukuran_pt))
+    font.setBold(bool(tebal))
+    return font
 
 
 class SubTabKapal(QWidget, ZoomTableMixin):
@@ -47,6 +48,10 @@ class SubTabKapal(QWidget, ZoomTableMixin):
     SETTINGS_ORGANIZATION = "EkspedisiApp"
     SETTINGS_APPLICATION = "SubTabKapal"
     SETTINGS_KEY_LEBAR = "lebar_kolom_kapal"
+
+    HEADERS = ("NO", "NAMA KAPAL", "TUJUAN", "KETERANGAN", "FOTO")
+    DEFAULT_COLUMN_WIDTHS = (45, 180, 150, 280, 20)
+    FILTER_COLUMNS = (KOL_NAMA_KAPAL, KOL_TUJUAN, KOL_KETERANGAN)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,153 +78,127 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         layout_utama.addWidget(self.splitter)
 
-        # ========================================================
-        # PANEL KIRI: Master Data (Pencarian & Tabel)
-        # ========================================================
+        self._bangun_panel_master_kapal()
+        self._bangun_panel_editor_kapal()
+        self._konfigurasi_splitter()
+
+        self.atur_mode("IDLE")
+        self.refresh_session_ui()
+        self._lewati_refresh_show_pertama = True
+
+    def _buat_input_kapital(self, placeholder):
+        widget = QLineEdit()
+        widget.setPlaceholderText(placeholder)
+        widget.textChanged.connect(
+            lambda _text, target=widget: helper_paksa_kapital_lineedit(target),
+        )
+        return widget
+
+    def _buat_field_kapal(self, layout, label_text, placeholder):
+        label = QLabel(label_text)
+        editor = self._buat_input_kapital(placeholder)
+        layout.addWidget(label)
+        layout.addWidget(editor)
+        return label, editor
+
+    def _bangun_panel_master_kapal(self):
         self.panel_kiri = QWidget()
         self.panel_kiri.setMinimumWidth(600)
         self.panel_kiri.setMaximumWidth(1800)
-        layout_kiri = QVBoxLayout(self.panel_kiri)
-        layout_kiri.setContentsMargins(0, 0, 10, 0)
+        layout = QVBoxLayout(self.panel_kiri)
+        layout.setContentsMargins(0, 0, 10, 0)
 
-        layout_judul_search = QHBoxLayout()
-        self.label_judul = QLabel("🚢 List Data Kapal")
-        self.label_judul.setFont(QFont(get_master_font(), 14, QFont.Weight.Bold))
-        layout_judul_search.addWidget(self.label_judul)
-        layout_judul_search.addStretch()
-
-        self.input_cari = QLineEdit()
-        self.input_cari.setPlaceholderText("Cari Data Kapal...")
-        self.input_cari.setProperty("zoom_font_key", "sz_input")
-        self.input_cari.setFixedWidth(230)
-        self.input_cari.textChanged.connect(
-            lambda _t: helper_paksa_kapital_lineedit(self.input_cari),
+        header_layout = QHBoxLayout()
+        self.label_judul = QLabel("List Data Kapal")
+        self.label_judul.setFont(
+            _buat_font_pt(get_global_font_sizes_pt(0)["sz_title"], tebal=True)
         )
+        header_layout.addWidget(self.label_judul)
+        header_layout.addStretch()
+
+        self.input_cari = self._buat_input_kapital("Cari Data Kapal...")
+        self.input_cari.setFixedWidth(230)
         self.input_cari.textChanged.connect(self.filter_tabel_kapal)
-        layout_judul_search.addWidget(self.input_cari)
-        layout_kiri.addLayout(layout_judul_search)
+        header_layout.addWidget(self.input_cari)
+        layout.addLayout(header_layout)
 
         self.tabel_kapal = QTableWidget()
-        self.tabel_kapal.setColumnCount(5)
-        self.tabel_kapal.setHorizontalHeaderLabels([
-            "NO", "NAMA KAPAL", "TUJUAN", "KETERANGAN", "FOTO"
-        ])
+        tabel = self.tabel_kapal
+        tabel.setColumnCount(len(self.HEADERS))
+        tabel.setHorizontalHeaderLabels(self.HEADERS)
+        tabel.setColumnHidden(self.KOL_FOTO, True)
+        tabel.setAlternatingRowColors(True)
+        tabel.verticalHeader().setVisible(False)
+        tabel.setWordWrap(False)
+        tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tabel.cellClicked.connect(self.pilih_data_dari_tabel)
 
-        self.tabel_kapal.setColumnHidden(4, True)  # Simpan path foto tersembunyi
-        self.tabel_kapal.setAlternatingRowColors(True)
-        self.tabel_kapal.verticalHeader().setVisible(False)
+        header = tabel.horizontalHeader()
+        header.setMinimumHeight(35)
+        header.setMaximumHeight(16_777_215)
+        tabel.verticalHeader().setMinimumSectionSize(32)
+        tabel.verticalHeader().setDefaultSectionSize(32)
 
-        # Jangan mengunci tinggi header/baris. Zoom global akan menghitung
-        # tinggi berdasarkan font dan padding aktual agar teks tidak terpotong.
-        header_kapal = self.tabel_kapal.horizontalHeader()
-        header_kapal.setMinimumHeight(35)
-        header_kapal.setMaximumHeight(16_777_215)
+        self.load_lebar_kolom(tabel)
+        header.sectionResized.connect(self.jadwalkan_simpan_lebar_kolom)
+        self._timer_simpan_lebar.timeout.connect(self._simpan_lebar_kolom_sekarang)
+        layout.addWidget(tabel)
 
-        vertical_header_kapal = self.tabel_kapal.verticalHeader()
-        vertical_header_kapal.setMinimumSectionSize(32)
-        vertical_header_kapal.setDefaultSectionSize(32)
-
-        # Data Armada satu baris; cegah word-wrap yang membuat tinggi tidak stabil.
-        self.tabel_kapal.setWordWrap(False)
-        self.tabel_kapal.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows,
-        )
-        self.tabel_kapal.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection,
-        )
-        self.tabel_kapal.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.tabel_kapal.cellClicked.connect(self.pilih_data_dari_tabel)
-        layout_kiri.addWidget(self.tabel_kapal)
-
-        self.load_lebar_kolom(self.tabel_kapal)
-        self.tabel_kapal.horizontalHeader().sectionResized.connect(
-            self.jadwalkan_simpan_lebar_kolom
-        )
-        self._timer_simpan_lebar.timeout.connect(
-            self._simpan_lebar_kolom_sekarang
-        )
-
-        # ========================================================
-        # PANEL KANAN: Detail & Editor Area
-        # ========================================================
+    def _bangun_panel_editor_kapal(self):
         self.panel_kanan = QFrame()
         self.panel_kanan.setMinimumWidth(320)
         self.panel_kanan.setMaximumWidth(950)
         self.panel_kanan.setObjectName("panelEditor")
-        layout_kanan = QVBoxLayout(self.panel_kanan)
-        layout_kanan.setContentsMargins(15, 15, 15, 15)
+        layout = QVBoxLayout(self.panel_kanan)
+        layout.setContentsMargins(15, 15, 15, 15)
 
-        self.lbl_judul_kanan = QLabel("📋 Detail / Editor Kapal")
-        self.lbl_judul_kanan.setFont(QFont(get_master_font(), 12, QFont.Weight.Bold))
+        self.lbl_judul_kanan = QLabel("Detail / Editor Kapal")
+        self.lbl_judul_kanan.setFont(
+            _buat_font_pt(get_global_font_sizes_pt(0)["sz_total"], tebal=True)
+        )
         self.lbl_judul_kanan.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout_kanan.addWidget(self.lbl_judul_kanan)
+        layout.addWidget(self.lbl_judul_kanan)
 
-        self.lbl_nama_kapal = QLabel("Nama Kapal:")
-        self.input_nama_kapal = QLineEdit()
-        self.input_nama_kapal.setPlaceholderText("Contoh: KM. SPIL NIKEN")
-        self.input_nama_kapal.textChanged.connect(
-            lambda _t: helper_paksa_kapital_lineedit(self.input_nama_kapal),
+        self.lbl_nama_kapal, self.input_nama_kapal = self._buat_field_kapal(
+            layout, "Nama Kapal:", "Contoh: KM. SPIL NIKEN"
         )
-        self.input_nama_kapal.editingFinished.connect(
-            self.autofill_kapal_dari_input
+        self.lbl_tujuan, self.input_tujuan = self._buat_field_kapal(
+            layout, "Tujuan:", "Contoh: MAKASSAR / BANJARMASIN"
         )
-        layout_kanan.addWidget(self.lbl_nama_kapal)
-        layout_kanan.addWidget(self.input_nama_kapal)
+        self.lbl_ket, self.input_keterangan = self._buat_field_kapal(
+            layout, "Keterangan:", "Informasi Pelayaran / Dll"
+        )
+        self.input_nama_kapal.editingFinished.connect(self.autofill_kapal_dari_input)
 
-        self.lbl_tujuan = QLabel("Tujuan:")
-        self.input_tujuan = QLineEdit()
-        self.input_tujuan.setPlaceholderText("Contoh: MAKASSAR / BANJARMASIN")
-        self.input_tujuan.textChanged.connect(
-            lambda _t: helper_paksa_kapital_lineedit(self.input_tujuan),
-        )
-        layout_kanan.addWidget(self.lbl_tujuan)
-        layout_kanan.addWidget(self.input_tujuan)
-
-        self.lbl_ket = QLabel("Keterangan:")
-        self.input_keterangan = QLineEdit()
-        self.input_keterangan.setPlaceholderText("Informasi Pelayaran / Dll")
-        self.input_keterangan.textChanged.connect(
-            lambda _t: helper_paksa_kapital_lineedit(self.input_keterangan),
-        )
-        layout_kanan.addWidget(self.lbl_ket)
-        layout_kanan.addWidget(self.input_keterangan)
-
-        layout_kanan.addSpacing(10)
+        layout.addSpacing(10)
         self.lbl_foto_title = QLabel("📷 Foto Kapal:")
-        layout_kanan.addWidget(self.lbl_foto_title)
+        layout.addWidget(self.lbl_foto_title)
 
         self.lbl_preview_foto = QLabel("Tidak Ada Foto")
         self.lbl_preview_foto.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_preview_foto.setFixedHeight(180)
-        self.lbl_preview_foto.setStyleSheet(
-            f"""
-                border: 2px dashed #9ca3af;
-                border-radius: 8px;
-                color: #9ca3af;
-                background-color: transparent;
-            """
-        )
-        layout_kanan.addWidget(self.lbl_preview_foto)
+        layout.addWidget(self.lbl_preview_foto)
 
         self.btn_pilih_foto = QPushButton("📂 Lampirkan Foto Baru")
-        self.btn_pilih_foto.setProperty("zoom_font_key", None)
         self.btn_pilih_foto.clicked.connect(self.pilih_foto_kapal)
-        layout_kanan.addWidget(self.btn_pilih_foto)
-        layout_kanan.addStretch()
+        layout.addWidget(self.btn_pilih_foto)
+        layout.addStretch()
 
-        hbox_tombol = QHBoxLayout()
+        tombol_layout = QHBoxLayout()
         self.btn_aksi = QPushButton("Aksi")
         self.btn_aksi.setFixedHeight(40)
         self.btn_aksi.clicked.connect(self.handle_tombol_aksi)
 
         self.btn_batal = QPushButton("❌ Batal")
         self.btn_batal.setFixedHeight(40)
-        self.btn_batal.clicked.connect(lambda: self.atur_mode('IDLE'))
+        self.btn_batal.clicked.connect(lambda: self.atur_mode("IDLE"))
+        tombol_layout.addWidget(self.btn_batal)
+        tombol_layout.addWidget(self.btn_aksi)
+        layout.addLayout(tombol_layout)
 
-        hbox_tombol.addWidget(self.btn_batal)
-        hbox_tombol.addWidget(self.btn_aksi)
-        layout_kanan.addLayout(hbox_tombol)
-
+    def _konfigurasi_splitter(self):
         self.splitter.addWidget(self.panel_kiri)
         self.splitter.addWidget(self.panel_kanan)
         self.splitter.setChildrenCollapsible(False)
@@ -227,10 +206,6 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         self.splitter.setCollapsible(1, False)
         self.splitter.setSizes([650, 350])
 
-        self.atur_mode('IDLE')
-        self.refresh_session_ui()
-        self._lewati_refresh_show_pertama = True
-        terapkan_popup_combobox_bawah(self)
 
     # ============================================================
     # LIFECYCLE & REFRESH
@@ -251,7 +226,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
 
     def showEvent(self, event):
         super().showEvent(event)
-        terapkan_popup_combobox_bawah(self)
+
 
         # init_ui sudah memuat data. Hindari query kedua pada show pertama.
         if self._lewati_refresh_show_pertama:
@@ -428,60 +403,31 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         return hasil
 
     def load_lebar_kolom(self, tabel):
-        default_widths = [
-            45,   # NO
-            180,  # NAMA KAPAL
-            150,  # TUJUAN
-            280,  # KETERANGAN / dasar sebelum Stretch
-            20,   # FOTO tersembunyi
-        ]
-
         header = tabel.horizontalHeader()
         header.blockSignals(True)
         self._sedang_menerapkan_zoom = True
-
         try:
-            saved_widths = self._normalisasi_daftar_lebar(
-                self._settings_kolom().value(
-                    self.SETTINGS_KEY_LEBAR
-                )
+            saved = self._normalisasi_daftar_lebar(
+                self._settings_kolom().value(self.SETTINGS_KEY_LEBAR)
             )
-
-            if (
-                saved_widths
-                and len(saved_widths) == tabel.columnCount()
-            ):
-                base_widths = saved_widths
+            if saved and len(saved) == tabel.columnCount():
+                base_widths = saved
             else:
-                base_widths = default_widths[:tabel.columnCount()]
+                base_widths = list(self.DEFAULT_COLUMN_WIDTHS[:tabel.columnCount()])
+                base_widths.extend([110] * (tabel.columnCount() - len(base_widths)))
 
-                while len(base_widths) < tabel.columnCount():
-                    base_widths.append(110)
+            for index, width in enumerate(base_widths[:min(3, tabel.columnCount())]):
+                tabel.setColumnWidth(index, int(width))
 
-            # Kolom 0-2 dapat diatur manual dan disimpan.
-            for index in range(min(3, tabel.columnCount())):
-                tabel.setColumnWidth(
-                    index,
-                    int(base_widths[index]),
-                )
-
-            # Keterangan tetap memakai ruang yang tersisa.
-            if tabel.columnCount() > 3:
+            if tabel.columnCount() > self.KOL_KETERANGAN:
                 header.setSectionResizeMode(
-                    3,
+                    self.KOL_KETERANGAN,
                     QHeaderView.ResizeMode.Stretch,
                 )
 
-            self._perbarui_cache_lebar_zoom(
-                tabel,
-                base_widths,
-            )
-
+            self._perbarui_cache_lebar_zoom(tabel, base_widths)
         except Exception as exc:
-            print(
-                f"Error memuat lebar kolom Kapal: {exc}"
-            )
-
+            print(f"Error memuat lebar kolom Kapal: {exc}")
         finally:
             self._sedang_menerapkan_zoom = False
             header.blockSignals(False)
@@ -579,119 +525,71 @@ class SubTabKapal(QWidget, ZoomTableMixin):
             )
 
     def refresh_tabel(self):
-        self.tabel_kapal.blockSignals(True)
-        self.tabel_kapal.setRowCount(0)
+        tabel = self.tabel_kapal
+        tabel.blockSignals(True)
+        tabel.setRowCount(0)
         self._kapal_master_by_key = {}
-
         try:
-            rows = db_service.ambil_semua_kapal_full()
-
-            for i, row in enumerate(rows):
-                baris = self.tabel_kapal.rowCount()
-                self.tabel_kapal.insertRow(baris)
-
-                no_urut = str(i + 1)
-                nama_kapal = self._normalisasi_teks(
-                    row[0] if len(row) > 0 else "",
-                    kapital=True,
-                )
-                tujuan = self._normalisasi_teks(
-                    row[1] if len(row) > 1 else "",
-                    kapital=True,
-                )
-                ket = self._normalisasi_teks(
-                    row[2] if len(row) > 2 else "",
-                    kapital=True,
-                )
-                foto = self._normalisasi_teks(
-                    row[3] if len(row) > 3 else "",
-                )
-
-                key = self._normalisasi_kunci_kapal(
-                    nama_kapal
-                )
-                if key and key not in self._kapal_master_by_key:
-                    self._kapal_master_by_key[key] = {
-                        "nama": nama_kapal,
-                        "tujuan": tujuan,
-                        "keterangan": ket,
-                        "foto": foto,
-                    }
-
-                self.tabel_kapal.setItem(
-                    baris, self.KOL_NO,
-                    buat_tabel_item(
-                        no_urut,
-                        editable=False,
-                        alignment=Qt.AlignmentFlag.AlignCenter,
-                    ),
-                )
-                self.tabel_kapal.setItem(
-                    baris, self.KOL_NAMA_KAPAL,
-                    buat_tabel_item(
-                        nama_kapal,
-                        editable=False,
-                        alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    ),
-                )
-                self.tabel_kapal.setItem(
-                    baris, self.KOL_TUJUAN,
-                    buat_tabel_item(
-                        tujuan,
-                        editable=False,
-                        alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    ),
-                )
-                self.tabel_kapal.setItem(
-                    baris, self.KOL_KETERANGAN,
-                    buat_tabel_item(
-                        ket,
-                        editable=False,
-                        alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    ),
-                )
-                self.tabel_kapal.setItem(
-                    baris, self.KOL_FOTO,
-                    buat_tabel_item(
-                        foto,
-                        editable=False,
-                    ),
-                )
-
+            for index, row in enumerate(db_service.ambil_semua_kapal_full()):
+                self._tambahkan_baris_kapal(index, row)
             self.setup_autocomplete_kapal_editor()
-            self.filter_tabel_kapal(
-                self.input_cari.text()
-            )
-
+            self.filter_tabel_kapal(self.input_cari.text())
         except Exception as exc:
-            print(
-                f"Error Load Tabel Kapal: {exc}"
-            )
+            print(f"Error Load Tabel Kapal: {exc}")
         finally:
-            self.tabel_kapal.blockSignals(False)
+            tabel.blockSignals(False)
+
+    def _data_baris_kapal(self, row):
+        return {
+            "nama": self._normalisasi_teks(row[0] if len(row) > 0 else "", kapital=True),
+            "tujuan": self._normalisasi_teks(row[1] if len(row) > 1 else "", kapital=True),
+            "keterangan": self._normalisasi_teks(row[2] if len(row) > 2 else "", kapital=True),
+            "foto": self._normalisasi_teks(row[3] if len(row) > 3 else ""),
+        }
+
+    def _tambahkan_baris_kapal(self, index, row):
+        tabel = self.tabel_kapal
+        baris = tabel.rowCount()
+        tabel.insertRow(baris)
+
+        data = self._data_baris_kapal(row)
+        key = self._normalisasi_kunci_kapal(data["nama"])
+        if key and key not in self._kapal_master_by_key:
+            self._kapal_master_by_key[key] = dict(data)
+
+        values = (
+            str(index + 1),
+            data["nama"],
+            data["tujuan"],
+            data["keterangan"],
+            data["foto"],
+        )
+        alignments = (
+            Qt.AlignmentFlag.AlignCenter,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            None,
+        )
+        for column, (value, alignment) in enumerate(zip(values, alignments)):
+            kwargs = {"editable": False}
+            if alignment is not None:
+                kwargs["alignment"] = alignment
+            tabel.setItem(baris, column, buat_tabel_item(value, **kwargs))
 
     def filter_tabel_kapal(self, text):
         kata_kunci = text.lower().strip()
         nomor_baru = 1
-
         for row in range(self.tabel_kapal.rowCount()):
-            harus_muncul = False
-            for col in (
-                self.KOL_NAMA_KAPAL,
-                self.KOL_TUJUAN,
-                self.KOL_KETERANGAN,
-            ):
-                item = self.tabel_kapal.item(row, col)
-                if item and kata_kunci in item.text().lower():
-                    harus_muncul = True
-                    break
-
-            if harus_muncul:
-                self.tabel_kapal.setRowHidden(row, False)
+            muncul = any(
+                (item := self.tabel_kapal.item(row, col))
+                and kata_kunci in item.text().lower()
+                for col in self.FILTER_COLUMNS
+            )
+            self.tabel_kapal.setRowHidden(row, not muncul)
+            if muncul:
                 self.tabel_kapal.item(row, self.KOL_NO).setText(str(nomor_baru))
                 nomor_baru += 1
-            else:
-                self.tabel_kapal.setRowHidden(row, True)
 
     def simpan_atau_update_kapal(self):
         nama_kapal = self.input_nama_kapal.text().strip().upper()
@@ -768,38 +666,67 @@ class SubTabKapal(QWidget, ZoomTableMixin):
     # TEMA DAN ZOOM
     # ============================================================
 
-    def _kunci_tombol_foto_statis(self):
-        if not hasattr(self, "btn_pilih_foto"):
-            return
+    def _terapkan_tema_statis_armada(self, st):
+        """Terapkan tema statis form Armada; hanya tabel yang mengikuti zoom."""
+        ukuran = get_global_font_sizes_pt(0)
+        self.layout().setContentsMargins(10, 10, 10, 10)
+        self.panel_kiri.layout().setContentsMargins(0, 0, 10, 0)
+        self.panel_kanan.layout().setContentsMargins(15, 15, 15, 15)
 
-        font_statis_base = zoom_helper.batasi_ukuran_font(
-            get_global_font_sizes(0).get("sz_base", 10), default=10
-        )
+        for widget, style_key in (
+            (self.panel_kanan, "panel_kanan"),
+            (self.label_judul, "label_judul"),
+            (self.input_cari, "input_normal"),
+            (self.lbl_judul_kanan, "label_judul_kanan"),
+            (self.lbl_preview_foto, "preview_foto"),
+        ):
+            widget.setStyleSheet(st[style_key])
 
-        style_btn_foto = getattr(
-            self,
-            "_style_btn_foto_kapal",
-            "QPushButton { background-color: #e2e8f0; color: #0f172a; "
-            "border: 1px solid #cbd5e1; border-radius: 4px; } "
-            "QPushButton:hover { background-color: #cbd5e1; }"
-        )
+        self.label_judul.setFont(_buat_font_pt(ukuran["sz_title"], tebal=True))
+        self.lbl_judul_kanan.setFont(_buat_font_pt(ukuran["sz_total"], tebal=True))
 
-        font_foto = QFont(get_master_font(), font_statis_base)
-        self.btn_pilih_foto.setProperty("zoom_font_key", None)
-        self.btn_pilih_foto.setFont(font_foto)
-        self.btn_pilih_foto.setMinimumHeight(30)
-        self.btn_pilih_foto.setMaximumHeight(30)
-        self.btn_pilih_foto.setStyleSheet(
-            style_btn_foto
-            + f"""
-            QPushButton {{
-                font-family: '{get_master_font()}';
-                font-size: {font_statis_base}pt;
-                padding: 2px 6px;
-            }}
-            """
+        font_base = _buat_font_pt(ukuran["sz_base"])
+        font_input = _buat_font_pt(ukuran["sz_input"])
+        font_tombol = _buat_font_pt(ukuran["sz_base"], tebal=True)
+        self.input_cari.setFont(font_input)
+        self.input_cari.setFixedWidth(230)
+
+        for label in (
+            self.lbl_nama_kapal,
+            self.lbl_tujuan,
+            self.lbl_ket,
+            self.lbl_foto_title,
+            self.lbl_preview_foto,
+        ):
+            label.setFont(font_base)
+
+        input_form = (
+            self.input_nama_kapal,
+            self.input_tujuan,
+            self.input_keterangan,
         )
-        self.btn_pilih_foto.updateGeometry()
+        for widget in input_form:
+            widget.setFont(font_input)
+            style_key = "input_locked" if widget.isReadOnly() or not widget.isEnabled() else "input_normal"
+            widget.setStyleSheet(st[style_key])
+
+        tinggi_input = max(30, self.input_nama_kapal.sizeHint().height())
+        self.input_cari.setFixedHeight(tinggi_input)
+        for widget in input_form:
+            widget.setFixedHeight(tinggi_input)
+
+        for button, style_key in (
+            (self.btn_batal, "btn_batal"),
+            (self.btn_aksi, "btn_aksi"),
+        ):
+            button.setFont(font_tombol)
+            button.setFixedHeight(max(38, button.sizeHint().height()))
+            button.setStyleSheet(st[style_key])
+
+        self.btn_pilih_foto.setFont(font_base)
+        self.btn_pilih_foto.setFixedHeight(max(30, self.btn_pilih_foto.sizeHint().height()))
+        self.btn_pilih_foto.setStyleSheet(st["btn_foto"])
+        self._terapkan_placeholder_dinamis()
 
     def sesuaikan_tema_lokal(self):
         if self._sedang_menerapkan_tema:
@@ -808,108 +735,25 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         self._sedang_menerapkan_tema = True
         try:
             win = self.window()
-            is_dark = win.current_theme == "dark" if win and hasattr(
-                win,
-                'current_theme',
-            ) else False
+            is_dark = bool(
+                win
+                and hasattr(win, "current_theme")
+                and win.current_theme == "dark"
+            )
             z = zoom_helper.dapatkan_zoom_level("TabArmada")
-
             st = get_armada_styles(is_dark, self.mode)
-            self._style_btn_foto_kapal = st["btn_foto"]
 
-            # --- 1. RESET MARGIN SEBELUM ZOOM ---
-            self.layout().setContentsMargins(10, 10, 10, 10)
-            self.panel_kiri.layout().setContentsMargins(0, 0, 10, 0)
-            self.panel_kanan.layout().setContentsMargins(15, 15, 15, 15)
+            self._terapkan_tema_statis_armada(st)
 
-            # --- 3. BLOKIR SIGNAL & TERAPKAN ZOOM ---
-            header = self.tabel_kapal.horizontalHeader()
-            header.blockSignals(True)
+            # Tabel mengikuti level zoom TabArmada melalui helper tabel.
             self._sedang_menerapkan_zoom = True
             try:
-                zoom_helper.terapkan_zoom_semua_elemen(
-                    container_widget=self, z=z, is_dark=is_dark
+                zoom_helper.terapkan_zoom_tabel(
+                    self.tabel_kapal,
+                    is_dark=is_dark,
+                    z=z,
                 )
             finally:
                 self._sedang_menerapkan_zoom = False
-                header.blockSignals(False)
-
-            # --- 4. TERAPKAN TEMA SETELAH ZOOM ---
-            # Urutan ini mencegah cache stylesheet zoom mengembalikan warna
-            # mode terang ketika aplikasi sedang menggunakan mode gelap.
-            self.panel_kanan.setStyleSheet(st["panel_kanan"])
-            self.label_judul.setStyleSheet(st["label_judul"])
-            self.input_cari.setStyleSheet(st["input_normal"])
-            self.lbl_judul_kanan.setStyleSheet(st["label_judul_kanan"])
-
-            # --- 5. PAKSA SKALA KOLOM TABEL ---
-
-            # --- 6. KUNCI PAKSA UKURAN INPUT & TOMBOL (ANTI-MELAR) ---
-            ukuran_font = get_global_font_sizes(0)
-            ukuran_statis = zoom_helper.batasi_ukuran_font(
-                ukuran_font.get("sz_input", 10), default=10
-            )
-            font_base = zoom_helper.batasi_ukuran_font(
-                ukuran_font.get("sz_base", 10), default=10
-            )
-
-            # Pencarian Kiri
-            font_cari = self.input_cari.font()
-            font_cari.setPointSize(ukuran_statis)
-            self.input_cari.setFont(font_cari)
-            self.input_cari.setFixedHeight(30)
-            self.input_cari.setFixedWidth(230)
-
-            # Judul Panel Kanan
-            font_judul_kanan = QFont(get_master_font(), font_base + 1, QFont.Weight.Bold)
-            self.lbl_judul_kanan.setFont(font_judul_kanan)
-
-            # Label Kanan
-            font_label = QFont(get_master_font(), font_base)
-            for lbl in [
-                self.lbl_nama_kapal,
-                self.lbl_tujuan,
-                self.lbl_ket,
-                self.lbl_foto_title,
-            ]:
-                lbl.setFont(font_label)
-
-            # Editor Form Input
-            font_input = QFont(get_master_font(), ukuran_statis)
-            for w_input in [
-                self.input_nama_kapal,
-                self.input_tujuan,
-                self.input_keterangan,
-            ]:
-                w_input.setFont(font_input)
-                w_input.setFixedHeight(30) # Mengunci input agar tidak melar
-                style_aktif = st["input_locked"] if (hasattr(
-                    w_input,
-                    'isReadOnly',
-                ) and w_input.isReadOnly()) or not w_input.isEnabled() else st["input_normal"]
-                w_input.setStyleSheet(style_aktif)
-
-            # Tombol Aksi Kanan
-            font_btn = QFont(get_master_font(), font_base, QFont.Weight.Bold)
-            self.btn_batal.setFont(font_btn)
-            self.btn_batal.setFixedHeight(38)
-            self.btn_batal.setStyleSheet(st["btn_batal"])
-
-            self.btn_aksi.setFont(font_btn)
-            self.btn_aksi.setFixedHeight(38)
-            self.btn_aksi.setStyleSheet(st["btn_aksi"])
-
-            self.btn_pilih_foto.setFont(font_label)
-            self.btn_pilih_foto.setStyleSheet(st["btn_foto"])
-            self._kunci_tombol_foto_statis()
-
-            # --- 7. KUNCI ULANG MARGIN SETELAH ZOOM (Kunci Mati Jarak) ---
-            self.layout().setContentsMargins(10, 10, 10, 10)
-            self.panel_kiri.layout().setContentsMargins(0, 0, 10, 0)
-            self.panel_kanan.layout().setContentsMargins(15, 15, 15, 15)
-
-            # Placeholder diterapkan paling akhir agar italic dan warnanya
-            # tidak tertimpa oleh pengaturan font, tema, atau zoom.
-            self._terapkan_placeholder_dinamis()
         finally:
             self._sedang_menerapkan_tema = False

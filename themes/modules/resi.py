@@ -28,8 +28,12 @@ def get_resi_static_styles(is_dark: bool) -> dict:
 
 def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
     """Style dinamis kartu dan kelompok rekening pada TabResi."""
-    txt_top_color = "#ffffff" if is_dark else "#0f172a"
-    txt_bottom_color = "#64748b"
+    if is_dark:
+        txt_top_color = "#e2e8f0"
+        txt_bottom_color = "#a8b3c5"
+    else:
+        txt_top_color = "#334155"
+        txt_bottom_color = "#64748b"
     bg_card = "#1d2024" if is_dark else "#f8fafc"
     border_card = "#3f434d" if is_dark else "#cbd5e1"
     group_text = "#94a3b8" if is_dark else "#64748b"
@@ -157,7 +161,7 @@ def get_resi_detail_barang_theme(
     }
 
 
-def get_btn_simpan_cetak_style(z: int = 0) -> str:
+def get_btn_simpan_cetak_style() -> str:
     """Style tombol utama Simpan dan Cetak khusus untuk TabResi."""
     return f"""
         QPushButton {{
@@ -202,7 +206,6 @@ def get_resi_styles(
         )
         c_text, c_text_mut, c_text_dim = "#ffffff", "#cbd5e1", "#9ca3af"
         c_foc, c_bg_foc = "#3b82f6", "#20242b"
-        c_hist_bg = "#25282e"
         c_resi_bg, c_resi_bord, c_resi_txt = "#1d2024", "#3b82f6", "#fbbf24"
 
         c_btn_add_bg, c_btn_add_txt, c_btn_add_bord = "#31353d", "#3b82f6", "#3b82f6"
@@ -221,7 +224,6 @@ def get_resi_styles(
         )
         c_text, c_text_mut, c_text_dim = "#0f172a", "#1e293b", "#64748b"
         c_foc, c_bg_foc = "#2563eb", "#ffffff"
-        c_hist_bg = "#f1f5f9"
         c_resi_bg, c_resi_bord, c_resi_txt = "#fef2f2", "#ef4444", "#b91c1c"
 
         c_btn_add_bg, c_btn_add_txt, c_btn_add_bord = "#ffffff", "#2563eb", "#2563eb"
@@ -233,7 +235,7 @@ def get_resi_styles(
         c_btn_del_pressed_bg = "#fee2e2"
 
     input_style = f"""
-        QLineEdit, QTextEdit, QComboBox, QDateEdit {{
+        QLineEdit, QTextEdit, QDateEdit {{
             font-size: {sz_input}px;
             background-color: {c_bg};
             color: {c_text};
@@ -242,7 +244,7 @@ def get_resi_styles(
             padding: 6px;
             font-family: '{get_master_font()}';
         }}
-        QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus {{
+        QLineEdit:focus, QTextEdit:focus, QDateEdit:focus {{
             border: 1px solid {c_foc};
             background-color: {c_bg_foc};
         }}
@@ -317,20 +319,20 @@ def get_resi_styles(
             font-family: '{get_master_font()}';
         """,
         "lbl_tgl_tag": f"""
-            color: {c_text_mut};
+            color: {c_text_dim};
             font-weight: bold;
             font-family: '{get_master_font()}';
-            font-size: {sz_tag}px;
+            font-size: {sz_base}px;
         """,
         "lbl_resi_tag": f"""
-            font-size: {sz_sm}px;
             color: {c_text_dim};
+            font-size: {sz_base}px;
             font-weight: bold;
             font-family: '{get_master_font()}';
         """,
         "lbl_histori_title": f"""
             color: {c_text};
-            font-size: {sz_base + 1}px;
+            font-size: {sz_base}px;
             font-weight: bold;
             font-family: '{get_master_font()}';
         """,
@@ -354,17 +356,6 @@ def get_resi_styles(
                 border-radius: 4px;
                 background-color: {c_bg};
                 color: {c_text};
-            }}
-        """,
-        "date_histori": f"""
-            QDateEdit {{
-                font-size: {sz_input}px;
-                font-family: '{get_master_font()}';
-                padding: 2px 10px;
-                background-color: {c_hist_bg};
-                color: {c_text_mut};
-                border: 1px solid {c_bord};
-                border-radius: 4px;
             }}
         """,
         "list_histori": f"""
@@ -481,7 +472,7 @@ def get_resi_styles(
         "input_utama": input_style,
         "scroll_kiri": static_styles["scroll_kiri"],
 
-        "btn_generate_simpan": get_btn_simpan_cetak_style(z),
+        "btn_generate_simpan": get_btn_simpan_cetak_style(),
         "lbl_reset_form": f"""
             QPushButton {{
                 color: #ef4444;
@@ -505,7 +496,7 @@ def get_resi_styles(
     }
 
 
-def get_btn_clear_container_style(is_dark: bool = False, sz_sm: int = 12) -> str:
+def get_btn_clear_container_style(is_dark: bool = False) -> str:
     """Style QToolButton reset/clear container khusus untuk Tab Resi."""
     if is_dark:
         normal_color = "#d1d5db"  # Light grey saat mode gelap

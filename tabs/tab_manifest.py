@@ -37,20 +37,23 @@ from themes.modules.manifest import (
     get_manifest_styles,
 )
 
+from themes.components.combobox import terapkan_popup_bawah_combobox
+
 from utils.splitter_helper import buat_splitter
 from utils.printer.print_manifest import cetak_manifest_ke_printer
 from utils.frozen_table_helper import FrozenTableWidget
-from utils.typography import get_global_font_sizes
+from utils.typography import (
+    get_global_font_sizes,
+    konversi_style_font_ke_point,
+    ukuran_font_px_ke_pt,
+)
 from utils import zoom as zoom_helper
 from utils.number_formatters import (
     format_angka_indonesia,
     format_ke_rupiah,
 )
 from utils.table_helper import buat_tabel_item
-from utils.widget_helpers import (
-    paksa_kapital_lineedit,
-    terapkan_popup_combobox_bawah,
-)
+from utils.widget_helpers import paksa_kapital_lineedit
 from utils.date_ind_format import format_tanggal_ke_ui
 from utils.placeholder_helper import terap_semua_placeholder_dinamis
 
@@ -135,31 +138,84 @@ class TabManifest(QWidget):
         layout_utama = QHBoxLayout(self)
         layout_utama.setContentsMargins(0, 0, 0, 0)
 
+        layout_kiri = self._buat_panel_kiri()
+        self._bangun_header_manifest(layout_kiri)
+        self._bangun_detail_manifest(layout_kiri)
+        self._bangun_tabel_manifest(layout_kiri)
+        self._bangun_panel_histori()
+
+        self.splitter = buat_splitter(
+            self.panel_kiri,
+            self.panel_kanan,
+            orientation=Qt.Orientation.Horizontal,
+            ukuran_awal=(800, 200),
+            bisa_diciutkan=False,
+            parent=self,
+        )
+        layout_utama.addWidget(self.splitter)
+
+        self.btn_proses.clicked.connect(self.update_truk_ke_manifest)
+        self.refresh_tahun_filter()
+        self.load_data_resi_gudang()
+        self.generate_no_manifest()
+        self.sesuaikan_tema_lokal()
+        self.setup_autocomplete_truk()
+
+    def _buat_panel_kiri(self):
         self.panel_kiri = QWidget()
-        # Batas lebar panel kiri agar tidak dapat digeser sampai hilang.
         self.panel_kiri.setMinimumWidth(700)
         self.panel_kiri.setMaximumWidth(1800)
-        layout_kiri = QVBoxLayout(self.panel_kiri)
-        layout_kiri.setContentsMargins(8, 8, 8, 8)
-        layout_kiri.setSpacing(8)
 
-        # Header dibungkus QWidget dengan tinggi tetap. Tanpa pembungkus ini,
-        # QGridLayout dapat ikut menerima sisa tinggi panel dan mendorong kartu
-        # input serta tabel menjauh.
-        self.wadah_header_manifest = QWidget()
-        self.wadah_header_manifest.setObjectName("wadahHeaderManifest")
-        self.wadah_header_manifest.setSizePolicy(
+        layout = QVBoxLayout(self.panel_kiri)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        return layout
+
+    @staticmethod
+    def _konfigurasi_wadah_tetap(widget, tinggi):
+        widget.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
         )
-        self.wadah_header_manifest.setFixedHeight(48)
+        widget.setFixedHeight(tinggi)
+
+    @staticmethod
+    def _buat_grid_card(card, vertical_spacing):
+        grid = QGridLayout(card)
+        grid.setContentsMargins(26, 18, 26, 18)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(vertical_spacing)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        return grid
+
+    @staticmethod
+    def _buat_wadah_header_field(label_text, ukuran, spacing):
+        wadah = QWidget()
+        layout = QHBoxLayout(wadah)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(spacing)
+
+        label = QLabel(label_text)
+        editor = QLineEdit()
+        editor.setReadOnly(True)
+        editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        editor.setFixedSize(*ukuran)
+        editor.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout.addWidget(label)
+        layout.addWidget(editor)
+        return wadah, label, editor
+
+    def _bangun_header_manifest(self, layout_kiri):
+        self.wadah_header_manifest = QWidget()
+        self.wadah_header_manifest.setObjectName("wadahHeaderManifest")
+        self._konfigurasi_wadah_tetap(self.wadah_header_manifest, 48)
 
         layout_header = QGridLayout(self.wadah_header_manifest)
         layout_header.setContentsMargins(0, 0, 0, 2)
         layout_header.setHorizontalSpacing(12)
-        layout_header.setColumnStretch(0, 1)
-        layout_header.setColumnStretch(1, 1)
-        layout_header.setColumnStretch(2, 1)
+        for column in range(3):
+            layout_header.setColumnStretch(column, 1)
 
         self.lbl_title = QLabel("📦 Pembuatan Manifest Pengiriman")
         layout_header.addWidget(
@@ -169,18 +225,11 @@ class TabManifest(QWidget):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
 
-        wadah_tanggal = QWidget()
-        layout_tanggal = QHBoxLayout(wadah_tanggal)
-        layout_tanggal.setContentsMargins(0, 0, 0, 0)
-        layout_tanggal.setSpacing(6)
-        self.lbl_tanggal_manifest = QLabel("Tanggal Transaksi:")
-        self.txt_tanggal_manifest = QLineEdit()
-        self.txt_tanggal_manifest.setReadOnly(True)
-        self.txt_tanggal_manifest.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_tanggal_manifest.setFixedSize(180, 30)
-        self.txt_tanggal_manifest.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout_tanggal.addWidget(self.lbl_tanggal_manifest)
-        layout_tanggal.addWidget(self.txt_tanggal_manifest)
+        (
+            wadah_tanggal,
+            self.lbl_tanggal_manifest,
+            self.txt_tanggal_manifest,
+        ) = self._buat_wadah_header_field("Tanggal Transaksi:", (180, 30), 6)
         layout_header.addWidget(
             wadah_tanggal,
             0,
@@ -188,18 +237,11 @@ class TabManifest(QWidget):
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
         )
 
-        wadah_nomor = QWidget()
-        layout_nomor = QHBoxLayout(wadah_nomor)
-        layout_nomor.setContentsMargins(0, 0, 0, 0)
-        layout_nomor.setSpacing(8)
-        self.lbl_no_manifest = QLabel("No. Manifest:")
-        self.txt_no_manifest = QLineEdit()
-        self.txt_no_manifest.setReadOnly(True)
-        self.txt_no_manifest.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_no_manifest.setFixedSize(200, 36)
-        self.txt_no_manifest.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout_nomor.addWidget(self.lbl_no_manifest)
-        layout_nomor.addWidget(self.txt_no_manifest)
+        (
+            wadah_nomor,
+            self.lbl_no_manifest,
+            self.txt_no_manifest,
+        ) = self._buat_wadah_header_field("No. Manifest:", (200, 36), 8)
         layout_header.addWidget(
             wadah_nomor,
             0,
@@ -210,48 +252,39 @@ class TabManifest(QWidget):
         layout_kiri.addWidget(self.wadah_header_manifest, 0)
         self.perbarui_tanggal_header()
 
-        # Area input detail dibuat seperti kartu input pada Tab Resi.
-        # Panel kiri berisi informasi rute, panel kanan berisi armada,
-        # sedangkan tombol aksi tetap berdiri sendiri di sisi kanan.
-        # Bungkus area detail dalam QWidget dengan tinggi tetap agar QVBoxLayout
-        # tidak membagikan ruang kosong vertikal ke area kartu.
-        self.wadah_detail_manifest = QWidget()
-        self.wadah_detail_manifest.setObjectName("wadahDetailManifest")
-        self.wadah_detail_manifest.setSizePolicy(
+    @staticmethod
+    def _konfigurasi_lineedit_kapital(widget, placeholder, minimum_width=None):
+        widget.setPlaceholderText(placeholder)
+        if minimum_width is not None:
+            widget.setMinimumWidth(minimum_width)
+        widget.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
         )
-        self.wadah_detail_manifest.setFixedHeight(172)
+        widget.textChanged.connect(
+            lambda _text="", editor=widget: paksa_kapital_lineedit(editor)
+        )
 
-        layout_detail = QHBoxLayout(self.wadah_detail_manifest)
-        layout_detail.setContentsMargins(0, 0, 0, 0)
-        layout_detail.setSpacing(14)
-
+    def _bangun_card_rute_manifest(self):
         self.card_rute_manifest = QFrame()
         self.card_rute_manifest.setObjectName("cardRuteManifest")
-        self.card_rute_manifest.setFixedHeight(164)
-        self.card_rute_manifest.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        grid_rute = QGridLayout(self.card_rute_manifest)
-        grid_rute.setContentsMargins(26, 18, 26, 18)
-        grid_rute.setHorizontalSpacing(14)
-        grid_rute.setVerticalSpacing(12)
-        grid_rute.setColumnStretch(0, 0)
-        grid_rute.setColumnStretch(1, 1)
+        self._konfigurasi_wadah_tetap(self.card_rute_manifest, 164)
+        grid = self._buat_grid_card(self.card_rute_manifest, 12)
 
         self.lbl_input_tujuan = QLabel("Tujuan:")
         self.lbl_input_kapal = QLabel("Kapal:")
         self.lbl_input_note = QLabel("Note:")
-        self.lbl_input_tujuan.setMinimumWidth(70)
-        self.lbl_input_kapal.setMinimumWidth(70)
-        self.lbl_input_note.setMinimumWidth(70)
+        for label in (
+            self.lbl_input_tujuan,
+            self.lbl_input_kapal,
+            self.lbl_input_note,
+        ):
+            label.setMinimumWidth(70)
 
         self.cb_filter_wilayah = QComboBox()
         self.cb_filter_wilayah.addItems(
             DATA_CLIENT.get(
-                'provinsi_tujuan',
+                "provinsi_tujuan",
                 ["PROVINSI A", "PROVINSI B", "PROVINSI C"],
             )
         )
@@ -260,146 +293,99 @@ class TabManifest(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
         )
-        self.cb_filter_wilayah.currentTextChanged.connect(
-            self.on_wilayah_changed
-        )
+        self.cb_filter_wilayah.currentTextChanged.connect(self.on_wilayah_changed)
 
-        # Nama Kapal bersifat opsional. Hanya nama yang disimpan ke Manifest.
         self.txt_nama_kapal = QLineEdit()
-        self.txt_nama_kapal.setPlaceholderText("Nama Kapal (Opsional)")
-        self.txt_nama_kapal.setMinimumWidth(230)
-        self.txt_nama_kapal.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
+        self._konfigurasi_lineedit_kapital(
+            self.txt_nama_kapal,
+            "Nama Kapal (Opsional)",
+            230,
         )
-        self.txt_nama_kapal.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_nama_kapal)
-        )
-        self.txt_nama_kapal.editingFinished.connect(
-            self.autofill_kapal_dari_input
-        )
+        self.txt_nama_kapal.editingFinished.connect(self.autofill_kapal_dari_input)
 
         self.txt_note_manifest = QLineEdit()
-        self.txt_note_manifest.setPlaceholderText("Note (Wajib jika tanpa detail truk)")
-        self.txt_note_manifest.setMinimumWidth(230)
-        self.txt_note_manifest.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.txt_note_manifest.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_note_manifest)
+        self._konfigurasi_lineedit_kapital(
+            self.txt_note_manifest,
+            "Note (Wajib jika tanpa detail truk)",
+            230,
         )
 
-        grid_rute.addWidget(
-            self.lbl_input_tujuan,
-            0,
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-        )
-        grid_rute.addWidget(self.cb_filter_wilayah, 0, 1)
-        grid_rute.addWidget(
-            self.lbl_input_kapal,
-            1,
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-        )
-        grid_rute.addWidget(self.txt_nama_kapal, 1, 1)
-        grid_rute.addWidget(
-            self.lbl_input_note,
-            2,
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-        )
-        grid_rute.addWidget(self.txt_note_manifest, 2, 1)
+        for row, (label, widget) in enumerate((
+            (self.lbl_input_tujuan, self.cb_filter_wilayah),
+            (self.lbl_input_kapal, self.txt_nama_kapal),
+            (self.lbl_input_note, self.txt_note_manifest),
+        )):
+            grid.addWidget(
+                label,
+                row,
+                0,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            )
+            grid.addWidget(widget, row, 1)
 
+    def _perbarui_font_placeholder_truk(self, index=None):
+        if index is None:
+            index = self.cb_jenis_truk.currentIndex()
+
+        font_utama = self.cb_jenis_truk.font()
+        font_utama.setItalic(index == 0)
+        self.cb_jenis_truk.setFont(font_utama)
+
+        font_italic = QFont(font_utama)
+        font_italic.setItalic(True)
+        self.cb_jenis_truk.setItemData(0, font_italic, Qt.ItemDataRole.FontRole)
+
+        font_normal = QFont(font_utama)
+        font_normal.setItalic(False)
+        for item_index in range(1, self.cb_jenis_truk.count()):
+            self.cb_jenis_truk.setItemData(
+                item_index,
+                font_normal,
+                Qt.ItemDataRole.FontRole,
+            )
+
+    def _bangun_card_armada_manifest(self):
         self.card_armada_manifest = QFrame()
         self.card_armada_manifest.setObjectName("cardArmadaManifest")
-        self.card_armada_manifest.setFixedHeight(164)
-        self.card_armada_manifest.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        grid_armada = QGridLayout(self.card_armada_manifest)
-        grid_armada.setContentsMargins(26, 18, 26, 18)
-        grid_armada.setHorizontalSpacing(14)
-        grid_armada.setVerticalSpacing(10)
-        grid_armada.setColumnStretch(0, 0)
-        grid_armada.setColumnStretch(1, 1)
+        self._konfigurasi_wadah_tetap(self.card_armada_manifest, 164)
+        grid = self._buat_grid_card(self.card_armada_manifest, 10)
 
         self.lbl_input_truk = QLabel("Truk:")
         self.lbl_input_sopir = QLabel("Sopir:")
         self.lbl_input_keterangan = QLabel("Ket:")
-        for label_input in (
-                self.lbl_input_truk,
-                self.lbl_input_sopir,
-                self.lbl_input_keterangan,
+        for label in (
+            self.lbl_input_truk,
+            self.lbl_input_sopir,
+            self.lbl_input_keterangan,
         ):
-            label_input.setMinimumWidth(70)
+            label.setMinimumWidth(70)
 
-        # ComboBox Jenis Truk dengan placeholder.
         self.cb_jenis_truk = QComboBox()
         self.cb_jenis_truk.addItem("- Pilih jenis -")
-        self.cb_jenis_truk.addItems(
-            ["TB", "Tronton", "CDD", "Pick-up", "Lainnya..."]
-        )
+        self.cb_jenis_truk.addItems(["TB", "Tronton", "CDD", "Pick-up", "Lainnya..."])
         self.cb_jenis_truk.setMinimumWidth(150)
         self.cb_jenis_truk.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
         )
-
-        def ubah_font_placeholder(idx):
-            font_utama = self.cb_jenis_truk.font()
-            font_utama.setItalic(idx == 0)
-            self.cb_jenis_truk.setFont(font_utama)
-
-            font_italic = QFont(font_utama)
-            font_italic.setItalic(True)
-            self.cb_jenis_truk.setItemData(
-                0,
-                font_italic,
-                Qt.ItemDataRole.FontRole,
-            )
-
-            font_normal = QFont(font_utama)
-            font_normal.setItalic(False)
-            for i in range(1, self.cb_jenis_truk.count()):
-                self.cb_jenis_truk.setItemData(
-                    i,
-                    font_normal,
-                    Qt.ItemDataRole.FontRole,
-                )
-
         self.cb_jenis_truk.currentIndexChanged.connect(
-            ubah_font_placeholder
+            self._perbarui_font_placeholder_truk
         )
         self.cb_jenis_truk.currentIndexChanged.connect(
             self.on_jenis_truk_manifest_changed
         )
-        ubah_font_placeholder(0)
+        self._perbarui_font_placeholder_truk(0)
 
         self.txt_jenis_truk_lain = QLineEdit()
-        self.txt_jenis_truk_lain.setPlaceholderText("Jenis lainnya")
-        self.txt_jenis_truk_lain.setMinimumWidth(130)
-        self.txt_jenis_truk_lain.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.txt_jenis_truk_lain.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_jenis_truk_lain)
+        self._konfigurasi_lineedit_kapital(
+            self.txt_jenis_truk_lain,
+            "Jenis lainnya",
+            130,
         )
         self.txt_jenis_truk_lain.hide()
 
         self.txt_no_pol = QLineEdit()
-        self.txt_no_pol.setPlaceholderText("No. Pol")
-        self.txt_no_pol.setMinimumWidth(130)
-        self.txt_no_pol.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.txt_no_pol.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_no_pol)
-        )
+        self._konfigurasi_lineedit_kapital(self.txt_no_pol, "No. Pol", 130)
 
         wadah_truk = QWidget()
         layout_truk = QHBoxLayout(wadah_truk)
@@ -410,147 +396,113 @@ class TabManifest(QWidget):
         layout_truk.addWidget(self.txt_no_pol, 4)
 
         self.txt_sopir = QLineEdit()
-        self.txt_sopir.setPlaceholderText("Nama Sopir")
-        self.txt_sopir.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.txt_sopir.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_sopir)
-        )
+        self._konfigurasi_lineedit_kapital(self.txt_sopir, "Nama Sopir")
 
         self.txt_keterangan = QLineEdit()
-        self.txt_keterangan.setPlaceholderText("Keterangan")
-        self.txt_keterangan.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        self.txt_keterangan.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_keterangan)
-        )
+        self._konfigurasi_lineedit_kapital(self.txt_keterangan, "Keterangan")
 
-        grid_armada.addWidget(
-            self.lbl_input_truk,
-            0,
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-        )
-        grid_armada.addWidget(wadah_truk, 0, 1)
-        grid_armada.addWidget(
-            self.lbl_input_sopir,
-            1,
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-        )
-        grid_armada.addWidget(self.txt_sopir, 1, 1)
-        grid_armada.addWidget(
-            self.lbl_input_keterangan,
-            2,
-            0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-        )
-        grid_armada.addWidget(self.txt_keterangan, 2, 1)
+        for row, (label, widget) in enumerate((
+            (self.lbl_input_truk, wadah_truk),
+            (self.lbl_input_sopir, self.txt_sopir),
+            (self.lbl_input_keterangan, self.txt_keterangan),
+        )):
+            grid.addWidget(
+                label,
+                row,
+                0,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            )
+            grid.addWidget(widget, row, 1)
 
-        wadah_tombol_manifest = QWidget()
-        wadah_tombol_manifest.setFixedSize(210, 132)
-        wadah_tombol_manifest.setSizePolicy(
-            QSizePolicy.Policy.Fixed,
-            QSizePolicy.Policy.Fixed,
-        )
-        layout_tombol_manifest = QVBoxLayout(wadah_tombol_manifest)
-        layout_tombol_manifest.setContentsMargins(4, 0, 0, 0)
-        layout_tombol_manifest.setSpacing(8)
-        layout_tombol_manifest.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+    def _bangun_tombol_manifest(self):
+        wadah = QWidget()
+        wadah.setFixedSize(210, 132)
+        wadah.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        self.btn_proses = QPushButton("⚡ BUAT MANIFEST")
+        layout = QVBoxLayout(wadah)
+        layout.setContentsMargins(4, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        self.btn_proses = QPushButton("BUAT MANIFEST")
         self.btn_proses.setMinimumWidth(190)
         self.btn_proses.setMinimumHeight(38)
-        layout_tombol_manifest.addWidget(
-            self.btn_proses,
-            0,
-            Qt.AlignmentFlag.AlignHCenter,
-        )
+        layout.addWidget(self.btn_proses, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.btn_batal_edit = QPushButton("❌ BATAL")
         self.btn_batal_edit.setMinimumWidth(190)
         self.btn_batal_edit.clicked.connect(self.batal_edit)
         self.btn_batal_edit.hide()
-        layout_tombol_manifest.addWidget(
-            self.btn_batal_edit,
-            0,
-            Qt.AlignmentFlag.AlignHCenter,
-        )
+        layout.addWidget(self.btn_batal_edit, 0, Qt.AlignmentFlag.AlignHCenter)
+        return wadah
 
-        layout_detail.addWidget(self.card_rute_manifest, 5)
-        layout_detail.addWidget(self.card_armada_manifest, 6)
-        layout_detail.addWidget(
-            wadah_tombol_manifest,
-            0,
-            Qt.AlignmentFlag.AlignVCenter,
-        )
+    def _bangun_detail_manifest(self, layout_kiri):
+        self.wadah_detail_manifest = QWidget()
+        self.wadah_detail_manifest.setObjectName("wadahDetailManifest")
+        self._konfigurasi_wadah_tetap(self.wadah_detail_manifest, 172)
+
+        layout = QHBoxLayout(self.wadah_detail_manifest)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        self._bangun_card_rute_manifest()
+        self._bangun_card_armada_manifest()
+        wadah_tombol = self._bangun_tombol_manifest()
+
+        layout.addWidget(self.card_rute_manifest, 5)
+        layout.addWidget(self.card_armada_manifest, 6)
+        layout.addWidget(wadah_tombol, 0, Qt.AlignmentFlag.AlignVCenter)
         layout_kiri.addWidget(
             self.wadah_detail_manifest,
             0,
             Qt.AlignmentFlag.AlignTop,
         )
 
-        self.tabel_manifest = FrozenTableWidget(
-            frozen_cols=3,
-            fixed_cols=[0],
-            fixed_widths={0: 22}
-        )
-
-        self.tabel_manifest.setColumnCount(13)
-        self.tabel_manifest.setHorizontalHeaderLabels(
-            [
-                "✔",
-                "NO.",
-                "RESI",
-                "TGL MASUK",
-                "PENGIRIM",
-                "PENERIMA",
-                "TUJUAN",
-                "NAMA BARANG",
-                "KOLI",
-                "BERAT (kg)",
-                "KUBIK (m3)",
-                "ONGKIR (Rp)",
-                "KETERANGAN",
-            ])
-        self.tabel_manifest.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows,
-        )
-        self.tabel_manifest.verticalHeader().setVisible(False)
-        self.tabel_manifest.setAlternatingRowColors(True)
-
+    def _tema_gelap_aktif(self):
         win = self.window()
-        is_dark = (
-            win.current_theme == "dark"
-            if win and hasattr(win, "current_theme")
-            else False
+        return bool(
+            win
+            and hasattr(win, "current_theme")
+            and win.current_theme == "dark"
         )
+
+    def _pasang_delegate_manifest(self, tabel, is_dark):
         attach_status_delegate(
-            self.tabel_manifest,
+            tabel,
             status_column=self.KOL_CHECK,
             status_role=Qt.ItemDataRole.UserRole,
             color_provider=_get_manifest_delegate_colors,
             is_dark=is_dark,
         )
 
-        if hasattr(self.tabel_manifest, "frozen_table"):
-            attach_status_delegate(
-                self.tabel_manifest.frozen_table,
-                status_column=self.KOL_CHECK,
-                status_role=Qt.ItemDataRole.UserRole,
-                color_provider=_get_manifest_delegate_colors,
-                is_dark=is_dark,
-            )
+    def _bangun_tabel_manifest(self, layout_kiri):
+        self.tabel_manifest = FrozenTableWidget(
+            frozen_cols=3,
+            fixed_cols=[0],
+            fixed_widths={0: 22},
+        )
+        self.tabel_manifest.setColumnCount(13)
+        self.tabel_manifest.setHorizontalHeaderLabels([
+            "✔", "NO.", "RESI", "TGL MASUK", "PENGIRIM", "PENERIMA",
+            "TUJUAN", "NAMA BARANG", "KOLI", "BERAT (kg)", "KUBIK (m3)",
+            "ONGKIR (Rp)", "KETERANGAN",
+        ])
+        self.tabel_manifest.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows,
+        )
+        self.tabel_manifest.verticalHeader().setVisible(False)
+        self.tabel_manifest.setAlternatingRowColors(True)
+
+        is_dark = self._tema_gelap_aktif()
+        self._pasang_delegate_manifest(self.tabel_manifest, is_dark)
+        frozen_table = getattr(self.tabel_manifest, "frozen_table", None)
+        if frozen_table is not None:
+            self._pasang_delegate_manifest(frozen_table, is_dark)
 
         self.load_lebar_kolom(self.tabel_manifest)
         self.tabel_manifest.horizontalHeader().sectionResized.connect(
-            lambda: self.simpan_lebar_kolom(self.tabel_manifest))
-        # Hanya tabel yang boleh mengambil sisa tinggi panel. Header dan kartu
-        # selalu menempel di atas tanpa ruang kosong tambahan.
+            lambda: self.simpan_lebar_kolom(self.tabel_manifest)
+        )
         self.tabel_manifest.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -560,28 +512,29 @@ class TabManifest(QWidget):
         layout_kiri.setStretch(1, 0)
         layout_kiri.setStretch(2, 1)
 
+    def _bangun_panel_histori(self):
         self.panel_kanan = QWidget()
-        # Batas lebar panel kanan agar tidak dapat digeser sampai hilang.
         self.panel_kanan.setMinimumWidth(260)
         self.panel_kanan.setMaximumWidth(520)
-        layout_kanan = QVBoxLayout(self.panel_kanan)
-        layout_kanan.addWidget(QLabel("🕒 Histori Manifest:"))
+        layout = QVBoxLayout(self.panel_kanan)
+        layout.addWidget(QLabel("🕒 Histori Manifest:"))
 
-        hbox_filter = QHBoxLayout()
-        hbox_filter.addWidget(QLabel("Tahun:"))
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Tahun:"))
+
         self.cb_tahun_filter = QComboBox()
         self.cb_tahun_filter.setFixedWidth(80)
         self.cb_tahun_filter.currentTextChanged.connect(self.load_histori)
-        hbox_filter.addWidget(self.cb_tahun_filter)
+        filter_layout.addWidget(self.cb_tahun_filter)
 
         self.txt_cari_histori = QLineEdit()
-        self.txt_cari_histori.setPlaceholderText("Cari manifest...")
-        self.txt_cari_histori.textChanged.connect(
-            lambda: paksa_kapital_lineedit(self.txt_cari_histori),
+        self._konfigurasi_lineedit_kapital(
+            self.txt_cari_histori,
+            "Cari manifest...",
         )
         self.txt_cari_histori.textChanged.connect(self.filter_histori)
-        hbox_filter.addWidget(self.txt_cari_histori)
-        layout_kanan.addLayout(hbox_filter)
+        filter_layout.addWidget(self.txt_cari_histori)
+        layout.addLayout(filter_layout)
 
         self.list_histori = QTreeWidget()
         self.list_histori.setColumnCount(2)
@@ -597,28 +550,10 @@ class TabManifest(QWidget):
         self.list_histori.itemDoubleClicked.connect(self.preview_histori_manifest)
         self.list_histori.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_histori.customContextMenuRequested.connect(
-            self.buka_menu_klik_kanan_histori,
+            self.buka_menu_klik_kanan_histori
         )
-        layout_kanan.addWidget(self.list_histori)
+        layout.addWidget(self.list_histori)
 
-        self.splitter = buat_splitter(
-            self.panel_kiri,
-            self.panel_kanan,
-            orientation=Qt.Orientation.Horizontal,
-            ukuran_awal=(800, 200),
-            bisa_diciutkan=False,
-            parent=self,
-        )
-
-        layout_utama.addWidget(self.splitter)
-
-        self.btn_proses.clicked.connect(self.update_truk_ke_manifest)
-        self.refresh_tahun_filter()
-        self.load_data_resi_gudang()
-        self.generate_no_manifest()
-        self.sesuaikan_tema_lokal()
-        self.setup_autocomplete_truk()
-        terapkan_popup_combobox_bawah(self)
 
     def refresh_session_ui(self, refresh_autocomplete=True):
         """Menyegarkan data tab tanpa menghapus draft atau mode edit aktif."""
@@ -1008,28 +943,125 @@ class TabManifest(QWidget):
         finally:
             self.cb_tahun_filter.blockSignals(False)
 
+    def _buat_item_check_manifest(self, belong):
+        item = QTableWidgetItem()
+        item.setFlags(
+            Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+        )
+        item.setCheckState(
+            Qt.CheckState.Checked if belong else Qt.CheckState.Unchecked
+        )
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            "BELONG" if belong else "",
+        )
+        return item
+
+    def _format_cell_resi_manifest(self, data, column):
+        value = str(data) if data is not None else ""
+        if column == self.KOL_TGL_MASUK and value:
+            return format_tanggal_ke_ui(value)
+        if column == self.KOL_TUJUAN and " - " in value:
+            return value.split(" - ")[-1]
+        if column in (self.KOL_KOLI, self.KOL_BERAT, self.KOL_CBM):
+            return format_angka_indonesia(
+                data,
+                kosong_jika_nol=True,
+                nilai_kosong="-",
+            )
+        return value
+
+    def _alignment_cell_resi_manifest(self, column):
+        if column in (self.KOL_KOLI, self.KOL_BERAT, self.KOL_CBM):
+            return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        if column == self.KOL_TGL_MASUK:
+            return Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+        return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+    @staticmethod
+    def _buat_editor_keterangan_manifest(teks=""):
+        editor = QLineEdit()
+        editor.setObjectName("manifestKetCell")
+        editor.setFrame(False)
+        editor.setPlaceholderText("Ket...")
+        editor.textChanged.connect(
+            lambda _text, widget=editor: paksa_kapital_lineedit(widget)
+        )
+        if teks:
+            editor.setText(str(teks).strip().upper())
+        return editor
+
+    def _isi_baris_resi_manifest(self, row):
+        row = tuple(row or ())
+        tabel = self.tabel_manifest
+        pos = tabel.rowCount()
+        tabel.insertRow(pos)
+
+        manifest_row = str(row[9] or "").strip() if len(row) > 9 else ""
+        belong = bool(self.is_edit_mode and manifest_row == self.edit_manifest_id)
+        tabel.setItem(pos, self.KOL_CHECK, self._buat_item_check_manifest(belong))
+        tabel.setItem(
+            pos,
+            self.KOL_NO,
+            buat_tabel_item(
+                text=str(pos + 1),
+                editable=False,
+                alignment=Qt.AlignmentFlag.AlignCenter,
+            ),
+        )
+
+        for index in range(9):
+            column = index + 2
+            data = row[index] if index < len(row) else ""
+            tabel.setItem(
+                pos,
+                column,
+                buat_tabel_item(
+                    text=self._format_cell_resi_manifest(data, column),
+                    editable=False,
+                    alignment=self._alignment_cell_resi_manifest(column),
+                ),
+            )
+
+        ongkir = row[10] if len(row) > 10 else 0
+        tabel.setItem(
+            pos,
+            self.KOL_ONGKIR,
+            buat_tabel_item(
+                text=format_ke_rupiah(ongkir) if ongkir else "-",
+                editable=False,
+                alignment=(
+                    Qt.AlignmentFlag.AlignRight
+                    | Qt.AlignmentFlag.AlignVCenter
+                ),
+            ),
+        )
+
+        keterangan = row[11] if belong and len(row) > 11 and row[11] else ""
+        tabel.setCellWidget(
+            pos,
+            self.KOL_KET,
+            self._buat_editor_keterangan_manifest(keterangan),
+        )
+
     def load_data_resi_gudang(self):
         if self._sedang_memuat_tabel:
             return
 
         self._sedang_memuat_tabel = True
+        tabel = self.tabel_manifest
 
-        if not hasattr(self.tabel_manifest, "_zoom_base_column_widths"):
-            self.tabel_manifest._zoom_base_column_widths = {
-                index: self.tabel_manifest.columnWidth(index)
-                for index in range(self.tabel_manifest.columnCount())
+        if not hasattr(tabel, "_zoom_base_column_widths"):
+            tabel._zoom_base_column_widths = {
+                index: tabel.columnWidth(index)
+                for index in range(tabel.columnCount())
             }
 
-        self.tabel_manifest.blockSignals(True)
-        self.tabel_manifest.setUpdatesEnabled(False)
-        self.tabel_manifest.setRowCount(0)
-
-        win = self.window()
-        is_dark = bool(
-            win
-            and hasattr(win, "current_theme")
-            and win.current_theme == "dark"
-        )
+        tabel.blockSignals(True)
+        tabel.setUpdatesEnabled(False)
+        tabel.setRowCount(0)
 
         try:
             rows = db_service.ambil_resi_untuk_manifest(
@@ -1038,251 +1070,95 @@ class TabManifest(QWidget):
                 self.is_edit_mode,
                 self.edit_manifest_id,
             ) or []
-
             for row in rows:
-                row = tuple(row or ())
-                pos = self.tabel_manifest.rowCount()
-                self.tabel_manifest.insertRow(pos)
-
-                manifest_row = (
-                    str(row[9] or "").strip()
-                    if len(row) > 9
-                    else ""
-                )
-                belong = bool(
-                    self.is_edit_mode
-                    and manifest_row == self.edit_manifest_id
-                )
-
-                chk = QTableWidgetItem()
-                chk.setFlags(
-                    Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                )
-                chk.setCheckState(
-                    Qt.CheckState.Checked
-                    if belong
-                    else Qt.CheckState.Unchecked
-                )
-                chk.setData(
-                    Qt.ItemDataRole.UserRole,
-                    "BELONG" if belong else "",
-                )
-                self.tabel_manifest.setItem(pos, self.KOL_CHECK, chk)
-
-                item_no = buat_tabel_item(
-                    text=str(pos + 1),
-                    editable=False,
-                    alignment=Qt.AlignmentFlag.AlignCenter,
-                )
-                self.tabel_manifest.setItem(pos, self.KOL_NO, item_no)
-
-                for index in range(9):
-                    data = row[index] if index < len(row) else ""
-                    value = str(data) if data is not None else ""
-                    column = index + 2
-
-                    if column == self.KOL_TGL_MASUK and value:
-                        value = format_tanggal_ke_ui(value)
-                    elif column == self.KOL_TUJUAN and " - " in value:
-                        value = value.split(" - ")[-1]
-                    elif column in (
-                        self.KOL_KOLI,
-                        self.KOL_BERAT,
-                        self.KOL_CBM,
-                    ):
-                        value = format_angka_indonesia(
-                            data,
-                            kosong_jika_nol=True,
-                            nilai_kosong="-",
-                        )
-
-                    if column in (
-                        self.KOL_KOLI,
-                        self.KOL_BERAT,
-                        self.KOL_CBM,
-                    ):
-                        alignment = (
-                            Qt.AlignmentFlag.AlignRight
-                            | Qt.AlignmentFlag.AlignVCenter
-                        )
-                    elif column == self.KOL_TGL_MASUK:
-                        alignment = (
-                            Qt.AlignmentFlag.AlignCenter
-                            | Qt.AlignmentFlag.AlignVCenter
-                        )
-                    else:
-                        alignment = (
-                            Qt.AlignmentFlag.AlignLeft
-                            | Qt.AlignmentFlag.AlignVCenter
-                        )
-
-                    item = buat_tabel_item(
-                        text=value,
-                        editable=False,
-                        alignment=alignment,
-                    )
-                    self.tabel_manifest.setItem(pos, column, item)
-
-                ongkir = row[10] if len(row) > 10 else 0
-                value_ongkir = format_ke_rupiah(ongkir) if ongkir else "-"
-                item_ongkir = buat_tabel_item(
-                    text=value_ongkir,
-                    editable=False,
-                    alignment=(
-                        Qt.AlignmentFlag.AlignRight
-                        | Qt.AlignmentFlag.AlignVCenter
-                    ),
-                )
-                self.tabel_manifest.setItem(
-                    pos,
-                    self.KOL_ONGKIR,
-                    item_ongkir,
-                )
-
-                txt_ket_row = QLineEdit()
-                txt_ket_row.setObjectName("manifestKetCell")
-                txt_ket_row.setFrame(False)
-                txt_ket_row.setPlaceholderText("Ket...")
-                txt_ket_row.textChanged.connect(
-                    lambda _text, editor=txt_ket_row: (
-                        paksa_kapital_lineedit(editor)
-                    )
-                )
-                if belong and len(row) > 11 and row[11]:
-                    txt_ket_row.setText(str(row[11]).strip().upper())
-                self.tabel_manifest.setCellWidget(
-                    pos,
-                    self.KOL_KET,
-                    txt_ket_row,
-                )
-
+                self._isi_baris_resi_manifest(row)
             self.load_histori()
-
         except Exception as exc:
             QMessageBox.critical(
                 self,
                 "Error Load Data",
                 f"Gagal memuat data resi manifest:\n{exc}",
             )
-
         finally:
-            self.tabel_manifest.blockSignals(False)
-            self.tabel_manifest.setUpdatesEnabled(True)
-            self.tabel_manifest.viewport().update()
+            tabel.blockSignals(False)
+            tabel.setUpdatesEnabled(True)
+            tabel.viewport().update()
             self._sedang_memuat_tabel = False
+
+    def _buat_item_histori_manifest(self, row, parents, is_dark):
+        row = tuple(row or ())
+        tanggal_raw = str(row[0] or "") if len(row) > 0 else ""
+        manifest_id = str(row[1] or "") if len(row) > 1 else ""
+        truk = str(row[2] or "") if len(row) > 2 else ""
+        nama_kapal = str(row[3] or "") if len(row) > 3 else ""
+        jumlah_resi = row[4] if len(row) > 4 else 0
+        note_manifest = str(row[5] or "") if len(row) > 5 else ""
+
+        tanggal_ui = format_tanggal_ke_ui(tanggal_raw)
+        bulan = tanggal_ui[3:5] if len(tanggal_ui) >= 5 else ""
+        title = f"📂 {self.NAMA_BULAN.get(bulan, 'Tidak Diketahui')}"
+        if title not in parents:
+            parents[title] = QTreeWidgetItem(self.list_histori)
+            parents[title].setText(0, title)
+
+        child = QTreeWidgetItem(parents[title])
+        child.setText(0, tanggal_ui)
+        font_tanggal, warna_abu = get_manifest_history_date_appearance(
+            is_dark,
+            self._ukuran_point_histori_aktif(),
+        )
+        child.setFont(0, font_tanggal)
+        child.setForeground(0, QBrush(warna_abu))
+
+        is_note_only = bool(
+            note_manifest
+            and truk.strip().upper() == note_manifest.strip().upper()
+        )
+        truk_display = (
+            f" | NOTE: {note_manifest}"
+            if is_note_only
+            else (f" | {truk}" if truk and truk.strip() != "-" else "")
+        )
+        kapal_display = f" | 🚢 {nama_kapal}" if nama_kapal else ""
+        child.setText(
+            1,
+            f"{manifest_id}{truk_display}{kapal_display} ({jumlah_resi} Resi)",
+        )
+
+        for role_offset, value in enumerate((
+            manifest_id,
+            truk,
+            nama_kapal,
+            note_manifest,
+            tanggal_raw,
+        )):
+            child.setData(
+                0,
+                Qt.ItemDataRole.UserRole + role_offset,
+                value,
+            )
 
     def load_histori(self):
         self.list_histori.setUpdatesEnabled(False)
         self.list_histori.clear()
-        win = self.window()
-        is_dark = bool(
-            win
-            and hasattr(win, "current_theme")
-            and win.current_theme == "dark"
-        )
-
+        is_dark = self._tema_gelap_aktif()
         try:
             rows = db_service.ambil_histori_manifest(
                 CURRENT_SESSION.get("kode_cabang", "PUSAT"),
                 self.cb_tahun_filter.currentText(),
             ) or []
-
             parents = {}
             for row in rows:
-                row = tuple(row or ())
-                tanggal_raw = str(row[0] or "") if len(row) > 0 else ""
-                manifest_id = str(row[1] or "") if len(row) > 1 else ""
-                truk = str(row[2] or "") if len(row) > 2 else ""
-                nama_kapal = str(row[3] or "") if len(row) > 3 else ""
-                jumlah_resi = row[4] if len(row) > 4 else 0
-                note_manifest = str(row[5] or "") if len(row) > 5 else ""
-
-                tanggal_ui = format_tanggal_ke_ui(tanggal_raw)
-                bulan = tanggal_ui[3:5] if len(tanggal_ui) >= 5 else ""
-                nama_bulan = self.NAMA_BULAN.get(
-                    bulan,
-                    "Tidak Diketahui",
-                )
-                title = f"📂 {nama_bulan}"
-
-                if title not in parents:
-                    parents[title] = QTreeWidgetItem(self.list_histori)
-                    parents[title].setText(0, title)
-
-                child = QTreeWidgetItem(parents[title])
-                child.setText(0, tanggal_ui)
-
-                ukuran_dasar = self._ukuran_point_histori_aktif()
-                font_tanggal, warna_abu = get_manifest_history_date_appearance(
-                    is_dark,
-                    ukuran_dasar,
-                )
-                child.setFont(0, font_tanggal)
-                child.setForeground(0, QBrush(warna_abu))
-
-                is_note_only = bool(
-                    note_manifest
-                    and truk.strip().upper() == note_manifest.strip().upper()
-                )
-                if is_note_only:
-                    truk_display = f" | NOTE: {note_manifest}"
-                else:
-                    truk_display = (
-                        f" | {truk}"
-                        if truk and truk.strip() != "-"
-                        else ""
-                    )
-                kapal_display = (
-                    f" | 🚢 {nama_kapal}"
-                    if nama_kapal
-                    else ""
-                )
-                child.setText(
-                    1,
-                    (
-                        f"{manifest_id}{truk_display}{kapal_display} "
-                        f"({jumlah_resi} Resi)"
-                    ),
-                )
-
-                child.setData(
-                    0,
-                    Qt.ItemDataRole.UserRole,
-                    manifest_id,
-                )
-                child.setData(
-                    0,
-                    Qt.ItemDataRole.UserRole + 1,
-                    truk,
-                )
-                child.setData(
-                    0,
-                    Qt.ItemDataRole.UserRole + 2,
-                    nama_kapal,
-                )
-                child.setData(
-                    0,
-                    Qt.ItemDataRole.UserRole + 3,
-                    note_manifest,
-                )
-                child.setData(
-                    0,
-                    Qt.ItemDataRole.UserRole + 4,
-                    tanggal_raw,
-                )
+                self._buat_item_histori_manifest(row, parents, is_dark)
 
             self.list_histori.expandAll()
             self.filter_histori(self.txt_cari_histori.text())
-
         except Exception as exc:
             QMessageBox.critical(
                 self,
                 "Error Histori",
                 f"Gagal memuat histori manifest:\n{exc}",
             )
-
         finally:
             self.list_histori.setUpdatesEnabled(True)
             self.list_histori.viewport().update()
@@ -1297,10 +1173,10 @@ class TabManifest(QWidget):
 
         ukuran_pixel = font_histori.pixelSize()
         if ukuran_pixel <= 0:
-            ukuran_pixel = get_global_font_sizes(0)["sz_base"]
+            return ukuran_font_px_ke_pt(get_global_font_sizes(0)["sz_base"])
 
         dpi_y = max(1, self.list_histori.logicalDpiY())
-        return max(1, round(ukuran_pixel * 72 / dpi_y))
+        return max(1.0, ukuran_pixel * 72.0 / dpi_y)
 
     def _sinkronkan_font_item_histori(self, is_dark):
         """Menyamakan font tanggal histori setelah tema atau zoom berubah."""
@@ -1323,23 +1199,7 @@ class TabManifest(QWidget):
                 child_item.setFont(0, font_tanggal)
                 child_item.setForeground(0, QBrush(warna_abu))
 
-    def update_truk_ke_manifest(self):
-        if self._sedang_memproses_manifest:
-            return
-
-        manifest_id = (
-            self.edit_manifest_id
-            if self.is_edit_mode
-            else self.txt_no_manifest.text().strip()
-        )
-        if not manifest_id:
-            QMessageBox.warning(
-                self,
-                "Peringatan",
-                "Nomor manifest belum tersedia.",
-            )
-            return
-
+    def _ambil_resi_terpilih_manifest(self):
         resi = []
         for row in range(self.tabel_manifest.rowCount()):
             if self.tabel_manifest.isRowHidden(row):
@@ -1347,28 +1207,25 @@ class TabManifest(QWidget):
 
             item_check = self.tabel_manifest.item(row, self.KOL_CHECK)
             item_resi = self.tabel_manifest.item(row, self.KOL_RESI)
-            if (
+            if not (
                 item_check
                 and item_resi
                 and item_check.checkState() == Qt.CheckState.Checked
             ):
-                widget_ket = self.tabel_manifest.cellWidget(
-                    row,
-                    self.KOL_KET,
-                )
-                ket_text = (
-                    widget_ket.text().strip().upper()
-                    if widget_ket
-                    else ""
-                )
-                nomor_resi = item_resi.text().strip()
-                if nomor_resi:
-                    resi.append((nomor_resi, ket_text))
+                continue
 
-        if not resi:
-            QMessageBox.warning(self, "Warning", "Centang minimal 1 resi!")
-            return
+            widget_ket = self.tabel_manifest.cellWidget(row, self.KOL_KET)
+            ket_text = (
+                widget_ket.text().strip().upper()
+                if widget_ket
+                else ""
+            )
+            nomor_resi = item_resi.text().strip()
+            if nomor_resi:
+                resi.append((nomor_resi, ket_text))
+        return resi
 
+    def _buat_data_armada_manifest(self):
         truk_idx = self.cb_jenis_truk.currentIndex()
         truk_text = self.ambil_jenis_truk_manifest()
         nopol = self.txt_no_pol.text().strip().upper()
@@ -1386,8 +1243,7 @@ class TabManifest(QWidget):
                     "Pilih Jenis Truk, atau kosongkan detail truk lalu isi Note!",
                 )
                 self.cb_jenis_truk.setFocus()
-                return
-
+                return None
             if not note_manifest:
                 QMessageBox.warning(
                     self,
@@ -1395,9 +1251,9 @@ class TabManifest(QWidget):
                     "Isi Note jika manifest tidak menggunakan detail truk!",
                 )
                 self.txt_note_manifest.setFocus()
-                return
+                return None
 
-            dict_update = {
+            return {
                 "no_polisi": "",
                 "nama_sopir": "",
                 "jenis_truk": "",
@@ -1406,76 +1262,102 @@ class TabManifest(QWidget):
                 "nama_kapal": nama_kapal,
                 "note_manifest": note_manifest,
             }
-        else:
-            if (
-                self.cb_jenis_truk.currentText().strip() == "Lainnya..."
-                and not truk_text
-            ):
-                QMessageBox.warning(
-                    self,
-                    "Peringatan",
-                    "Jenis truk lainnya wajib diisi!",
-                )
-                self.txt_jenis_truk_lain.setFocus()
-                return
 
-            if not nopol and not sopir:
-                QMessageBox.warning(
-                    self,
-                    "Peringatan",
-                    "Isi minimal No. Polisi atau Nama Sopir jika jenis truk dipilih!",
-                )
-                self.txt_no_pol.setFocus()
-                return
+        if self.cb_jenis_truk.currentText().strip() == "Lainnya..." and not truk_text:
+            QMessageBox.warning(
+                self,
+                "Peringatan",
+                "Jenis truk lainnya wajib diisi!",
+            )
+            self.txt_jenis_truk_lain.setFocus()
+            return None
 
-            nopol_val = nopol or "BELUM DIKETAHUI"
-            sopir_val = sopir or "BELUM ADA SOPIR"
-            truk_full = f"{truk_text} - {nopol_val} - {sopir_val}"
-            if keterangan:
-                truk_full += f" ({keterangan})"
+        if not nopol and not sopir:
+            QMessageBox.warning(
+                self,
+                "Peringatan",
+                "Isi minimal No. Polisi atau Nama Sopir jika jenis truk dipilih!",
+            )
+            self.txt_no_pol.setFocus()
+            return None
 
-            dict_update = {
-                "no_polisi": nopol,
-                "nama_sopir": sopir,
-                "jenis_truk": truk_text,
-                "nama_truk": truk_full,
-                "ket_truk": keterangan,
-                "nama_kapal": nama_kapal,
-                "note_manifest": note_manifest,
-            }
+        truk_full = (
+            f"{truk_text} - {nopol or 'BELUM DIKETAHUI'} "
+            f"- {sopir or 'BELUM ADA SOPIR'}"
+        )
+        if keterangan:
+            truk_full += f" ({keterangan})"
+
+        return {
+            "no_polisi": nopol,
+            "nama_sopir": sopir,
+            "jenis_truk": truk_text,
+            "nama_truk": truk_full,
+            "ket_truk": keterangan,
+            "nama_kapal": nama_kapal,
+            "note_manifest": note_manifest,
+        }
+
+    def _kosongkan_input_manifest(self):
+        self.cb_jenis_truk.setCurrentIndex(0)
+        self.txt_jenis_truk_lain.clear()
+        self.txt_no_pol.clear()
+        self.txt_sopir.clear()
+        self.txt_keterangan.clear()
+        self.txt_nama_kapal.clear()
+        self.txt_note_manifest.clear()
+
+    def _tanggal_manifest_aktif(self):
+        if self.is_edit_mode and self._tanggal_edit_manifest:
+            return self._tanggal_edit_manifest
+        return QDate.currentDate().toString("yyyy-MM-dd")
+
+    def update_truk_ke_manifest(self):
+        if self._sedang_memproses_manifest:
+            return
+
+        manifest_id = (
+            self.edit_manifest_id
+            if self.is_edit_mode
+            else self.txt_no_manifest.text().strip()
+        )
+        if not manifest_id:
+            QMessageBox.warning(
+                self,
+                "Peringatan",
+                "Nomor manifest belum tersedia.",
+            )
+            return
+
+        resi = self._ambil_resi_terpilih_manifest()
+        if not resi:
+            QMessageBox.warning(self, "Warning", "Centang minimal 1 resi!")
+            return
+
+        dict_update = self._buat_data_armada_manifest()
+        if dict_update is None:
+            return
 
         self._sedang_memproses_manifest = True
         self.btn_proses.setEnabled(False)
-
         try:
             kapal_ok, nama_kapal_resmi = self.pastikan_kapal_terdaftar(
-                nama_kapal
+                dict_update["nama_kapal"]
             )
             if not kapal_ok:
-                QMessageBox.warning(
-                    self,
-                    "Data Kapal",
-                    nama_kapal_resmi,
-                )
+                QMessageBox.warning(self, "Data Kapal", nama_kapal_resmi)
                 self.txt_nama_kapal.setFocus()
                 return
 
             dict_update["nama_kapal"] = nama_kapal_resmi
-            tanggal_manifest = (
-                self._tanggal_edit_manifest
-                if self.is_edit_mode and self._tanggal_edit_manifest
-                else QDate.currentDate().toString("yyyy-MM-dd")
-            )
-
             sukses, pesan = db_service.simpan_atau_update_manifest_data(
                 manifest_id,
                 CURRENT_SESSION.get("kode_cabang", "PUSAT"),
                 dict_update,
                 resi,
                 self.is_edit_mode,
-                tanggal_manifest,
+                self._tanggal_manifest_aktif(),
             )
-
             if not sukses:
                 QMessageBox.critical(
                     self,
@@ -1484,34 +1366,21 @@ class TabManifest(QWidget):
                 )
                 return
 
-            QMessageBox.information(
-                self,
-                "Sukses",
-                "Manifest berhasil diproses!",
-            )
+            QMessageBox.information(self, "Sukses", "Manifest berhasil diproses!")
             self.setup_autocomplete_truk()
-
             if self.is_edit_mode:
                 self.batal_edit()
             else:
-                self.cb_jenis_truk.setCurrentIndex(0)
-                self.txt_jenis_truk_lain.clear()
-                self.txt_no_pol.clear()
-                self.txt_sopir.clear()
-                self.txt_keterangan.clear()
-                self.txt_nama_kapal.clear()
-                self.txt_note_manifest.clear()
+                self._kosongkan_input_manifest()
                 self.refresh_tahun_filter()
                 self.load_data_resi_gudang()
                 self.generate_no_manifest()
-
         except Exception as exc:
             QMessageBox.critical(
                 self,
                 "Error",
                 f"Gagal memproses manifest:\n{exc}",
             )
-
         finally:
             self._sedang_memproses_manifest = False
             self.btn_proses.setEnabled(True)
@@ -1526,41 +1395,63 @@ class TabManifest(QWidget):
             return tanggal.toString("dd/MM/yyyy")
         return QDate.currentDate().toString("dd/MM/yyyy")
 
+    @staticmethod
+    def _data_dari_item_histori(item):
+        manifest_id = str(
+            item.data(0, Qt.ItemDataRole.UserRole) or ""
+        ).strip()
+        truk = str(
+            item.data(0, Qt.ItemDataRole.UserRole + 1) or ""
+        ).strip()
+        nama_kapal = str(
+            item.data(0, Qt.ItemDataRole.UserRole + 2) or ""
+        ).strip()
+        note_manifest = str(
+            item.data(0, Qt.ItemDataRole.UserRole + 3) or ""
+        ).strip()
+        tanggal_manifest = str(
+            item.data(0, Qt.ItemDataRole.UserRole + 4) or ""
+        ).strip()
+        if not manifest_id:
+            manifest_id = item.text(1).split(" | ")[0].strip()
+        return manifest_id, truk, nama_kapal, note_manifest, tanggal_manifest
+
     def preview_histori_manifest(self, item):
-        if item.parent():
-            m_id = str(item.data(0, Qt.ItemDataRole.UserRole) or "").strip()
-            truk = str(item.data(0, Qt.ItemDataRole.UserRole + 1) or "").strip()
-            nama_kapal = str(item.data(0, Qt.ItemDataRole.UserRole + 2) or "").strip()
-            note_manifest = str(item.data(
-                0,
-                Qt.ItemDataRole.UserRole + 3,
-            ) or "").strip()
-            tanggal_manifest = str(item.data(
-                0,
-                Qt.ItemDataRole.UserRole + 4,
-            ) or "").strip()
+        if not item.parent():
+            return
+        self.siapkan_dan_cetak_dari_id(*self._data_dari_item_histori(item))
 
-            if not m_id:
-                m_id = item.text(1).split(" | ")[0].strip()
+    @staticmethod
+    def _format_baris_cetak_manifest(row):
+        ongkir_val = format_ke_rupiah(row[8]) if len(row) > 8 and row[8] else "-"
+        ket_val = str(row[9] or "-").strip() if len(row) > 9 else "-"
+        tujuan = str(row[3] or "")
+        if " - " in tujuan:
+            tujuan = tujuan.split(" - ")[-1]
 
-            self.siapkan_dan_cetak_dari_id(
-                m_id,
-                truk,
-                nama_kapal,
-                note_manifest,
-                tanggal_manifest,
-            )
+        return (
+            row[0],
+            row[1],
+            row[2],
+            tujuan,
+            row[4],
+            format_angka_indonesia(row[5], kosong_jika_nol=True, nilai_kosong="-"),
+            format_angka_indonesia(row[6], kosong_jika_nol=True, nilai_kosong="-"),
+            format_angka_indonesia(row[7], kosong_jika_nol=True, nilai_kosong="-"),
+            ongkir_val,
+            ket_val,
+        )
 
     def siapkan_dan_cetak_dari_id(
-            self,
-            m_id,
-            truk,
-            nama_kapal="",
-            note_manifest="",
-            tanggal_manifest="",
+        self,
+        m_id,
+        truk,
+        nama_kapal="",
+        note_manifest="",
+        tanggal_manifest="",
     ):
         try:
-            kode_cabang = CURRENT_SESSION.get('kode_cabang', 'PUSAT')
+            kode_cabang = CURRENT_SESSION.get("kode_cabang", "PUSAT")
             daftar_resi = db_service.ambil_resi_list_by_manifest(
                 m_id,
                 kode_cabang,
@@ -1578,57 +1469,15 @@ class TabManifest(QWidget):
                 )
                 return
 
-            items_cetak = []
-            for r in data:
-                # r[8] = total_ongkir, r[9] = ket_manifest
-                ongkir_val = format_ke_rupiah(r[8]) if len(r) > 8 and r[8] else "-"
-                ket_val = str(r[9] or "-").strip() if len(r) > 9 else "-"
-
-                items_cetak.append((
-                    r[0],
-                    r[1],
-                    r[2],
-                    (
-                        str(r[3] or "").split(" - ")[-1]
-                        if " - " in str(r[3] or "")
-                        else str(r[3] or "")
-                    ),
-                    r[4],
-                    format_angka_indonesia(
-                        r[5],
-                        kosong_jika_nol=True,
-                        nilai_kosong="-",
-                    ),
-                    format_angka_indonesia(
-                        r[6],
-                        kosong_jika_nol=True,
-                        nilai_kosong="-",
-                    ),
-                    format_angka_indonesia(
-                        r[7],
-                        kosong_jika_nol=True,
-                        nilai_kosong="-",
-                    ),
-                    ongkir_val,
-                    ket_val,
-                ))
-
+            items_cetak = [self._format_baris_cetak_manifest(row) for row in data]
             if not nama_kapal:
                 nama_kapal = db_service.ambil_nama_kapal_manifest(m_id, kode_cabang)
-
             if not note_manifest:
-                note_manifest = db_service.ambil_note_manifest(
-                    m_id,
-                    kode_cabang,
-                )
+                note_manifest = db_service.ambil_note_manifest(m_id, kode_cabang)
 
             truk_cetak = str(truk or "").strip()
             note_manifest = str(note_manifest or "").strip()
-
-            if (
-                    note_manifest
-                    and truk_cetak.upper() == note_manifest.upper()
-            ):
+            if note_manifest and truk_cetak.upper() == note_manifest.upper():
                 truk_cetak = ""
 
             cetak_manifest_ke_printer(
@@ -1637,19 +1486,17 @@ class TabManifest(QWidget):
                     "armada": truk_cetak,
                     "note_manifest": note_manifest,
                     "nama_kapal": nama_kapal,
-                    "tanggal": self._format_tanggal_cetak(
-                        tanggal_manifest
-                    ),
+                    "tanggal": self._format_tanggal_cetak(tanggal_manifest),
                     "items": items_cetak,
                 },
                 self,
             )
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Gagal cetak: {e}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Gagal cetak: {exc}")
 
     def showEvent(self, event):
         super().showEvent(event)
-        terapkan_popup_combobox_bawah(self)
+
 
         if self._show_event_pertama:
             self._show_event_pertama = False
@@ -1658,185 +1505,133 @@ class TabManifest(QWidget):
 
         self.refresh_session_ui()
 
-    def sesuaikan_tema_lokal(self):
-        win = self.window()
-        is_dark = win.current_theme == "dark" if win and hasattr(
-            win,
-            'current_theme',
-        ) else False
+    def _terapkan_style_form_manifest(self, styles_statis):
+        self.panel_kiri.setStyleSheet(styles_statis["panel_kiri"])
+        self.panel_kanan.setStyleSheet(styles_statis["panel_kanan"])
+        self.lbl_title.setStyleSheet(styles_statis["lbl_title"])
+        self.btn_proses.setStyleSheet(styles_statis["btn_proses"])
 
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
-
-        z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
-        font_statis = get_global_font_sizes(0)
-        font_dinamis = get_global_font_sizes(z)
-
-        styles_statis = get_manifest_styles(is_dark, self.is_edit_mode, 0)
-        styles_dinamis = get_manifest_styles(is_dark, self.is_edit_mode, z)
-
-        self.panel_kiri.setStyleSheet(styles_statis['panel_kiri'])
-        self.panel_kanan.setStyleSheet(styles_statis['panel_kanan'])
-        self.lbl_title.setStyleSheet(styles_statis['lbl_title'])
-        self.btn_proses.setStyleSheet(styles_statis['btn_proses'])
-
-        for w in [self.txt_jenis_truk_lain, self.txt_no_pol, self.txt_sopir,
-                  self.txt_keterangan, self.txt_nama_kapal,
-                  self.txt_note_manifest,
-                  self.cb_filter_wilayah, self.cb_jenis_truk,
-                  self.cb_tahun_filter, self.txt_cari_histori]:
-            w.setStyleSheet(styles_statis['style_input'])
-
-        # Kartu input mengikuti karakter visual panel Pengirim/Penerima
-        # pada Tab Resi, termasuk warna adaptif untuk mode terang/gelap.
-        if is_dark:
-            warna_bg_kartu = "#171B23"
-            warna_border_kartu = "#3A4556"
-            warna_label_kartu = "#F2F4F7"
-        else:
-            warna_bg_kartu = "#FFFFFF"
-            warna_border_kartu = "#C8D4E3"
-            warna_label_kartu = "#172033"
-
-        style_kartu_manifest = f"""
-            QFrame#cardRuteManifest, QFrame#cardArmadaManifest {{
-                background-color: {warna_bg_kartu};
-                border: 1px solid {warna_border_kartu};
-                border-radius: 11px;
-            }}
-        """
-        self.card_rute_manifest.setStyleSheet(style_kartu_manifest)
-        self.card_armada_manifest.setStyleSheet(style_kartu_manifest)
-
-        style_label_input = f"""
-            QLabel {{
-                color: {warna_label_kartu};
-                background: transparent;
-                border: none;
-                font-size: {font_statis['sz_base']}px;
-                font-weight: 600;
-            }}
-        """
-        for label_input in (
-                self.lbl_input_tujuan,
-                self.lbl_input_kapal,
-                self.lbl_input_note,
-                self.lbl_input_truk,
-                self.lbl_input_sopir,
-                self.lbl_input_keterangan,
+        for widget in (
+            self.txt_jenis_truk_lain,
+            self.txt_no_pol,
+            self.txt_sopir,
+            self.txt_keterangan,
+            self.txt_nama_kapal,
+            self.txt_note_manifest,
+            self.txt_cari_histori,
         ):
-            label_input.setStyleSheet(style_label_input)
+            widget.setStyleSheet(styles_statis["style_input"])
 
-        # Style khusus header agar konsisten dengan tampilan header Tab Resi.
-        ukuran_header = font_statis["sz_base"]
-        if is_dark:
-            warna_label = "#C8D1E0"
-            warna_teks_tanggal = "#F8FAFC"
-            bg_tanggal = "#181C24"
-            border_tanggal = "#4B5563"
-            warna_nomor = "#FFC400"
-            bg_nomor = "#171B23"
-            border_nomor = "#3B82F6"
-        else:
-            warna_label = "#4B5C73"
-            warna_teks_tanggal = "#10233F"
-            bg_tanggal = "#FFFFFF"
-            border_tanggal = "#C8D4E3"
-            warna_nomor = "#C90000"
-            bg_nomor = "#FFF2F2"
-            border_nomor = "#FF4D5E"
-
-        style_label_header = f"""
-            QLabel {{
-                color: {warna_label};
-                background: transparent;
-                font-size: {ukuran_header}px;
-                font-weight: 600;
-            }}
-        """
-        self.lbl_tanggal_manifest.setStyleSheet(style_label_header)
-        self.lbl_no_manifest.setStyleSheet(style_label_header)
-
-        self.txt_tanggal_manifest.setStyleSheet(
-            f"""
-                QLineEdit {{
-                    color: {warna_teks_tanggal};
-                    background: {bg_tanggal};
-                    border: 1px solid {border_tanggal};
-                    border-radius: 5px;
-                    padding: 2px 8px;
-                    font-size: {ukuran_header}px;
-                }}
-            """
+        comboboxes = (
+            self.cb_filter_wilayah,
+            self.cb_jenis_truk,
+            self.cb_tahun_filter,
         )
-        self.txt_no_manifest.setStyleSheet(
-            f"""
-                QLineEdit {{
-                    color: {warna_nomor};
-                    background: {bg_nomor};
-                    border: 2px solid {border_nomor};
-                    border-radius: 6px;
-                    padding: 2px 10px;
-                    font-size: {ukuran_header + 3}px;
-                    font-weight: 800;
-                    letter-spacing: 1px;
-                }}
-            """
-        )
+        for combo in comboboxes:
+            zoom_helper.terapkan_zoom_widget_standar(combo, 0, "sz_input")
 
-        # Integrasi tabel responsif
-        self.tabel_manifest.setStyleSheet(styles_dinamis['style_tabel'])
-        update_status_delegate_theme(self.tabel_manifest, is_dark)
+        self.cb_filter_wilayah.setFixedHeight(self.txt_nama_kapal.sizeHint().height())
+        self.cb_jenis_truk.setFixedHeight(self.txt_no_pol.sizeHint().height())
+        self.cb_tahun_filter.setFixedHeight(self.txt_cari_histori.sizeHint().height())
+        self._perbarui_font_placeholder_truk(self.cb_jenis_truk.currentIndex())
+        terapkan_popup_bawah_combobox(comboboxes)
 
-        if hasattr(self.tabel_manifest, "frozen_table"):
-            update_status_delegate_theme(
-                self.tabel_manifest.frozen_table,
-                is_dark,
-            )
+        for card in (self.card_rute_manifest, self.card_armada_manifest):
+            card.setStyleSheet(styles_statis["card_manifest"])
+        for label in (
+            self.lbl_input_tujuan,
+            self.lbl_input_kapal,
+            self.lbl_input_note,
+            self.lbl_input_truk,
+            self.lbl_input_sopir,
+            self.lbl_input_keterangan,
+        ):
+            label.setStyleSheet(styles_statis["label_input"])
 
-        font = self.tabel_manifest.font()
-        font.setPixelSize(font_dinamis["sz_base"])
-        self.tabel_manifest.setFont(font)
+        self.lbl_tanggal_manifest.setStyleSheet(styles_statis["label_header"])
+        self.lbl_no_manifest.setStyleSheet(styles_statis["label_header"])
+        self.txt_tanggal_manifest.setStyleSheet(styles_statis["txt_tanggal_manifest"])
+        self.txt_no_manifest.setStyleSheet(styles_statis["txt_no_manifest"])
 
-        header_font = self.tabel_manifest.horizontalHeader().font()
-        header_font.setPixelSize(font_dinamis["sz_base"])
-        self.tabel_manifest.horizontalHeader().setFont(header_font)
-        self.tabel_manifest.verticalHeader().setFont(header_font)
+    def _terapkan_zoom_tabel_manifest(self, styles_dinamis, font_dinamis, is_dark, z):
+        tabel = self.tabel_manifest
+        frozen_table = getattr(tabel, "frozen_table", None)
+        tabel.setUpdatesEnabled(False)
+        if frozen_table is not None:
+            frozen_table.setUpdatesEnabled(False)
 
-        faktor = max(0.68, min(1.0 + (z * 0.08), 1.80))
-        tinggi_baris = max(24, int(32 * faktor))
-        self.tabel_manifest.verticalHeader().setDefaultSectionSize(tinggi_baris)
-
-        if hasattr(self.tabel_manifest, "frozen_table"):
-            frozen_font = self.tabel_manifest.frozen_table.font()
-            frozen_font.setPixelSize(font_dinamis["sz_base"])
-            self.tabel_manifest.frozen_table.setFont(frozen_font)
-            self.tabel_manifest.frozen_table.horizontalHeader().setFont(header_font)
-            self.tabel_manifest.frozen_table.verticalHeader().setFont(header_font)
-            self.tabel_manifest.frozen_table.verticalHeader().setDefaultSectionSize(
-                tinggi_baris,
-            )
-
-        header = self.tabel_manifest.horizontalHeader()
-        header.blockSignals(True)
-        self._sedang_menerapkan_zoom = True
         try:
-            zoom_helper._skalakan_kolom_tableview(
-                self.tabel_manifest,
-                z,
-            )
-        finally:
-            self._sedang_menerapkan_zoom = False
-            header.blockSignals(False)
+            tabel.setStyleSheet(styles_dinamis["style_tabel"])
+            update_status_delegate_theme(tabel, is_dark)
+            if frozen_table is not None:
+                update_status_delegate_theme(frozen_table, is_dark)
 
-        # Histori Manifest responsif ke zoom
-        self.list_histori.setStyleSheet(styles_dinamis['list_histori'])
+            ukuran_pt = ukuran_font_px_ke_pt(font_dinamis["sz_base"])
+            font = tabel.font()
+            font.setPointSizeF(ukuran_pt)
+            tabel.setFont(font)
+
+            header_font = tabel.horizontalHeader().font()
+            header_font.setPointSizeF(ukuran_pt)
+            tabel.horizontalHeader().setFont(header_font)
+            tabel.verticalHeader().setFont(header_font)
+
+            faktor = max(0.68, min(1.0 + (z * 0.08), 1.80))
+            tinggi_baris = max(24, int(32 * faktor))
+            tabel.verticalHeader().setDefaultSectionSize(tinggi_baris)
+
+            if frozen_table is not None:
+                frozen_font = frozen_table.font()
+                frozen_font.setPointSizeF(ukuran_pt)
+                frozen_table.setFont(frozen_font)
+                frozen_table.horizontalHeader().setFont(header_font)
+                frozen_table.verticalHeader().setFont(header_font)
+                frozen_table.verticalHeader().setDefaultSectionSize(tinggi_baris)
+
+            header = tabel.horizontalHeader()
+            status_signal_sebelumnya = header.blockSignals(True)
+            self._sedang_menerapkan_zoom = True
+            try:
+                zoom_helper.skalakan_kolom_tableview(tabel, z)
+            finally:
+                self._sedang_menerapkan_zoom = False
+                header.blockSignals(status_signal_sebelumnya)
+        finally:
+            if frozen_table is not None:
+                frozen_table.setUpdatesEnabled(True)
+            tabel.setUpdatesEnabled(True)
+            zoom_helper.sinkronkan_frozen_table(tabel, tertunda=True)
+
+    def _terapkan_style_histori_manifest(self, styles_statis, is_dark):
+        self.list_histori.setStyleSheet(styles_statis["list_histori"])
         font_histori = self.list_histori.font()
-        font_histori.setPixelSize(font_dinamis["sz_base"])
+        font_histori.setPointSizeF(
+            ukuran_font_px_ke_pt(get_global_font_sizes(0)["sz_base"])
+        )
         self.list_histori.setFont(font_histori)
         self._sinkronkan_font_item_histori(is_dark)
+
+    def sesuaikan_tema_lokal(self):
+        is_dark = self._tema_gelap_aktif()
+        terap_semua_placeholder_dinamis(self, is_dark=is_dark)
+
+        z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
+        font_dinamis = get_global_font_sizes(z)
+        styles_statis = konversi_style_font_ke_point(
+            get_manifest_styles(is_dark, self.is_edit_mode, 0)
+        )
+        styles_dinamis = konversi_style_font_ke_point(
+            get_manifest_styles(is_dark, self.is_edit_mode, z)
+        )
+
+        self._terapkan_style_form_manifest(styles_statis)
+        self._terapkan_zoom_tabel_manifest(
+            styles_dinamis,
+            font_dinamis,
+            is_dark,
+            z,
+        )
+        self._terapkan_style_histori_manifest(styles_statis, is_dark)
 
     def _settings_kolom(self):
         return QSettings(
@@ -1952,131 +1747,82 @@ class TabManifest(QWidget):
 
     def buka_menu_klik_kanan_histori(self, pos):
         item = self.list_histori.itemAt(pos)
-        if not item or not item.parent(): return
+        if not item or not item.parent():
+            return
+
         menu = QMenu()
         act_print = menu.addAction("🖨 Preview Cetak")
         act_edit = menu.addAction("✏️ Edit Workspace")
-        action = menu.exec(
-            self.list_histori.viewport().mapToGlobal(pos)
-        )
-
-        m_id = str(
-            item.data(0, Qt.ItemDataRole.UserRole)
-            or ""
-        ).strip()
-        truk = str(
-            item.data(0, Qt.ItemDataRole.UserRole + 1)
-            or ""
-        ).strip()
-        nama_kapal = str(
-            item.data(0, Qt.ItemDataRole.UserRole + 2)
-            or ""
-        ).strip()
-        note_manifest = str(
-            item.data(0, Qt.ItemDataRole.UserRole + 3)
-            or ""
-        ).strip()
-        tanggal_manifest = str(
-            item.data(0, Qt.ItemDataRole.UserRole + 4)
-            or ""
-        ).strip()
-
-        if not m_id:
-            m_id = item.text(1).split(" | ")[0].strip()
+        action = menu.exec(self.list_histori.viewport().mapToGlobal(pos))
+        data = self._data_dari_item_histori(item)
 
         if action == act_print:
-            self.siapkan_dan_cetak_dari_id(
-                m_id,
-                truk,
-                nama_kapal,
-                note_manifest,
-                tanggal_manifest,
-            )
+            self.siapkan_dan_cetak_dari_id(*data)
         elif action == act_edit:
-            self.aktifkan_mode_edit(
-                m_id,
-                truk,
-                nama_kapal,
-                note_manifest,
-                tanggal_manifest,
-            )
+            self.aktifkan_mode_edit(*data)
+
+    def _isi_detail_truk_edit(self, truk_str, note_manifest):
+        truk_bersih = str(truk_str or "").strip()
+        is_note_only = bool(
+            note_manifest
+            and truk_bersih.upper() == note_manifest.upper()
+        )
+        if not truk_bersih or truk_bersih == "-" or is_note_only:
+            return
+
+        parts = truk_bersih.split(" - ", 2)
+        if len(parts) < 3:
+            if not note_manifest:
+                self.txt_note_manifest.setText(truk_bersih.upper())
+            return
+
+        jenis_text, nopol_text, sopir_ket = parts
+        self.set_jenis_truk_manifest(jenis_text.strip())
+
+        nopol_text = nopol_text.strip()
+        if nopol_text not in ("-", "BELUM DIKETAHUI"):
+            self.txt_no_pol.setText(nopol_text)
+
+        sopir_text = sopir_ket.strip()
+        keterangan_text = ""
+        if " (" in sopir_text and sopir_text.endswith(")"):
+            sopir_text, keterangan_text = sopir_text.rsplit(" (", 1)
+            keterangan_text = keterangan_text[:-1]
+
+        if sopir_text.strip() not in ("", "-", "BELUM ADA SOPIR"):
+            self.txt_sopir.setText(sopir_text.strip())
+        if keterangan_text:
+            self.txt_keterangan.setText(keterangan_text.strip())
 
     def aktifkan_mode_edit(
-            self,
-            m_id,
-            truk_str,
-            nama_kapal="",
-            note_manifest="",
-            tanggal_manifest="",
+        self,
+        m_id,
+        truk_str,
+        nama_kapal="",
+        note_manifest="",
+        tanggal_manifest="",
     ):
         m_id = str(m_id or "").strip().upper()
         if not m_id:
-            QMessageBox.warning(
-                self,
-                "Peringatan",
-                "Nomor manifest tidak valid.",
-            )
+            QMessageBox.warning(self, "Peringatan", "Nomor manifest tidak valid.")
             return
 
         self.is_edit_mode = True
         self.edit_manifest_id = m_id
-        self._tanggal_edit_manifest = str(
-            tanggal_manifest or ""
-        ).strip()
-
-        self.cb_jenis_truk.setCurrentIndex(0)
-        self.txt_jenis_truk_lain.clear()
-        self.txt_no_pol.clear()
-        self.txt_sopir.clear()
-        self.txt_keterangan.clear()
-        self.txt_nama_kapal.clear()
-        self.txt_note_manifest.clear()
+        self._tanggal_edit_manifest = str(tanggal_manifest or "").strip()
+        self._kosongkan_input_manifest()
 
         kode_cabang = CURRENT_SESSION.get("kode_cabang", "PUSAT")
-
         nama_kapal = str(nama_kapal or "").strip().upper()
         if not nama_kapal:
             nama_kapal = db_service.ambil_nama_kapal_manifest(m_id, kode_cabang)
         self.txt_nama_kapal.setText(nama_kapal)
 
         if not note_manifest:
-            note_manifest = db_service.ambil_note_manifest(
-                m_id,
-                kode_cabang,
-            )
+            note_manifest = db_service.ambil_note_manifest(m_id, kode_cabang)
         note_manifest = str(note_manifest or "").strip().upper()
         self.txt_note_manifest.setText(note_manifest)
-
-        truk_bersih = str(truk_str or '').strip()
-        is_note_only = bool(
-            note_manifest
-            and truk_bersih.upper() == note_manifest.upper()
-        )
-
-        if truk_bersih and truk_bersih != "-" and not is_note_only:
-            parts = truk_bersih.split(" - ", 2)
-
-            if len(parts) >= 3:
-                jenis_text, nopol_text, sopir_ket = parts
-                self.set_jenis_truk_manifest(jenis_text.strip())
-
-                nopol_text = nopol_text.strip()
-                if nopol_text not in ("-", "BELUM DIKETAHUI"):
-                    self.txt_no_pol.setText(nopol_text)
-
-                sopir_text = sopir_ket.strip()
-                keterangan_text = ""
-                if " (" in sopir_text and sopir_text.endswith(")"):
-                    sopir_text, keterangan_text = sopir_text.rsplit(" (", 1)
-                    keterangan_text = keterangan_text[:-1]
-
-                if sopir_text.strip() not in ("", "-", "BELUM ADA SOPIR"):
-                    self.txt_sopir.setText(sopir_text.strip())
-                if keterangan_text:
-                    self.txt_keterangan.setText(keterangan_text.strip())
-            elif not note_manifest:
-                # Kompatibilitas manifest lama sebelum kolom Note tersedia.
-                self.txt_note_manifest.setText(truk_bersih.upper())
+        self._isi_detail_truk_edit(truk_str, note_manifest)
 
         self.lbl_title.setText(f"✏️ Edit Manifest: {m_id}")
         self.txt_no_manifest.setText(m_id)
@@ -2092,14 +1838,7 @@ class TabManifest(QWidget):
         self.lbl_title.setText("📦 Pembuatan Manifest Pengiriman")
         self.btn_proses.setText("⚡ BUAT MANIFEST")
         self.btn_batal_edit.hide()
-
-        self.cb_jenis_truk.setCurrentIndex(0)
-        self.txt_jenis_truk_lain.clear()
-        self.txt_sopir.clear()
-        self.txt_no_pol.clear()
-        self.txt_keterangan.clear()
-        self.txt_nama_kapal.clear()
-        self.txt_note_manifest.clear()
+        self._kosongkan_input_manifest()
 
         self.sesuaikan_tema_lokal()
         self.generate_no_manifest()

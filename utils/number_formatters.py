@@ -1,428 +1,218 @@
 # utils/number_formatters.py
+"""Helper parsing dan formatting angka dengan gaya Indonesia."""
+
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Iterable, Any
 from numbers import Integral, Real
+from typing import Any, Iterable
 
 from PySide6.QtWidgets import QLineEdit
 
 from .widget_helpers import blokir_signal_sementara
 
 
+NOL = Decimal("0")
+_POLA_ANGKA_PERTAMA = re.compile(r"-?\d[\d.,]*")
+_POLA_RIBUAN_TITIK = re.compile(r"-?\d{1,3}(?:\.\d{3})+")
+_POLA_RIBUAN_TITIK_POSITIF = re.compile(r"\d{1,3}(?:\.\d{3})+")
+_POLA_RIBUAN_KOMA_POSITIF = re.compile(r"\d{1,3}(?:,\d{3})+")
+_POLA_RUPIAH = re.compile(r"(?i)\brp\.?\s*")
+_POLA_BUKAN_ANGKA = re.compile(r"[^0-9,.\-]")
+
+
 def _ambil_digit(nilai: Any) -> str:
-    """
-    Mengambil seluruh karakter digit dari suatu nilai.
-    """
-    return "".join(
-        karakter
-        for karakter in str(nilai)
-        if karakter.isdigit()
-    )
+    """Ambil seluruh karakter digit dari ``nilai``."""
+    return "".join(karakter for karakter in str(nilai) if karakter.isdigit())
 
 
-def format_ke_rupiah(nilai: Any) -> str:
-    """
-    Mengubah angka atau string biasa menjadi format ribuan
-    Indonesia dengan pemisah titik.
-
-    Contoh:
-        1500000  -> "1.500.000"
-        -1500000 -> "-1.500.000"
-        "1500000" -> "1.500.000"
-
-    Nilai rupiah diperlakukan sebagai bilangan bulat
-    tanpa pecahan.
-    """
-    if nilai is None or nilai == "":
-        return ""
-
-    negatif = False
-
-    if isinstance(nilai, bool):
-        angka = int(nilai)
-
-    elif isinstance(nilai, Integral):
-        angka = int(nilai)
-        negatif = angka < 0
-        angka = abs(angka)
-
-    elif isinstance(nilai, Real):
-        angka = int(nilai)
-        negatif = angka < 0
-        angka = abs(angka)
-
-    else:
-        teks = str(nilai).strip()
-
-        if not teks:
-            return ""
-
-        negatif = teks.startswith("-")
-        angka_saja = _ambil_digit(teks)
-
-        if not angka_saja:
-            return ""
-
-        angka = int(angka_saja)
-
-    hasil = f"{angka:,}".replace(",", ".")
-
-    if negatif and angka != 0:
-        return f"-{hasil}"
-
-    return hasil
+def _format_integer_indonesia(angka: int) -> str:
+    """Format integer dengan pemisah ribuan titik."""
+    return f"{angka:,}".replace(",", ".")
 
 
-def format_input_ribuan_gaya_indonesia(
-    edit_widget: QLineEdit,
-) -> None:
-    """
-    Slot atau fungsi global yang dapat dipasangkan pada signal
-    textChanged milik QLineEdit.
-
-    Fungsi menambahkan pemisah ribuan berupa titik dan menjaga
-    posisi kursor agar tetap sesuai ketika pengguna mengetik.
-    """
-    text = edit_widget.text()
-    angka_saja = _ambil_digit(text)
-
-    if not angka_saja:
-        with blokir_signal_sementara(edit_widget):
-            edit_widget.clear()
-
-        return
-
-    text_baru = format_ke_rupiah(angka_saja)
-
-    pos_lama = edit_widget.cursorPosition()
-    panjang_lama = len(text)
-
-    with blokir_signal_sementara(edit_widget):
-        edit_widget.setText(text_baru)
-
-        panjang_baru = len(text_baru)
-
-        pos_baru = (
-            pos_lama
-            + panjang_baru
-            - panjang_lama
-        )
-
-        pos_baru = max(
-            0,
-            min(
-                pos_baru,
-                panjang_baru,
-            ),
-        )
-
-        edit_widget.setCursorPosition(pos_baru)
-
-
-def rupiah_to_int(
-    rupiah_str: Any,
-) -> int:
-    """
-    Mengubah string berformat rupiah Indonesia menjadi
-    integer murni untuk penyimpanan ke database atau SQL.
-
-    Contoh:
-        "1.500.000"  -> 1500000
-        "-1.500.000" -> -1500000
-    """
-    if rupiah_str is None or rupiah_str == "":
-        return 0
-
-    if isinstance(rupiah_str, bool):
-        return int(rupiah_str)
-
-    if isinstance(rupiah_str, Integral):
-        return int(rupiah_str)
-
-    if isinstance(rupiah_str, Real):
-        return int(rupiah_str)
-
-    teks = str(rupiah_str).strip()
-
-    if not teks:
-        return 0
-
-    negatif = teks.startswith("-")
-    angka_saja = _ambil_digit(teks)
-
-    if not angka_saja:
-        return 0
-
-    hasil = int(angka_saja)
-
-    if negatif and hasil != 0:
-        return -hasil
-
-    return hasil
-
-
-def ambil_angka_dari_teks(nilai: Any) -> Decimal:
-    """
-    Mengambil angka pertama dari teks.
-
-    Contoh:
-        "2 DUS"       -> 2
-        "4 PALET"     -> 4
-        "1,5 KARUNG"  -> 1.5
-        "ABC"         -> 0
-    """
-
-    if nilai is None:
-        return Decimal("0")
-
-    teks = str(nilai).strip()
-
-    if not teks:
-        return Decimal("0")
-
-    cocok = re.search(
-        r"-?\d[\d.,]*",
-        teks,
-    )
-
-    if not cocok:
-        return Decimal("0")
-
-    angka = cocok.group(0)
-
+def _normalisasi_angka_pertama(angka: str) -> str:
+    """Normalisasi token angka seperti perilaku ``ambil_angka_dari_teks``."""
     if "." in angka and "," in angka:
-        angka = (
-            angka
-            .replace(".", "")
-            .replace(",", ".")
-        )
-
-    elif "," in angka:
-        angka = angka.replace(",", ".")
-
-    elif "." in angka:
-        if re.fullmatch(
-            r"-?\d{1,3}(?:\.\d{3})+",
-            angka,
-        ):
-            angka = angka.replace(".", "")
-
-    try:
-        return Decimal(angka)
-
-    except InvalidOperation:
-        return Decimal("0")
+        return angka.replace(".", "").replace(",", ".")
+    if "," in angka:
+        return angka.replace(",", ".")
+    if "." in angka and _POLA_RIBUAN_TITIK.fullmatch(angka):
+        return angka.replace(".", "")
+    return angka
 
 
-def jumlahkan_angka_dari_teks(
-    daftar_nilai: Iterable[Any],
-) -> Decimal:
-    """
-    Menjumlahkan angka yang terdapat dalam teks.
+def _normalisasi_teks_angka(nilai: Any) -> str:
+    """Normalisasi teks angka Indonesia/internasional untuk Decimal."""
+    teks = _POLA_RUPIAH.sub("", str(nilai).strip())
+    teks = _POLA_BUKAN_ANGKA.sub("", teks)
 
-    Contoh:
-        [
-            "2 DUS",
-            "4 PALET",
-            "3 KARUNG"
-        ]
-
-        hasil:
-            9
-    """
-
-    total = Decimal("0")
-
-    for nilai in daftar_nilai:
-        total += ambil_angka_dari_teks(nilai)
-
-    return total
-
-
-def format_decimal_indonesia(
-    nilai: Any,
-) -> str:
-    """
-    Memformat angka desimal ke format Indonesia.
-
-    Contoh:
-        1500     -> "1.500"
-        1500.5   -> "1.500,5"
-        1500.50  -> "1.500,5"
-    """
-    try:
-        angka = Decimal(
-            str(nilai)
-        )
-
-    except (
-        InvalidOperation,
-        TypeError,
-        ValueError,
-    ):
-        return "-"
-
-    if not angka.is_finite():
-        return "-"
-
-    if angka == angka.to_integral_value():
-        return (
-            f"{int(angka):,}"
-            .replace(",", ".")
-        )
-
-    hasil = format(
-        angka.normalize(),
-        "f",
-    )
-
-    bagian_bulat, bagian_desimal = (
-        hasil.split(".", 1)
-    )
-
-    bulat_terformat = (
-        f"{int(bagian_bulat):,}"
-        .replace(",", ".")
-    )
-
-    bagian_desimal = (
-        bagian_desimal.rstrip("0")
-    )
-
-    if not bagian_desimal:
-        return bulat_terformat
-
-    return (
-        f"{bulat_terformat},"
-        f"{bagian_desimal}"
-    )
-
-
-def angka_indonesia_to_decimal(
-    nilai: Any,
-) -> Decimal:
-    """
-    Mengubah angka atau teks format Indonesia menjadi Decimal.
-
-    Contoh:
-        1500          -> Decimal("1500")
-        1500.5        -> Decimal("1500.5")
-        "1.500"       -> Decimal("1500")
-        "1.500,75"    -> Decimal("1500.75")
-        "12,5"        -> Decimal("12.5")
-        "Rp 1.500"    -> Decimal("1500")
-    """
-    if nilai is None:
-        return Decimal("0")
-
-    if isinstance(nilai, Decimal):
-        if nilai.is_finite():
-            return nilai
-
-        return Decimal("0")
-
-    if isinstance(nilai, bool):
-        return Decimal(int(nilai))
-
-    if isinstance(nilai, Integral):
-        return Decimal(int(nilai))
-
-    if isinstance(nilai, Real):
-        try:
-            hasil = Decimal(str(nilai))
-
-            if hasil.is_finite():
-                return hasil
-
-        except (
-            InvalidOperation,
-            TypeError,
-            ValueError,
-        ):
-            pass
-
-        return Decimal("0")
-
-    teks = str(nilai).strip()
-
-    if not teks:
-        return Decimal("0")
-
-    teks = re.sub(
-        r"(?i)\brp\.?\s*",
-        "",
-        teks,
-    )
-
-    teks = re.sub(
-        r"[^0-9,.\-]",
-        "",
-        teks,
-    )
-
-    if teks in {
-        "",
-        "-",
-        ".",
-        ",",
-    }:
-        return Decimal("0")
+    if teks in {"", "-", ".", ","}:
+        return ""
 
     negatif = teks.startswith("-")
     teks = teks.lstrip("-")
 
     if "." in teks and "," in teks:
         if teks.rfind(",") > teks.rfind("."):
-            # Format Indonesia:
-            # 1.500,75 -> 1500.75
-            teks = (
-                teks
-                .replace(".", "")
-                .replace(",", ".")
-            )
-
+            teks = teks.replace(".", "").replace(",", ".")
         else:
-            # Format internasional:
-            # 1,500.75 -> 1500.75
             teks = teks.replace(",", "")
-
     elif "," in teks:
-        if re.fullmatch(
-            r"\d{1,3}(?:,\d{3})+",
-            teks,
-        ):
-            # 1,500 -> 1500
-            teks = teks.replace(",", "")
+        teks = (
+            teks.replace(",", "")
+            if _POLA_RIBUAN_KOMA_POSITIF.fullmatch(teks)
+            else teks.replace(",", ".")
+        )
+    elif "." in teks and _POLA_RIBUAN_TITIK_POSITIF.fullmatch(teks):
+        teks = teks.replace(".", "")
 
-        else:
-            # 12,5 -> 12.5
-            teks = teks.replace(",", ".")
+    return f"-{teks}" if negatif else teks
 
-    elif "." in teks:
-        if re.fullmatch(
-            r"\d{1,3}(?:\.\d{3})+",
-            teks,
-        ):
-            # 1.500 -> 1500
-            teks = teks.replace(".", "")
 
-    if negatif:
-        teks = f"-{teks}"
+def format_ke_rupiah(nilai: Any) -> str:
+    """Format nilai sebagai rupiah bulat, mis. ``1500000 -> '1.500.000'``."""
+    if nilai is None or nilai == "":
+        return ""
+
+    negatif = False
+    if isinstance(nilai, bool):
+        angka = int(nilai)
+    elif isinstance(nilai, (Integral, Real)):
+        angka = int(nilai)
+        negatif = angka < 0
+        angka = abs(angka)
+    else:
+        teks = str(nilai).strip()
+        if not teks:
+            return ""
+        negatif = teks.startswith("-")
+        angka_saja = _ambil_digit(teks)
+        if not angka_saja:
+            return ""
+        angka = int(angka_saja)
+
+    hasil = _format_integer_indonesia(angka)
+    return f"-{hasil}" if negatif and angka != 0 else hasil
+
+
+def format_input_ribuan_gaya_indonesia(edit_widget: QLineEdit) -> None:
+    """Format otomatis isi QLineEdit sebagai ribuan Indonesia dan jaga kursor."""
+    text = edit_widget.text()
+    angka_saja = _ambil_digit(text)
+
+    if not angka_saja:
+        with blokir_signal_sementara(edit_widget):
+            edit_widget.clear()
+        return
+
+    text_baru = format_ke_rupiah(angka_saja)
+    pos_lama = edit_widget.cursorPosition()
+
+    with blokir_signal_sementara(edit_widget):
+        edit_widget.setText(text_baru)
+        panjang_baru = len(text_baru)
+        pos_baru = pos_lama + panjang_baru - len(text)
+        edit_widget.setCursorPosition(max(0, min(pos_baru, panjang_baru)))
+
+
+def rupiah_to_int(rupiah_str: Any) -> int:
+    """Ubah nilai rupiah Indonesia menjadi integer murni."""
+    if rupiah_str is None or rupiah_str == "":
+        return 0
+
+    if isinstance(rupiah_str, bool):
+        return int(rupiah_str)
+    if isinstance(rupiah_str, (Integral, Real)):
+        return int(rupiah_str)
+
+    teks = str(rupiah_str).strip()
+    if not teks:
+        return 0
+
+    negatif = teks.startswith("-")
+    angka_saja = _ambil_digit(teks)
+    if not angka_saja:
+        return 0
+
+    hasil = int(angka_saja)
+    return -hasil if negatif and hasil != 0 else hasil
+
+
+def ambil_angka_dari_teks(nilai: Any) -> Decimal:
+    """Ambil angka pertama dari teks, mis. ``'1,5 KARUNG' -> Decimal('1.5')``."""
+    if nilai is None:
+        return NOL
+
+    teks = str(nilai).strip()
+    if not teks:
+        return NOL
+
+    cocok = _POLA_ANGKA_PERTAMA.search(teks)
+    if not cocok:
+        return NOL
+
+    try:
+        return Decimal(_normalisasi_angka_pertama(cocok.group(0)))
+    except InvalidOperation:
+        return NOL
+
+
+def jumlahkan_angka_dari_teks(daftar_nilai: Iterable[Any]) -> Decimal:
+    """Jumlahkan angka pertama dari setiap elemen iterable."""
+    return sum((ambil_angka_dari_teks(nilai) for nilai in daftar_nilai), NOL)
+
+
+def format_decimal_indonesia(nilai: Any) -> str:
+    """Format angka Decimal ke gaya Indonesia tanpa nol desimal berlebih."""
+    try:
+        angka = Decimal(str(nilai))
+    except (InvalidOperation, TypeError, ValueError):
+        return "-"
+
+    if not angka.is_finite():
+        return "-"
+    if angka == angka.to_integral_value():
+        return _format_integer_indonesia(int(angka))
+
+    bagian_bulat, bagian_desimal = format(angka.normalize(), "f").split(".", 1)
+    bulat_terformat = _format_integer_indonesia(int(bagian_bulat))
+    bagian_desimal = bagian_desimal.rstrip("0")
+    return bulat_terformat if not bagian_desimal else f"{bulat_terformat},{bagian_desimal}"
+
+
+def angka_indonesia_to_decimal(nilai: Any) -> Decimal:
+    """Ubah angka biasa atau teks Indonesia/internasional menjadi Decimal."""
+    if nilai is None:
+        return NOL
+
+    if isinstance(nilai, Decimal):
+        return nilai if nilai.is_finite() else NOL
+    if isinstance(nilai, bool):
+        return Decimal(int(nilai))
+    if isinstance(nilai, Integral):
+        return Decimal(int(nilai))
+
+    if isinstance(nilai, Real):
+        try:
+            hasil = Decimal(str(nilai))
+            return hasil if hasil.is_finite() else NOL
+        except (InvalidOperation, TypeError, ValueError):
+            return NOL
+
+    teks = str(nilai).strip()
+    if not teks:
+        return NOL
+
+    teks = _normalisasi_teks_angka(teks)
+    if not teks:
+        return NOL
 
     try:
         hasil = Decimal(teks)
+    except (InvalidOperation, TypeError, ValueError):
+        return NOL
 
-    except (
-        InvalidOperation,
-        TypeError,
-        ValueError,
-    ):
-        return Decimal("0")
-
-    if not hasil.is_finite():
-        return Decimal("0")
-
-    return hasil
+    return hasil if hasil.is_finite() else NOL
 
 
 def format_angka_indonesia(
@@ -431,57 +221,18 @@ def format_angka_indonesia(
     kosong_jika_nol: bool = False,
     nilai_kosong: str = "",
 ) -> str:
-    """
-    Memformat angka biasa atau angka Indonesia.
-
-    Digunakan untuk berat, CBM, dan nilai desimal lain.
-
-    Contoh:
-        1500                -> "1.500"
-        1500.5              -> "1.500,5"
-        "1.500,75"          -> "1.500,75"
-        0, kosong_jika_nol=True, nilai_kosong=""  -> ""
-        0, kosong_jika_nol=True, nilai_kosong="-" -> "-"
-    """
-    if nilai is None:
-        return str(nilai_kosong)
-
-    if isinstance(nilai, str) and not nilai.strip():
+    """Format berat, CBM, atau nilai desimal lain dengan gaya Indonesia."""
+    if nilai is None or (isinstance(nilai, str) and not nilai.strip()):
         return str(nilai_kosong)
 
     try:
-        jumlah_desimal = max(
-            0,
-            int(maksimum_desimal),
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
+        jumlah_desimal = max(0, int(maksimum_desimal))
+    except (TypeError, ValueError):
         jumlah_desimal = 2
 
-    angka = angka_indonesia_to_decimal(
-        nilai
-    )
-
+    angka = angka_indonesia_to_decimal(nilai)
     if kosong_jika_nol and angka == 0:
         return str(nilai_kosong)
 
-    if jumlah_desimal == 0:
-        angka = angka.quantize(
-            Decimal("1")
-        )
-
-    else:
-        pola_desimal = Decimal(
-            "1." + ("0" * jumlah_desimal)
-        )
-
-        angka = angka.quantize(
-            pola_desimal
-        )
-
-    return format_decimal_indonesia(
-        angka
-    )
+    pola_desimal = Decimal("1") if jumlah_desimal == 0 else Decimal("1." + "0" * jumlah_desimal)
+    return format_decimal_indonesia(angka.quantize(pola_desimal))

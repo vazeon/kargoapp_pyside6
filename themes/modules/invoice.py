@@ -6,6 +6,17 @@ from typing import Dict
 from utils.typography import get_master_font
 
 
+def get_invoice_dialog_styles(size_total: int) -> Dict[str, str]:
+    """Menghasilkan QSS khusus dialog pengaturan kolom Invoice."""
+    return {
+        "title": f"""
+            font-size:{size_total}px;
+            font-weight:bold;
+            font-family:'{get_master_font()}';
+        """,
+    }
+
+
 def get_invoice_styles(
     is_dark: bool,
     size_title: int,

@@ -22,7 +22,6 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         input_bg = "#1d2024"
         input_text = "#ffffff"
         input_border = "#4c525e"
-        placeholder_color = "#6b7280"
         table_bg = "#1a1d24"
         table_alt = "#20242b"
         table_text = "#f8fafc"
@@ -38,7 +37,6 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         input_bg = "#ffffff"
         input_text = "#0f172a"
         input_border = "#cbd5e1"
-        placeholder_color = "#9ca3af"
         table_bg = "#ffffff"
         table_alt = "#f1f5f9"
         table_text = "#0f172a"
@@ -58,7 +56,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     """
 
     style_input = f"""
-        QLineEdit, QComboBox {{
+        QLineEdit {{
             font-size: {sz_input}px;
             background-color: {input_bg};
             color: {input_text};
@@ -67,13 +65,84 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             border-radius: 4px;
             font-family: '{get_master_font()}';
         }}
-        QLineEdit[custom_italic="true"][is_empty="true"] {{
-            font-style: italic;
-            font-size: {sz_input}px;
-            color: {placeholder_color};
+    """
+
+    # Kartu detail Manifest.
+    if is_dark:
+        card_bg = "#171B23"
+        card_border = "#3A4556"
+        card_label = "#F2F4F7"
+        header_label = "#C8D1E0"
+        tanggal_text = "#F8FAFC"
+        tanggal_bg = "#181C24"
+        tanggal_border = "#4B5563"
+        nomor_text = "#FFC400"
+        nomor_bg = "#171B23"
+        nomor_border = "#3B82F6"
+    else:
+        card_bg = "#FFFFFF"
+        card_border = "#C8D4E3"
+        card_label = "#172033"
+        header_label = "#4B5C73"
+        tanggal_text = "#10233F"
+        tanggal_bg = "#FFFFFF"
+        tanggal_border = "#C8D4E3"
+        nomor_text = "#C90000"
+        nomor_bg = "#FFF2F2"
+        nomor_border = "#FF4D5E"
+
+    card_manifest = f"""
+        QFrame#cardRuteManifest, QFrame#cardArmadaManifest {{
+            background-color: {card_bg};
+            border: 1px solid {card_border};
+            border-radius: 11px;
         }}
-        QLineEdit[custom_italic="false"][is_empty="false"] {{
-            font-style: normal;
+    """
+
+    label_input = f"""
+        QLabel {{
+            color: {card_label};
+            background: transparent;
+            border: none;
+            font-size: {sz_base}px;
+            font-weight: 600;
+            font-family: '{get_master_font()}';
+        }}
+    """
+
+    label_header = f"""
+        QLabel {{
+            color: {header_label};
+            background: transparent;
+            font-size: {sz_base}px;
+            font-weight: 600;
+            font-family: '{get_master_font()}';
+        }}
+    """
+
+    txt_tanggal_manifest = f"""
+        QLineEdit {{
+            color: {tanggal_text};
+            background: {tanggal_bg};
+            border: 1px solid {tanggal_border};
+            border-radius: 5px;
+            padding: 2px 8px;
+            font-size: {sz_base}px;
+            font-family: '{get_master_font()}';
+        }}
+    """
+
+    txt_no_manifest = f"""
+        QLineEdit {{
+            color: {nomor_text};
+            background: {nomor_bg};
+            border: 2px solid {nomor_border};
+            border-radius: 6px;
+            padding: 2px 10px;
+            font-size: {sz_base + 3}px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            font-family: '{get_master_font()}';
         }}
     """
 
@@ -163,6 +232,11 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     return {
         "lbl_title": lbl_title,
         "style_input": style_input,
+        "card_manifest": card_manifest,
+        "label_input": label_input,
+        "label_header": label_header,
+        "txt_tanggal_manifest": txt_tanggal_manifest,
+        "txt_no_manifest": txt_no_manifest,
         "btn_proses": btn_proses,
         "list_histori": list_histori,
         "style_tabel": style_tabel,
