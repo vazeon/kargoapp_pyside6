@@ -86,84 +86,41 @@ def _format_desimal(
     )
 
 
-def cetak_manifest_ke_printer(
-        data: dict,
-        parent_window=None,
-        tipe_kertas: str = "A4",
-) -> None:
-    """Membuat preview dan mencetak dokumen Manifest."""
-    if not isinstance(data, dict):
-        raise TypeError(
-            "Data manifest harus berupa dictionary."
-        )
 
-    # Memaksa tipe kertas selalu menjadi A4
-    tipe_kertas = "A4"
 
-    printer = buat_printer(
-        JENIS_MANIFEST,
-        tipe_kertas=tipe_kertas,
-    )
-
-    comp_name = str(
-        DATA_CLIENT.get("nama_perusahaan")
-        or "EKSPEDISI"
-    ).strip()
-    list_items = data.get("items", [])
-    if not isinstance(list_items, (list, tuple)):
-        list_items = []
-
-    baris_tabel: list[str] = []
+def _siapkan_baris_manifest(list_items):
+    """Membentuk baris HTML dan total Manifest tanpa menyentuh layout dokumen."""
+    baris_tabel = []
     total_berat = Decimal("0")
     total_cbm = Decimal("0")
     total_seluruh_ongkir = Decimal("0")
 
     for index, row in enumerate(list_items):
-        nomor = index + 1
-        no_resi = _nilai_row(row, 0)
-        pengirim = _nilai_row(row, 1)
-        penerima = _nilai_row(row, 2)
-        kota_raw = str(
-            _nilai_row(row, 3, "")
-        )
-        nama_barang = _nilai_row(row, 4)
-        nilai_koli = _nilai_row(row, 5, "")
         nilai_berat = _nilai_row(row, 6, 0)
         nilai_cbm = _nilai_row(row, 7, 0)
         total_ongkir = _nilai_row(row, 8, "-")
-        ket_manifest = _nilai_row(row, 9, "-")
+        total_berat += angka_indonesia_to_decimal(nilai_berat)
+        total_cbm += angka_indonesia_to_decimal(nilai_cbm)
 
-        total_berat += angka_indonesia_to_decimal(
-            nilai_berat
-        )
-        total_cbm += angka_indonesia_to_decimal(
-            nilai_cbm
-        )
-
-        # Mengekstrak angka dari format Rupiah untuk dijumlahkan
-        angka_ongkir_bersih = re.sub(r'[^\d]', '', str(total_ongkir))
+        angka_ongkir_bersih = re.sub(r"[^\d]", "", str(total_ongkir))
         if angka_ongkir_bersih:
             total_seluruh_ongkir += Decimal(angka_ongkir_bersih)
 
-        kota_cetak = (
-            kota_raw.split(" - ")[-1].strip()
-            if " - " in kota_raw
-            else kota_raw.strip()
-        )
-
+        kota_raw = str(_nilai_row(row, 3, ""))
+        kota_cetak = kota_raw.split(" - ")[-1].strip() if " - " in kota_raw else kota_raw.strip()
         baris_tabel.append(
             "<tr>"
-            f'<td align="center">{nomor}</td>'
-            f"<td>{_esc(no_resi)}</td>"
-            f"<td>{_esc(pengirim)}</td>"
-            f"<td>{_esc(penerima)}</td>"
+            f'<td align="center">{index + 1}</td>'
+            f"<td>{_esc(_nilai_row(row, 0))}</td>"
+            f"<td>{_esc(_nilai_row(row, 1))}</td>"
+            f"<td>{_esc(_nilai_row(row, 2))}</td>"
             f"<td>{_esc(kota_cetak)}</td>"
-            f"<td>{_esc(nama_barang)}</td>"
-            f'<td align="right">{_esc(_teks_koli(nilai_koli))}</td>'
+            f"<td>{_esc(_nilai_row(row, 4))}</td>"
+            f'<td align="right">{_esc(_teks_koli(_nilai_row(row, 5, "")))}</td>'
             f'<td align="right">{_format_desimal(nilai_berat)}</td>'
             f'<td align="right">{_format_desimal(nilai_cbm)}</td>'
             f'<td align="right">{_esc(total_ongkir)}</td>'
-            f"<td>{_esc(ket_manifest)}</td>"
+            f"<td>{_esc(_nilai_row(row, 9, '-'))}</td>"
             "</tr>"
         )
 
@@ -175,78 +132,66 @@ def cetak_manifest_ke_printer(
             "</td></tr>"
         )
 
-    total_koli = jumlahkan_angka_dari_teks(
-        _nilai_row(row, 5, "")
-        for row in list_items
-    )
-    total_koli_cetak = (
-        format_decimal_indonesia(total_koli)
-        if total_koli != 0
-        else "-"
-    )
-    total_berat_cetak = _format_desimal(
-        total_berat,
-        maksimum_desimal=2,
-    )
-    total_cbm_cetak = _format_desimal(
-        total_cbm,
-        maksimum_desimal=2,
+    total_koli = jumlahkan_angka_dari_teks(_nilai_row(row, 5, "") for row in list_items)
+    return (
+        baris_tabel,
+        format_decimal_indonesia(total_koli) if total_koli != 0 else "-",
+        _format_desimal(total_berat, maksimum_desimal=2),
+        _format_desimal(total_cbm, maksimum_desimal=2),
+        format_angka_indonesia(total_seluruh_ongkir, maksimum_desimal=0)
+        if total_seluruh_ongkir > 0 else "-",
     )
 
-    # Format hasil akhir perhitungan seluruh ongkir
-    if total_seluruh_ongkir > 0:
-        total_ongkir_cetak = format_angka_indonesia(
-            total_seluruh_ongkir,
-            maksimum_desimal=0,
-        )
-    else:
-        total_ongkir_cetak = "-"
 
-    nomor_manifest = str(
-        data.get("no_manifest", "")
-        or "MANIFEST"
-    ).strip().upper()
-    truk = str(
-        data.get("truk")
-        or data.get("armada")
-        or ""
-    ).strip().upper()
-    note_manifest = str(
-        data.get("note_manifest", "")
-        or ""
-    ).strip().upper()
-    nama_kapal = str(
-        data.get("nama_kapal", "")
-        or ""
-    ).strip().upper()
-    tanggal = str(
-        data.get("tanggal", "")
-        or ""
-    ).strip()
-
+def _identitas_manifest(data):
+    nomor_manifest = str(data.get("no_manifest", "") or "MANIFEST").strip().upper()
+    truk = str(data.get("truk") or data.get("armada") or "").strip().upper()
+    note_manifest = str(data.get("note_manifest", "") or "").strip().upper()
+    nama_kapal = str(data.get("nama_kapal", "") or "").strip().upper()
+    tanggal = str(data.get("tanggal", "") or "").strip()
     armada_atau_note = truk if (truk and truk != "-") else (note_manifest or "")
-    if armada_atau_note and nama_kapal:
-        detail_gabungan = f"{armada_atau_note} - {nama_kapal}"
-    else:
-        detail_gabungan = armada_atau_note or nama_kapal or "-"
-
-    font_dokumen = get_master_font()
-
-    root_project = Path(__file__).resolve().parents[2]
-    logo_path = (
-            root_project
-            / "assets"
-            / "logo"
-            / "logo_mahkota_kargo.png"
+    detail_gabungan = (
+        f"{armada_atau_note} - {nama_kapal}"
+        if armada_atau_note and nama_kapal
+        else armada_atau_note or nama_kapal or "-"
     )
-    logo_html = ""
-    if logo_path.is_file():
-        logo_html = (
-            f'<img src="{_esc(logo_path.as_uri())}" '
-            'width="18" height="18" alt="Logo">'
-        )
+    return nomor_manifest, detail_gabungan, tanggal or "-"
 
-    tanggal_cetak = tanggal or "-"
+
+def _logo_manifest_html() -> str:
+    logo_path = Path(__file__).resolve().parents[2] / "assets" / "logo" / "logo_mahkota_kargo.png"
+    if not logo_path.is_file():
+        return ""
+    return f'<img src="{_esc(logo_path.as_uri())}" width="18" height="18" alt="Logo">'
+
+
+def cetak_manifest_ke_printer(
+        data: dict,
+        parent_window=None,
+        tipe_kertas: str = "A4",
+) -> None:
+    """Membuat preview dan mencetak dokumen Manifest."""
+    if not isinstance(data, dict):
+        raise TypeError("Data manifest harus berupa dictionary.")
+
+    # Behavior lama: Manifest selalu A4 meski pemanggil mengirim NCR.
+    tipe_kertas = "A4"
+    printer = buat_printer(JENIS_MANIFEST, tipe_kertas=tipe_kertas)
+    comp_name = str(DATA_CLIENT.get("nama_perusahaan") or "EKSPEDISI").strip()
+    list_items = data.get("items", [])
+    if not isinstance(list_items, (list, tuple)):
+        list_items = []
+
+    (
+        baris_tabel,
+        total_koli_cetak,
+        total_berat_cetak,
+        total_cbm_cetak,
+        total_ongkir_cetak,
+    ) = _siapkan_baris_manifest(list_items)
+    nomor_manifest, detail_gabungan, tanggal_cetak = _identitas_manifest(data)
+    font_dokumen = get_master_font()
+    logo_html = _logo_manifest_html()
 
     html_content = f"""
     <html>

@@ -35,7 +35,6 @@ from utils.typography import (
     get_master_font,
     perbarui_font_master,
 )
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 
 
 class TabSettingSistem(QWidget):
@@ -670,11 +669,6 @@ class TabSettingSistem(QWidget):
             app = QApplication.instance()
             qss = app.styleSheet().lower() if app else ""
             is_dark = "#25282e" in qss or "#1d2024" in qss
-
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
 
         settings = QSettings("AplikasiEkspedisi", "PengaturanUI")
         z = int(settings.value(f"zoom_{self.__class__.__name__}", 0))

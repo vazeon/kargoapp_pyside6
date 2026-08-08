@@ -10,7 +10,6 @@ def _warna_valid(warna: Optional[str]) -> Optional[QColor]:
     """Membuat QColor hanya ketika nilai warna valid."""
     if not warna:
         return None
-
     hasil = QColor(str(warna))
     return hasil if hasil.isValid() else None
 
@@ -22,30 +21,15 @@ def buat_tabel_item(
     bg_color: Optional[str] = None,
     fg_color: Optional[str] = None,
 ) -> QTableWidgetItem:
-    """
-    Membuat ``QTableWidgetItem`` dengan konfigurasi umum dalam satu fungsi.
-
-    Nilai ``None`` diubah menjadi string kosong. Warna yang tidak valid
-    diabaikan agar helper tidak menghasilkan item dengan brush invalid.
-    """
-    item = QTableWidgetItem(
-        "" if text is None else str(text)
-    )
-
+    """Membuat ``QTableWidgetItem`` dengan konfigurasi umum."""
+    item = QTableWidgetItem("" if text is None else str(text))
     if not editable:
-        item.setFlags(
-            item.flags() & ~Qt.ItemFlag.ItemIsEditable
-        )
-
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
     if alignment is not None:
         item.setTextAlignment(int(alignment))
 
-    warna_latar = _warna_valid(bg_color)
-    if warna_latar is not None:
-        item.setBackground(QBrush(warna_latar))
-
-    warna_teks = _warna_valid(fg_color)
-    if warna_teks is not None:
-        item.setForeground(QBrush(warna_teks))
-
+    for warna, setter in ((bg_color, item.setBackground), (fg_color, item.setForeground)):
+        warna_valid = _warna_valid(warna)
+        if warna_valid is not None:
+            setter(QBrush(warna_valid))
     return item

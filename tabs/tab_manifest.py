@@ -1,7 +1,7 @@
 # tabs/tab_manifest.py
 import re
 from PySide6.QtCore import QDate, QSettings, QStringListModel, Qt
-from PySide6.QtGui import QBrush, QFont
+from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -55,7 +55,6 @@ from utils.number_formatters import (
 from utils.table_helper import buat_tabel_item
 from utils.widget_helpers import paksa_kapital_lineedit
 from utils.date_ind_format import format_tanggal_ke_ui
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 
 
 def _get_manifest_delegate_colors(
@@ -323,27 +322,6 @@ class TabManifest(QWidget):
             )
             grid.addWidget(widget, row, 1)
 
-    def _perbarui_font_placeholder_truk(self, index=None):
-        if index is None:
-            index = self.cb_jenis_truk.currentIndex()
-
-        font_utama = self.cb_jenis_truk.font()
-        font_utama.setItalic(index == 0)
-        self.cb_jenis_truk.setFont(font_utama)
-
-        font_italic = QFont(font_utama)
-        font_italic.setItalic(True)
-        self.cb_jenis_truk.setItemData(0, font_italic, Qt.ItemDataRole.FontRole)
-
-        font_normal = QFont(font_utama)
-        font_normal.setItalic(False)
-        for item_index in range(1, self.cb_jenis_truk.count()):
-            self.cb_jenis_truk.setItemData(
-                item_index,
-                font_normal,
-                Qt.ItemDataRole.FontRole,
-            )
-
     def _bangun_card_armada_manifest(self):
         self.card_armada_manifest = QFrame()
         self.card_armada_manifest.setObjectName("cardArmadaManifest")
@@ -369,12 +347,8 @@ class TabManifest(QWidget):
             QSizePolicy.Policy.Fixed,
         )
         self.cb_jenis_truk.currentIndexChanged.connect(
-            self._perbarui_font_placeholder_truk
-        )
-        self.cb_jenis_truk.currentIndexChanged.connect(
             self.on_jenis_truk_manifest_changed
         )
-        self._perbarui_font_placeholder_truk(0)
 
         self.txt_jenis_truk_lain = QLineEdit()
         self._konfigurasi_lineedit_kapital(
@@ -1533,7 +1507,6 @@ class TabManifest(QWidget):
         self.cb_filter_wilayah.setFixedHeight(self.txt_nama_kapal.sizeHint().height())
         self.cb_jenis_truk.setFixedHeight(self.txt_no_pol.sizeHint().height())
         self.cb_tahun_filter.setFixedHeight(self.txt_cari_histori.sizeHint().height())
-        self._perbarui_font_placeholder_truk(self.cb_jenis_truk.currentIndex())
         terapkan_popup_bawah_combobox(comboboxes)
 
         for card in (self.card_rute_manifest, self.card_armada_manifest):
@@ -1613,8 +1586,6 @@ class TabManifest(QWidget):
 
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
-        terap_semua_placeholder_dinamis(self, is_dark=is_dark)
-
         z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
         font_dinamis = get_global_font_sizes(z)
         styles_statis = konversi_style_font_ke_point(

@@ -59,7 +59,6 @@ from utils.number_formatters import (
 )
 from utils.table_helper import buat_tabel_item
 from utils.reset_form_helper import reset_form_input_global
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 from utils.validators import UppercaseValidator
 from utils.mixins import ZoomTableMixin
 from utils.widget_helpers import blokir_signal_sementara
@@ -1920,15 +1919,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 reset_tanggal=True,
                 fokus_ke=self.txt_client,
             )
-            window = self.window()
-            terap_semua_placeholder_dinamis(
-                self.panel_kanan,
-                is_dark=bool(
-                    window
-                    and hasattr(window, "current_theme")
-                    and window.current_theme == "dark"
-                ),
-            )
             self.cmb_tipe_invoice.setCurrentText("Standar")
             self.cmb_pajak.setCurrentText("NONPAJAK")
             self.apply_template(preserve_rows=False)
@@ -2544,11 +2534,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
-
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
 
         styles = self._dapatkan_style_invoice_statis(is_dark)
         self._terapkan_tema_statis_invoice(is_dark, styles)

@@ -24,7 +24,6 @@ from themes.modules.kontak_armada import (
 from utils.number_formatters import format_ke_rupiah
 from utils.typography import get_global_font_sizes_pt, get_master_font
 from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 from utils.date_ind_format import format_tanggal_ke_ui
@@ -225,7 +224,6 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh_session_ui()
-        terap_semua_placeholder_dinamis(self, is_dark=self._tema_gelap_aktif())
 
     def _tema_gelap_aktif(self):
         win = self.window()
@@ -521,5 +519,3 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
                 zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=z)
         finally:
             self._sedang_menerapkan_zoom = False
-
-        terap_semua_placeholder_dinamis(self, is_dark=is_dark)

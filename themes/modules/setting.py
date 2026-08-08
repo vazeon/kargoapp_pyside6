@@ -1,5 +1,19 @@
 # themes/modules/setting.py
+from PySide6.QtGui import QPalette
+
+from themes.palette import get_theme_palette
 from utils.typography import get_master_font
+
+
+def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
+    """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
+    return gelap if is_dark else terang
+
+
+def _warna_placeholder(is_dark: bool) -> str:
+    """Ambil warna placeholder langsung dari themes/palette.py."""
+    palette = get_theme_palette(is_dark)
+    return palette.color(QPalette.ColorRole.PlaceholderText).name()
 
 
 def get_setting_styles(
@@ -8,51 +22,7 @@ def get_setting_styles(
     sz_input: int,
     sz_title: int,
 ) -> dict:
-    if is_dark:
-        bg_page, bg_card, bg_input, bg_input_foc = (
-            "#1a1d24",
-            "#25282e",
-            "#1d2024",
-            "#20242b",
-        )
-        bg_header, bg_alt_row, border, border_focus = (
-            "#1e293b",
-            "#20242b",
-            "#4c525e",
-            "#3b82f6",
-        )
-        border_grid, text_primary, text_muted, text_title, lbl_color = (
-            "#334155",
-            "#f8fafc",
-            "#94a3b8",
-            "#cbd5e1",
-            "#94a3b8",
-        )
-        bg_sidebar, bg_list_hover = "#14171c", "#1e222b"
-        list_text_color, page_title_color = "#cbd5e1", "#ffffff"
-    else:
-        bg_page, bg_card, bg_input, bg_input_foc = (
-            "#f1f5f9",
-            "#ffffff",
-            "#ffffff",
-            "#ffffff",
-        )
-        bg_header, bg_alt_row, border, border_focus = (
-            "#243752",
-            "#f8fafc",
-            "#cbd5e1",
-            "#2563eb",
-        )
-        border_grid, text_primary, text_muted, text_title, lbl_color = (
-            "#e2e8f0",
-            "#0f172a",
-            "#64748b",
-            "#0f172a",
-            "#475569",
-        )
-        bg_sidebar, bg_list_hover = "#e2e8f0", "#cbd5e1"
-        list_text_color, page_title_color = "#334155", "#0f172a"
-
+    placeholder = _warna_placeholder(is_dark)
     return {
         'scroll_area': f"""
             QScrollArea {{
@@ -65,9 +35,9 @@ def get_setting_styles(
                 font-weight: bold;
                 font-size: {sz_title}px;
                 font-family: '{get_master_font()}';
-                color: {text_title};
-                background-color: {bg_card};
-                border: 1px solid {border};
+                color: {_warna_tema(is_dark, "#cbd5e1", "#0f172a")};
+                background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
+                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
                 border-radius: 10px;
                 margin-top: 22px;
                 padding-top: 22px;
@@ -85,7 +55,7 @@ def get_setting_styles(
             }}
         """,
         'form_label': f"""
-            color: {lbl_color};
+            color: {_warna_tema(is_dark, "#94a3b8", "#475569")};
             font-size: {sz_base}px;
             font-family: '{get_master_font()}';
             font-weight: 600;
@@ -95,10 +65,11 @@ def get_setting_styles(
                 padding: 8px 12px;
                 font-size: {sz_base}px;
                 font-family: '{get_master_font()}';
-                border: 1px solid {border};
+                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
                 border-radius: 6px;
-                background-color: {bg_alt_row};
-                color: {text_muted};
+                background-color: {_warna_tema(is_dark, "#20242b", "#f8fafc")};
+                color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
+                placeholder-text-color: {placeholder};
                 letter-spacing: 0.2px;
             }}
         """,
@@ -107,34 +78,24 @@ def get_setting_styles(
                 padding: 8px 12px;
                 font-size: {sz_input}px;
                 font-family: '{get_master_font()}';
-                border: 1px solid {border};
+                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
                 border-radius: 6px;
-                background-color: {bg_input};
-                color: {text_primary};
+                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+                color: {_warna_tema(is_dark, "#f8fafc", "#0f172a")};
+                placeholder-text-color: {placeholder};
                 selection-background-color: #3b82f6;
             }}
             QLineEdit:focus, QTextEdit:focus {{
-                border: 1px solid {border_focus};
-                background-color: {bg_input_foc};
+                border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
+                background-color: {_warna_tema(is_dark, "#20242b", "#ffffff")};
             }}
             QLineEdit:disabled, QTextEdit:disabled {{
-                color: {text_muted};
-                background-color: {bg_alt_row};
+                color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
+                background-color: {_warna_tema(is_dark, "#20242b", "#f8fafc")};
             }}
             QTextEdit {{
                 padding: 6px 10px;
                 line-height: 1.4;
-            }}
-            /* FIX: Tambahkan font-size agar placeholder terzoom */
-            QLineEdit[custom_italic="true"][is_empty="true"],
-            QTextEdit[custom_italic="true"][is_empty="true"] {{
-                font-style: italic;
-                font-size: {sz_input}px;
-                color: {text_muted};
-            }}
-            QLineEdit[custom_italic="true"][is_empty="false"],
-            QTextEdit[custom_italic="true"][is_empty="false"] {{
-                font-style: normal;
             }}
         """,
         'btn_simpan': f"""
@@ -180,7 +141,7 @@ def get_setting_styles(
                 background-color: #dbeafe;
             }}
         """,
-        'sidebar_container': f"background-color: {bg_sidebar};",
+        'sidebar_container': f"background-color: {_warna_tema(is_dark, "#14171c", "#e2e8f0")};",
         'sidebar_list': f"""
             QListWidget {{
                 background-color: transparent;
@@ -193,10 +154,10 @@ def get_setting_styles(
                 padding: 14px 16px;
                 border-radius: 6px;
                 margin-bottom: 4px;
-                color: {list_text_color};
+                color: {_warna_tema(is_dark, "#cbd5e1", "#334155")};
             }}
             QListWidget::item:hover:!selected {{
-                background-color: {bg_list_hover};
+                background-color: {_warna_tema(is_dark, "#1e222b", "#cbd5e1")};
             }}
             QListWidget::item:selected {{
                 background-color: #3b82f6;
@@ -209,7 +170,7 @@ def get_setting_styles(
                 font-weight: bold;
                 font-size: {sz_title}px;
                 font-family: '{get_master_font()}';
-                color: {page_title_color};
+                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
                 background-color: transparent;
                 border: none;
                 margin-top: 10px;
@@ -224,10 +185,10 @@ def get_setting_styles(
             font-weight: bold;
             font-family: '{get_master_font()}';
             margin-bottom: 20px;
-            color: {page_title_color};
+            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
         """,
         'lbl_hint': f"""
-            color: {text_muted};
+            color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
             font-size: {sz_base - 1}px;
         """,
         'lbl_info_italic': """

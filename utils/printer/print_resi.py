@@ -192,74 +192,34 @@ def _buat_html_rekening(
     return "".join(hasil)
 
 
-def cetak_resi_ke_printer(
-    data: dict,
-    parent_window=None,
-) -> None:
-    """Membuat preview dan mencetak dokumen Resi."""
-    printer = buat_printer(JENIS_RESI)
 
-    comp_name = (
-        DATA_CLIENT.get("nama_perusahaan")
-        or ""
-    )
-    comp_address = (
-        DATA_CLIENT.get("alamat_perusahaan")
-        or ""
-    )
-    comp_phone = (
-        DATA_CLIENT.get("telp_perusahaan")
-        or ""
-    )
-    logo_text_html = (
-        DATA_CLIENT.get("logo_text_html")
-        or _esc(comp_name)
-    )
+
+def _identitas_perusahaan_resi():
+    comp_name = DATA_CLIENT.get("nama_perusahaan") or ""
+    comp_address = DATA_CLIENT.get("alamat_perusahaan") or ""
+    comp_phone = DATA_CLIENT.get("telp_perusahaan") or ""
+    logo_text_html = DATA_CLIENT.get("logo_text_html") or _esc(comp_name)
     logo_image_html = _buat_logo_gambar_html()
     logo_cell_html = (
         f'<td class="brand-logo-cell">{logo_image_html}</td>'
-        if logo_image_html
-        else ""
+        if logo_image_html else ""
     )
+    return comp_name, comp_address, comp_phone, logo_text_html, logo_cell_html
 
-    tipe_pajak = str(
-        data.get("tipe_pajak", "NON-PAJAK")
-    ).strip().upper()
 
-    teks_rekening = _buat_html_rekening(
-        tipe_pajak
-    )
-
-    list_barang = data.get(
-        "list_barang",
-        [],
-    )
-
+def _siapkan_baris_barang_resi(data: dict):
+    list_barang = data.get("list_barang", [])
     if not isinstance(list_barang, list):
         list_barang = []
 
-    baris_tabel: list[str] = []
-    maksimum_baris = max(
-        4,
-        len(list_barang),
-    )
-
-    for index in range(maksimum_baris):
+    baris_tabel = []
+    for index in range(max(4, len(list_barang))):
         nomor = index + 1
-
         if index < len(list_barang):
             barang = list_barang[index] or {}
-
-            koli = _teks_koli(
-                barang.get("qty", "")
-            )
-            berat = _format_desimal(
-                barang.get("berat", "")
-            )
-            cbm = _format_desimal(
-                barang.get("cbm", "")
-            )
-
+            koli = _teks_koli(barang.get("qty", ""))
+            berat = _format_desimal(barang.get("berat", ""))
+            cbm = _format_desimal(barang.get("cbm", ""))
             baris_tabel.append(
                 '<tr class="fixed-row">'
                 f'<td align="center">{nomor}</td>'
@@ -269,7 +229,6 @@ def cetak_resi_ke_printer(
                 f'<td align="center">{cbm}</td>'
                 "</tr>"
             )
-
         else:
             baris_tabel.append(
                 '<tr class="fixed-row">'
@@ -279,33 +238,20 @@ def cetak_resi_ke_printer(
             )
 
     total_koli = jumlahkan_angka_dari_teks(
-        barang.get("qty", "")
-        for barang in list_barang
-        if isinstance(barang, dict)
+        barang.get("qty", "") for barang in list_barang if isinstance(barang, dict)
     )
-
-    # Fallback untuk data lama yang hanya mengirim total_qty.
     if total_koli == 0:
-        total_koli = jumlahkan_angka_dari_teks(
-            [data.get("total_qty", "")]
-        )
+        total_koli = jumlahkan_angka_dari_teks([data.get("total_qty", "")])
 
-    total_koli_cetak = (
-        format_decimal_indonesia(total_koli)
-        if total_koli != 0
-        else "-"
+    return (
+        baris_tabel,
+        format_decimal_indonesia(total_koli) if total_koli != 0 else "-",
+        _format_desimal(data.get("total_berat", "")) or "-",
+        _format_desimal(data.get("total_cbm", "")) or "-",
     )
 
-    total_berat = _format_desimal(
-        data.get("total_berat", "")
-    ) or "-"
 
-    total_cbm = _format_desimal(
-        data.get("total_cbm", "")
-    ) or "-"
-
-    # Mendukung seluruh nama key tarif yang pernah dipakai TabResi.
-    # Urutkan nilai mentah lebih dulu agar format Rupiah tidak salah dibaca.
+def _ambil_tarif_resi(data: dict):
     tarif_kg = (
         data.get("tarif_kg_raw", "")
         or data.get("ongkir_kg_raw", "")
@@ -320,50 +266,27 @@ def cetak_resi_ke_printer(
         or data.get("tarif_m3", "")
         or data.get("ongkir_m3", "")
     )
+    return tarif_kg, tarif_m3
 
-    teks_tarif_satuan = ""
-    kena_ppn = tipe_pajak.startswith("PAJAK")
 
-    tarif_kg_final = _hitung_tarif_satuan_cetak(
-        tarif_kg,
-        tipe_pajak,
-    )
-    tarif_m3_final = _hitung_tarif_satuan_cetak(
-        tarif_m3,
-        tipe_pajak,
-    )
-
-    tarif_kg_cetak = _format_rupiah(tarif_kg_final)
-    tarif_m3_cetak = _format_rupiah(tarif_m3_final)
-    label_tarif = (
-        "Tarif + PPN 1,1%"
-        if kena_ppn
-        else "Tarif"
-    )
+def _buat_teks_tarif_satuan(data: dict, tipe_pajak: str) -> str:
+    tarif_kg, tarif_m3 = _ambil_tarif_resi(data)
+    tarif_kg_cetak = _format_rupiah(_hitung_tarif_satuan_cetak(tarif_kg, tipe_pajak))
+    tarif_m3_cetak = _format_rupiah(_hitung_tarif_satuan_cetak(tarif_m3, tipe_pajak))
+    label_tarif = "Tarif + PPN 1,1%" if tipe_pajak.startswith("PAJAK") else "Tarif"
 
     if tarif_kg_cetak:
-        teks_tarif_satuan = (
-            '<div class="tarif-satuan">'
-            f"{label_tarif}: Rp{tarif_kg_cetak} per kg"
-            "</div>"
-        )
+        return '<div class="tarif-satuan">' f"{label_tarif}: Rp{tarif_kg_cetak} per kg" "</div>"
+    if tarif_m3_cetak:
+        # Memperbaiki typo lama "persuper    123 m³" pada teks hasil cetak.
+        return '<div class="tarif-satuan">' f"{label_tarif}: Rp{tarif_m3_cetak} per m³" "</div>"
+    return ""
 
-    elif tarif_m3_cetak:
-        teks_tarif_satuan = (
-            '<div class="tarif-satuan">'
-            f"{label_tarif}: Rp{tarif_m3_cetak} persuper    123 m³"
-            "</div>"
-        )
 
-    total_ongkir = _format_rupiah(
-        data.get(
-            "total_jumlah_ongkir",
-            "",
-        )
-    )
-
+def _buat_html_kolom_tagihan(data: dict, teks_tarif_satuan: str) -> str:
+    total_ongkir = _format_rupiah(data.get("total_jumlah_ongkir", ""))
     if total_ongkir:
-        html_kolom_tagihan = f"""
+        return f"""
         <td width="25%" class="tagihan-box">
             <strong>TOTAL TAGIHAN</strong><br><br>
             <span class="total-tagihan">
@@ -372,57 +295,44 @@ def cetak_resi_ke_printer(
             {teks_tarif_satuan}
         </td>
         """
-
-    elif teks_tarif_satuan:
-        html_kolom_tagihan = f"""
+    if teks_tarif_satuan:
+        return f"""
         <td width="25%" class="tagihan-box">
             {teks_tarif_satuan}
         </td>
         """
+    return '<td width="25%" style="vertical-align: top;"></td>'
 
-    else:
-        html_kolom_tagihan = (
-            '<td width="25%" '
-            'style="vertical-align: top;"></td>'
-        )
 
-    kota_db = str(
-        data.get("penerima_kota", "")
-        or ""
-    ).strip()
+def _kota_penerima_html(data: dict) -> str:
+    kota_db = str(data.get("penerima_kota", "") or "").strip()
+    if not kota_db or kota_db.lower() == "none":
+        kota_db = str(data.get("kota_tujuan", "") or "").strip()
+    if kota_db and kota_db.lower() != "none" and kota_db != "-":
+        kota_penerima = kota_db.split(" - ")[-1].strip()
+        return "<br>KOTA: " f"<strong>{_esc(kota_penerima.upper())}</strong>"
+    return ""
 
-    if (
-        not kota_db
-        or kota_db.lower() == "none"
-    ):
-        kota_db = str(
-            data.get("kota_tujuan", "")
-            or ""
-        ).strip()
 
-    if (
-        kota_db
-        and kota_db.lower() != "none"
-        and kota_db != "-"
-    ):
-        kota_penerima = (
-            kota_db.split(" - ")[-1].strip()
-        )
-        str_kota = (
-            "<br>KOTA: "
-            f"<strong>{_esc(kota_penerima.upper())}</strong>"
-        )
-    else:
-        str_kota = ""
+def _nama_admin_cetak() -> str:
+    nama_admin = str(CURRENT_SESSION.get("username") or "ADMIN").strip().upper()
+    return nama_admin or "..................."
 
-    nama_admin = str(
-        CURRENT_SESSION.get("username")
-        or "ADMIN"
-    ).strip().upper()
 
-    if not nama_admin:
-        nama_admin = "..................."
-
+def cetak_resi_ke_printer(
+    data: dict,
+    parent_window=None,
+) -> None:
+    """Membuat preview dan mencetak dokumen Resi."""
+    printer = buat_printer(JENIS_RESI)
+    comp_name, comp_address, comp_phone, logo_text_html, logo_cell_html = _identitas_perusahaan_resi()
+    tipe_pajak = str(data.get("tipe_pajak", "NON-PAJAK")).strip().upper()
+    teks_rekening = _buat_html_rekening(tipe_pajak)
+    baris_tabel, total_koli_cetak, total_berat, total_cbm = _siapkan_baris_barang_resi(data)
+    teks_tarif_satuan = _buat_teks_tarif_satuan(data, tipe_pajak)
+    html_kolom_tagihan = _buat_html_kolom_tagihan(data, teks_tarif_satuan)
+    str_kota = _kota_penerima_html(data)
+    nama_admin = _nama_admin_cetak()
     font_dokumen = get_master_font()
 
     html_content = f"""

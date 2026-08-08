@@ -3,9 +3,22 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 
+from themes.palette import get_theme_palette
 from utils.typography import get_master_font
+
+
+def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
+    """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
+    return gelap if is_dark else terang
+
+
+def _warna_placeholder(is_dark: bool) -> str:
+    """Ambil warna placeholder langsung dari themes/palette.py."""
+    palette = get_theme_palette(is_dark)
+    return palette.color(QPalette.ColorRole.PlaceholderText).name()
+
 
 DIALOG_PILIH_PENAGIH_STYLE = f"""
     font-size: 13px;
@@ -131,36 +144,10 @@ def get_buku_gudang_styles(
     sz_title: int,
 ) -> Dict[str, str]:
     """Menghasilkan style dinamis Buku Gudang berdasarkan tema dan zoom."""
-    if is_dark:
-        title_color = "#ffffff"
-        input_bg = "#1d2024"
-        input_text = "#ffffff"
-        input_border = "#4c525e"
-        table_bg = "#1a1d24"
-        table_alt = "#20242b"
-        table_text = "#f8fafc"
-        table_grid = "#334155"
-        header_bg = "#1e293b"
-        header_text = "#f8fafc"
-        header_border = "#334155"
-        selection_bg = "#3b82f6"
-    else:
-        title_color = "#1e293b"
-        input_bg = "#ffffff"
-        input_text = "#0f172a"
-        input_border = "#cbd5e1"
-        table_bg = "#ffffff"
-        table_alt = "#f1f5f9"
-        table_text = "#0f172a"
-        table_grid = "#e2e8f0"
-        header_bg = "#243752"
-        header_text = "#ffffff"
-        header_border = "#cbd5e1"
-        selection_bg = "#2563eb"
-
+    placeholder = _warna_placeholder(is_dark)
     return {
         "lbl_judul": f"""
-            color: {title_color};
+            color: {_warna_tema(is_dark, "#ffffff", "#1e293b")};
             font: bold {sz_title}px '{get_master_font()}';
             margin-bottom: 2px;
         """,
@@ -168,9 +155,9 @@ def get_buku_gudang_styles(
         "btn_tahun": f"""
             font-size: {sz_input + 4}px;
             font-weight: bold;
-            background-color: {input_bg};
-            color: {input_text};
-            border: 1px solid {input_border};
+            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
             padding: 6px 12px;
             border-radius: 6px;
             font-family: '{get_master_font()}';
@@ -178,44 +165,46 @@ def get_buku_gudang_styles(
 
         "txt_cari": f"""
             font-size: {sz_input}px;
-            background-color: {input_bg};
-            color: {input_text};
-            border: 1px solid {input_border};
+            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            placeholder-text-color: {placeholder};
+            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
             padding: 6px;
             border-radius: 4px;
             font-family: '{get_master_font()}';
         """,
 
         "inline_editor": f"""
-            background-color: {input_bg};
-            color: {input_text};
+            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            placeholder-text-color: {placeholder};
             padding: 2px;
-            border: 2px solid {selection_bg};
+            border: 2px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
             border-radius: 3px;
-            selection-background-color: {selection_bg};
+            selection-background-color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
             selection-color: #ffffff;
         """,
 
         "tabel": f"""
             QTableWidget {{
-                background-color: {table_bg};
-                alternate-background-color: {table_alt};
-                color: {table_text};
-                gridline-color: {table_grid};
+                background-color: {_warna_tema(is_dark, "#1a1d24", "#ffffff")};
+                alternate-background-color: {_warna_tema(is_dark, "#20242b", "#f1f5f9")};
+                color: {_warna_tema(is_dark, "#f8fafc", "#0f172a")};
+                gridline-color: {_warna_tema(is_dark, "#334155", "#e2e8f0")};
                 font-size: {sz_base}px;
                 font-family: '{get_master_font()}';
             }}
             QHeaderView::section {{
-                background-color: {header_bg};
-                color: {header_text};
-                border: 1px solid {header_border};
+                background-color: {_warna_tema(is_dark, "#1e293b", "#243752")};
+                color: {_warna_tema(is_dark, "#f8fafc", "#ffffff")};
+                border: 1px solid {_warna_tema(is_dark, "#334155", "#cbd5e1")};
                 font-size: {sz_base}px;
                 font-weight: bold;
                 padding: 6px;
                 font-family: '{get_master_font()}';
             }}
             QTableWidget::item:selected {{
-                background-color: {selection_bg};
+                background-color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
                 color: white;
             }}
         """,

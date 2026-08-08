@@ -18,7 +18,6 @@ import services.database_service as db_service
 from themes.modules.kontak_armada import get_kontak_riwayat_styles
 from utils.typography import get_global_font_sizes_pt, get_master_font
 from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
@@ -184,7 +183,6 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh_session_ui()
-        terap_semua_placeholder_dinamis(self, is_dark=self._tema_gelap_aktif())
 
     def _tema_gelap_aktif(self):
         win = self.window()
@@ -413,5 +411,3 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
                 zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=z)
         finally:
             self._sedang_menerapkan_zoom = False
-
-        terap_semua_placeholder_dinamis(self, is_dark=is_dark)

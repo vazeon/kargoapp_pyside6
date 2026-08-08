@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
+from PySide6.QtGui import QPalette
+
+from themes.palette import get_theme_palette
+
+
 ARMADA_PREVIEW_FOTO_STYLE = """
     border: 2px dashed #9ca3af;
     border-radius: 8px;
@@ -13,8 +18,15 @@ ARMADA_PREVIEW_FOTO_STYLE = """
 """
 
 
+def _warna_placeholder(is_dark: bool) -> str:
+    """Ambil warna placeholder langsung dari themes/palette.py."""
+    palette = get_theme_palette(is_dark)
+    return palette.color(QPalette.ColorRole.PlaceholderText).name()
+
+
 def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
     """Style bersama untuk subtab Pengirim dan Penerima."""
+    placeholder = _warna_placeholder(is_dark)
     if is_dark:
         return {
             "judul": f"""
@@ -28,6 +40,7 @@ def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
             "input": f"""
                 background-color: #1d2024;
                 color: white;
+                placeholder-text-color: {placeholder};
                 border: 1px solid #4c525e;
                 border-radius: 4px;
             """,
@@ -52,6 +65,7 @@ def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
         "input": f"""
             background-color: white;
             color: #0f172a;
+            placeholder-text-color: {placeholder};
             border: 1px solid #cbd5e1;
             border-radius: 4px;
         """,
@@ -67,6 +81,7 @@ def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
 
 def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
     """Menghasilkan style SubTab Truk dan SubTab Armada berdasarkan tema dan mode form."""
+    placeholder = _warna_placeholder(is_dark)
     mode_normalized = str(mode or "IDLE").upper()
     is_primary_mode = mode_normalized in {"IDLE", "PREVIEW"}
     warna_btn_utama = "#3b82f6" if is_primary_mode else "#22c55e"
@@ -85,12 +100,14 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
             "input_normal": f"""
                 background-color: #0f172a;
                 color: #ffffff;
+                placeholder-text-color: {placeholder};
                 border: 1px solid #4c525e;
                 border-radius: 4px;
             """,
             "input_locked": f"""
                 background-color: #1e293b;
                 color: #94a3b8;
+                placeholder-text-color: {placeholder};
                 border: 1px dashed #475569;
                 border-radius: 4px;
             """,
@@ -146,12 +163,14 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
             "input_normal": f"""
                 background-color: #ffffff;
                 color: #0f172a;
+                placeholder-text-color: {placeholder};
                 border: 1px solid #cbd5e1;
                 border-radius: 4px;
             """,
             "input_locked": f"""
                 background-color: #f1f5f9;
                 color: #64748b;
+                placeholder-text-color: {placeholder};
                 border: 1px dashed #cbd5e1;
                 border-radius: 4px;
             """,

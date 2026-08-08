@@ -639,6 +639,34 @@ def jalankan_aplikasi():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # Terapkan palette global sebelum widget apa pun dibuat, termasuk LoginWindow.
+    # Dengan demikian QPalette.PlaceholderText dari themes/palette.py menjadi
+    # sumber warna placeholder untuk seluruh aplikasi sejak awal.
+    settings_awal = QSettings(
+        MainWindow.SETTINGS_ORGANIZATION,
+        MainWindow.SETTINGS_APPLICATION,
+    )
+    tema_awal = str(
+        settings_awal.value(
+            "theme",
+            MainWindow.THEME_LIGHT,
+        )
+        or MainWindow.THEME_LIGHT
+    ).strip().lower()
+
+    if tema_awal not in {
+        MainWindow.THEME_LIGHT,
+        MainWindow.THEME_DARK,
+    }:
+        tema_awal = MainWindow.THEME_LIGHT
+
+    app.setPalette(
+        get_theme_palette(
+            tema_awal == MainWindow.THEME_DARK
+        )
+    )
+
     print("[NATIVE] QApplication dibuat", flush=True)
     faulthandler.enable(all_threads=True)
 

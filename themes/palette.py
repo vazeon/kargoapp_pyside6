@@ -1,4 +1,4 @@
-# themes/pallete.py
+# themes/palette.py
 
 """Palette warna terang dan gelap aplikasi."""
 
@@ -18,6 +18,7 @@ def get_theme_palette(is_dark: bool) -> QPalette:
             QPalette.ColorRole.ToolTipBase: "#0f172a",
             QPalette.ColorRole.ToolTipText: "#f8fafc",
             QPalette.ColorRole.Text: "#f8fafc",
+            QPalette.ColorRole.PlaceholderText: "#4c525e",
             QPalette.ColorRole.Button: "#1e222b",
             QPalette.ColorRole.ButtonText: "#f8fafc",
             QPalette.ColorRole.BrightText: "#ffffff",
@@ -39,6 +40,7 @@ def get_theme_palette(is_dark: bool) -> QPalette:
             QPalette.ColorRole.ToolTipBase: "#ffffff",
             QPalette.ColorRole.ToolTipText: "#0f172a",
             QPalette.ColorRole.Text: "#0f172a",
+            QPalette.ColorRole.PlaceholderText: "#cbd5e1",
             QPalette.ColorRole.Button: "#e2e8f0",
             QPalette.ColorRole.ButtonText: "#0f172a",
             QPalette.ColorRole.BrightText: "#000000",

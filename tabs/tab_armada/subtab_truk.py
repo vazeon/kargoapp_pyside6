@@ -29,7 +29,6 @@ from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 import utils.zoom as zoom_helper
 from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 
 
 def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
@@ -248,7 +247,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             if not self._sinkronkan_preview_terpilih():
                 self.atur_mode("IDLE")
 
-        self._terapkan_placeholder_dinamis()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -257,7 +255,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         # init_ui sudah memuat data. Hindari query kedua pada show pertama.
         if self._lewati_refresh_show_pertama:
             self._lewati_refresh_show_pertama = False
-            self._terapkan_placeholder_dinamis()
             return
 
         self.refresh_session_ui()
@@ -304,52 +301,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self.input_keterangan.setReadOnly(not aktif)
         self.on_jenis_truk_changed(self.combo_jenis.currentIndex())
 
-    def _atur_placeholder_combo_jenis(self):
-        """
-        Membuat pilihan awal ComboBox miring hanya saat sedang aktif.
-        """
-        if not hasattr(self, "combo_jenis"):
-            return
-
-        index_aktif = self.combo_jenis.currentIndex()
-
-        font_utama = QFont(self.combo_jenis.font())
-        font_utama.setItalic(index_aktif == 0)
-        self.combo_jenis.setFont(font_utama)
-
-        font_placeholder = QFont(font_utama)
-        font_placeholder.setItalic(True)
-        self.combo_jenis.setItemData(
-            0,
-            font_placeholder,
-            Qt.ItemDataRole.FontRole,
-        )
-
-        font_normal = QFont(font_utama)
-        font_normal.setItalic(False)
-
-        for index in range(1, self.combo_jenis.count()):
-            self.combo_jenis.setItemData(
-                index,
-                font_normal,
-                Qt.ItemDataRole.FontRole,
-            )
-
-    def _terapkan_placeholder_dinamis(self):
-        """Memperbarui placeholder sesuai isi input dan tema aktif."""
-        win = self.window()
-        is_dark = bool(
-            win
-            and hasattr(win, "current_theme")
-            and win.current_theme == "dark"
-        )
-
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
-        self._atur_placeholder_combo_jenis()
-
     def on_jenis_truk_changed(self, _index=None):
         """Menampilkan input khusus hanya ketika pilihan Lainnya digunakan."""
         pilih_lainnya = self.combo_jenis.currentText().strip() == "Lainnya..."
@@ -359,7 +310,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         if not pilih_lainnya:
             self.input_jenis_lain.clear()
 
-        self._atur_placeholder_combo_jenis()
 
     def ambil_jenis_truk_final(self):
         """Menghasilkan nama jenis truk yang siap disimpan ke database."""
@@ -781,7 +731,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self.btn_pilih_foto.setFont(font_base)
         self.btn_pilih_foto.setFixedHeight(max(30, self.btn_pilih_foto.sizeHint().height()))
         self.btn_pilih_foto.setStyleSheet(st["btn_foto"])
-        self._terapkan_placeholder_dinamis()
 
     def sesuaikan_tema_lokal(self):
         if self._sedang_menerapkan_tema:

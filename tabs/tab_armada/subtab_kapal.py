@@ -28,7 +28,6 @@ from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 import utils.zoom as zoom_helper
 from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 
 def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
     """Membuat QFont berbasis point untuk elemen UI statis."""
@@ -222,7 +221,6 @@ class SubTabKapal(QWidget, ZoomTableMixin):
             else:
                 self.atur_mode("IDLE")
 
-        self._terapkan_placeholder_dinamis()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -231,7 +229,6 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         # init_ui sudah memuat data. Hindari query kedua pada show pertama.
         if self._lewati_refresh_show_pertama:
             self._lewati_refresh_show_pertama = False
-            self._terapkan_placeholder_dinamis()
             return
 
         self.refresh_session_ui()
@@ -275,20 +272,6 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         self.input_nama_kapal.setReadOnly(not aktif)
         self.input_tujuan.setReadOnly(not aktif)
         self.input_keterangan.setReadOnly(not aktif)
-
-    def _terapkan_placeholder_dinamis(self):
-        """Memperbarui placeholder sesuai isi input dan tema aktif."""
-        win = self.window()
-        is_dark = bool(
-            win
-            and hasattr(win, "current_theme")
-            and win.current_theme == "dark"
-        )
-
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
 
     def bersihkan_form(self):
         self._identitas_terpilih = ""
@@ -726,7 +709,6 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         self.btn_pilih_foto.setFont(font_base)
         self.btn_pilih_foto.setFixedHeight(max(30, self.btn_pilih_foto.sizeHint().height()))
         self.btn_pilih_foto.setStyleSheet(st["btn_foto"])
-        self._terapkan_placeholder_dinamis()
 
     def sesuaikan_tema_lokal(self):
         if self._sedang_menerapkan_tema:

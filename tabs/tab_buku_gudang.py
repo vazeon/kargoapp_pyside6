@@ -46,7 +46,6 @@ from utils.date_ind_format import format_tanggal_ke_ui
 from utils.table_helper import buat_tabel_item
 from utils.validators import get_decimal_validator, get_integer_validator
 from utils.widget_helpers import paksa_kapital_lineedit
-from utils.placeholder_helper import terap_semua_placeholder_dinamis
 from delegates.status_delegate import (
     attach_status_delegate,
     update_status_delegate_theme,
@@ -113,17 +112,6 @@ class DialogPilihPenagih(QDialog):
 
         self.btn_lanjut.clicked.connect(self.validasi_dan_lanjut)
         self.btn_batal.clicked.connect(self.reject)
-
-        window = self.window()
-        is_dark = bool(
-            window
-            and hasattr(window, "current_theme")
-            and window.current_theme == "dark"
-        )
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=is_dark,
-        )
 
     def validasi_dan_lanjut(self):
         if self.rb_ketiga.isChecked() and not self.txt_ketiga.text().strip():
@@ -705,8 +693,6 @@ class TabBukuGudang(QWidget):
 
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
-        terap_semua_placeholder_dinamis(self, is_dark=is_dark)
-
         z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
         _, styles_statis = self._buat_style_buku_gudang(is_dark, 0)
         font_dinamis, styles_dinamis = self._buat_style_buku_gudang(is_dark, z)

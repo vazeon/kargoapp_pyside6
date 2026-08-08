@@ -1,9 +1,21 @@
 # themes/modules/manifest.py
 from typing import Optional, Tuple
 
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPalette
 
+from themes.palette import get_theme_palette
 from utils.typography import get_master_font, get_global_font_sizes
+
+
+def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
+    """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
+    return gelap if is_dark else terang
+
+
+def _warna_placeholder(is_dark: bool) -> str:
+    """Ambil warna placeholder langsung dari themes/palette.py."""
+    palette = get_theme_palette(is_dark)
+    return palette.color(QPalette.ColorRole.PlaceholderText).name()
 
 
 def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
@@ -12,44 +24,14 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     sz_base = sizes["sz_base"]
     sz_input = sizes["sz_input"]
     sz_title = sizes["sz_title"]
+    placeholder = _warna_placeholder(is_dark)
 
     warna_btn = "#f97316" if is_edit_mode else "#22c55e"
     warna_btn_hover = "#ea580c" if is_edit_mode else "#16a34a"
     warna_btn_pressed = "#c2410c" if is_edit_mode else "#15803d"
 
-    if is_dark:
-        title_color = "#ffffff"
-        input_bg = "#1d2024"
-        input_text = "#ffffff"
-        input_border = "#4c525e"
-        table_bg = "#1a1d24"
-        table_alt = "#20242b"
-        table_text = "#f8fafc"
-        table_grid = "#334155"
-        header_bg = "#1e293b"
-        header_border = "#334155"
-        selected_bg = "#3b82f6"
-        history_bg = "#1d2024"
-        history_text = "#cbd5e1"
-        panel_text = "#ffffff"
-    else:
-        title_color = "#0f172a"
-        input_bg = "#ffffff"
-        input_text = "#0f172a"
-        input_border = "#cbd5e1"
-        table_bg = "#ffffff"
-        table_alt = "#f1f5f9"
-        table_text = "#0f172a"
-        table_grid = "#e2e8f0"
-        header_bg = "#243752"
-        header_border = "#cbd5e1"
-        selected_bg = "#2563eb"
-        history_bg = "#ffffff"
-        history_text = "#1e293b"
-        panel_text = "#0f172a"
-
     lbl_title = f"""
-        color: {title_color};
+        color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
         font-size: {sz_title}px;
         font-weight: bold;
         font-family: '{get_master_font()}';
@@ -58,50 +40,28 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     style_input = f"""
         QLineEdit {{
             font-size: {sz_input}px;
-            background-color: {input_bg};
-            color: {input_text};
-            border: 1px solid {input_border};
+            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            placeholder-text-color: {placeholder};
+            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
             padding: 6px;
             border-radius: 4px;
             font-family: '{get_master_font()}';
         }}
     """
 
-    # Kartu detail Manifest.
-    if is_dark:
-        card_bg = "#171B23"
-        card_border = "#3A4556"
-        card_label = "#F2F4F7"
-        header_label = "#C8D1E0"
-        tanggal_text = "#F8FAFC"
-        tanggal_bg = "#181C24"
-        tanggal_border = "#4B5563"
-        nomor_text = "#FFC400"
-        nomor_bg = "#171B23"
-        nomor_border = "#3B82F6"
-    else:
-        card_bg = "#FFFFFF"
-        card_border = "#C8D4E3"
-        card_label = "#172033"
-        header_label = "#4B5C73"
-        tanggal_text = "#10233F"
-        tanggal_bg = "#FFFFFF"
-        tanggal_border = "#C8D4E3"
-        nomor_text = "#C90000"
-        nomor_bg = "#FFF2F2"
-        nomor_border = "#FF4D5E"
-
+    # Kartu detail Manifest. Warna dark/light ditulis langsung pada blok pemakainya.
     card_manifest = f"""
         QFrame#cardRuteManifest, QFrame#cardArmadaManifest {{
-            background-color: {card_bg};
-            border: 1px solid {card_border};
+            background-color: {_warna_tema(is_dark, "#171B23", "#FFFFFF")};
+            border: 1px solid {_warna_tema(is_dark, "#3A4556", "#C8D4E3")};
             border-radius: 11px;
         }}
     """
 
     label_input = f"""
         QLabel {{
-            color: {card_label};
+            color: {_warna_tema(is_dark, "#F2F4F7", "#172033")};
             background: transparent;
             border: none;
             font-size: {sz_base}px;
@@ -112,7 +72,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
 
     label_header = f"""
         QLabel {{
-            color: {header_label};
+            color: {_warna_tema(is_dark, "#C8D1E0", "#4B5C73")};
             background: transparent;
             font-size: {sz_base}px;
             font-weight: 600;
@@ -122,9 +82,10 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
 
     txt_tanggal_manifest = f"""
         QLineEdit {{
-            color: {tanggal_text};
-            background: {tanggal_bg};
-            border: 1px solid {tanggal_border};
+            color: {_warna_tema(is_dark, "#F8FAFC", "#10233F")};
+            placeholder-text-color: {placeholder};
+            background: {_warna_tema(is_dark, "#181C24", "#FFFFFF")};
+            border: 1px solid {_warna_tema(is_dark, "#4B5563", "#C8D4E3")};
             border-radius: 5px;
             padding: 2px 8px;
             font-size: {sz_base}px;
@@ -134,9 +95,10 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
 
     txt_no_manifest = f"""
         QLineEdit {{
-            color: {nomor_text};
-            background: {nomor_bg};
-            border: 2px solid {nomor_border};
+            color: {_warna_tema(is_dark, "#FFC400", "#C90000")};
+            placeholder-text-color: {placeholder};
+            background: {_warna_tema(is_dark, "#171B23", "#FFF2F2")};
+            border: 2px solid {_warna_tema(is_dark, "#3B82F6", "#FF4D5E")};
             border-radius: 6px;
             padding: 2px 10px;
             font-size: {sz_base + 3}px;
@@ -148,10 +110,10 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
 
     style_tabel = f"""
         QTableWidget {{
-            background-color: {table_bg};
-            alternate-background-color: {table_alt};
-            color: {table_text};
-            gridline-color: {table_grid};
+            background-color: {_warna_tema(is_dark, "#1a1d24", "#ffffff")};
+            alternate-background-color: {_warna_tema(is_dark, "#20242b", "#f1f5f9")};
+            color: {_warna_tema(is_dark, "#f8fafc", "#0f172a")};
+            gridline-color: {_warna_tema(is_dark, "#334155", "#e2e8f0")};
             font-size: {sz_base}px;
             font-family: '{get_master_font()}';
         }}
@@ -159,23 +121,24 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             background-color: transparent;
             border: none;
             padding-left: 4px;
-            color: {table_text};
+            color: {_warna_tema(is_dark, "#f8fafc", "#0f172a")};
+            placeholder-text-color: {placeholder};
         }}
         QLineEdit#manifestKetCell:focus {{
-            border: 1px solid {selected_bg};
+            border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
             background-color: transparent;
         }}
         QHeaderView::section {{
-            background-color: {header_bg};
+            background-color: {_warna_tema(is_dark, "#1e293b", "#243752")};
             color: #ffffff;
-            border: 1px solid {header_border};
+            border: 1px solid {_warna_tema(is_dark, "#334155", "#cbd5e1")};
             font-size: {sz_base}px;
             font-weight: bold;
             padding: 6px;
             font-family: '{get_master_font()}';
         }}
         QTableWidget::item:selected {{
-            background-color: {selected_bg};
+            background-color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
             color: #ffffff;
         }}
         QTableWidget::indicator {{
@@ -186,9 +149,9 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
 
     list_histori = f"""
         QTreeWidget {{
-            background-color: {history_bg};
-            color: {history_text};
-            border: 1px solid {input_border};
+            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
+            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
             border-radius: 6px;
             padding: 5px;
             font-size: {sz_base}px;
@@ -221,7 +184,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         QLabel {{
             font-size: {sz_base}px;
             font-family: '{get_master_font()}';
-            color: {panel_text};
+            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
             background-color: transparent;
             border: none;
         }}

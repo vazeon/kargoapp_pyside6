@@ -62,10 +62,6 @@ from utils.number_formatters import (
     format_ke_rupiah,
     rupiah_to_int,
 )
-from utils.placeholder_helper import (
-    setup_placeholder_dinamis,
-    terap_semua_placeholder_dinamis,
-)
 from utils.table_helper import buat_tabel_item
 from utils.typography import (
     APPLICATION_NAME,
@@ -246,10 +242,6 @@ class TabResi(ZoomTableMixin, QWidget):
         self.setup_uppercase_hooks()
         self.setup_autocomplete()
         self.tambah_baris_barang()
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=self.current_theme == "dark",
-        )
         self.otomatisasi_nomor_resi()
         self.sesuaikan_tema_lokal()
         self.load_data_resi()
@@ -629,11 +621,6 @@ class TabResi(ZoomTableMixin, QWidget):
         # Detail barang selalu kembali memiliki satu baris kosong.
         self.tambah_baris_barang()
 
-        terap_semua_placeholder_dinamis(
-            self.widget_kiri,
-            is_dark=self.current_theme == "dark",
-        )
-
         self.kalkulator_finansial_otomatis()
         self.otomatisasi_nomor_resi()
 
@@ -683,10 +670,6 @@ class TabResi(ZoomTableMixin, QWidget):
             self.group_pengirim,
             fokus_ke=self.txt_pengirim,
         )
-        terap_semua_placeholder_dinamis(
-            self.group_pengirim,
-            is_dark=self.current_theme == "dark",
-        )
 
     def bersihkan_data_penerima(self):
         """Membersihkan hanya input di container Penerima."""
@@ -695,11 +678,6 @@ class TabResi(ZoomTableMixin, QWidget):
             indeks_combo_default=0,
             fokus_ke=self.txt_penerima,
         )
-        terap_semua_placeholder_dinamis(
-            self.group_penerima,
-            is_dark=self.current_theme == "dark",
-        )
-
         self.otomatisasi_nomor_resi()
 
     def bersihkan_detail_barang(self):
@@ -709,10 +687,6 @@ class TabResi(ZoomTableMixin, QWidget):
             kosongkan_tabel=True,
         )
         self.tambah_baris_barang()
-        terap_semua_placeholder_dinamis(
-            self.group_tabel_container,
-            is_dark=self.current_theme == "dark",
-        )
         self.kalkulator_finansial_otomatis()
 
         widget_nama = self.table_items.cellWidget(
@@ -729,10 +703,6 @@ class TabResi(ZoomTableMixin, QWidget):
             self.group_finance,
             indeks_combo_default=0,
             fokus_ke=self.txt_ongkir_kg,
-        )
-        terap_semua_placeholder_dinamis(
-            self.group_finance,
-            is_dark=self.current_theme == "dark",
         )
         self.kalkulator_finansial_otomatis()
         self.otomatisasi_nomor_resi()
@@ -783,7 +753,6 @@ class TabResi(ZoomTableMixin, QWidget):
         is_dark = self._tema_gelap_aktif()
         self.current_theme = "dark" if is_dark else "light"
         z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
-        terap_semua_placeholder_dinamis(self, is_dark=is_dark)
 
         zoom_berubah = getattr(self, "_zoom_terakhir_tema", None) != z
         self._zoom_terakhir_tema = z
@@ -1376,7 +1345,6 @@ class TabResi(ZoomTableMixin, QWidget):
                 widget.setValidator(get_decimal_validator(widget))
                 widget.textChanged.connect(self.kalkulator_finansial_otomatis)
 
-        setup_placeholder_dinamis(widget, self.current_theme == "dark")
         input_qss = getattr(self, "_detail_barang_input_qss", "")
         if input_qss:
             widget.setStyleSheet(input_qss)
@@ -1719,9 +1687,5 @@ class TabResi(ZoomTableMixin, QWidget):
 
         self.tambah_baris_barang()
 
-        terap_semua_placeholder_dinamis(
-            self,
-            is_dark=self.current_theme == "dark",
-        )
 
         self.otomatisasi_nomor_resi()

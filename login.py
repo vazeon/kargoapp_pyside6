@@ -1,6 +1,6 @@
 # login.py
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QCursor, QGuiApplication
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsDropShadowEffect,
@@ -31,6 +31,9 @@ class LoginWindow(QWidget):
 
     @staticmethod
     def _style_login(font_sizes):
+        placeholder_color = QApplication.palette().color(
+            QPalette.ColorRole.PlaceholderText
+        ).name()
         return f"""
                 #LoginWidgetRoot {{
                     background: transparent;
@@ -50,6 +53,7 @@ class LoginWindow(QWidget):
                     border-radius: 6px;
                     padding: 11px 15px;
                     color: #0f172a;
+                    placeholder-text-color: {placeholder_color};
                     font-size: {font_sizes['sz_input']}pt;
                 }}
                 QLineEdit:focus {{

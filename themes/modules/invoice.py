@@ -3,7 +3,21 @@ from __future__ import annotations
 
 from typing import Dict
 
+from PySide6.QtGui import QPalette
+
+from themes.palette import get_theme_palette
 from utils.typography import get_master_font
+
+
+def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
+    """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
+    return gelap if is_dark else terang
+
+
+def _warna_placeholder(is_dark: bool) -> str:
+    """Ambil warna placeholder langsung dari themes/palette.py."""
+    palette = get_theme_palette(is_dark)
+    return palette.color(QPalette.ColorRole.PlaceholderText).name()
 
 
 def get_invoice_dialog_styles(size_total: int) -> Dict[str, str]:
@@ -25,12 +39,7 @@ def get_invoice_styles(
     size_total: int,
 ) -> Dict[str, str]:
     """Menghasilkan seluruh style UI Invoice berdasarkan tema dan zoom."""
-    title_color = "#ffffff" if is_dark else "#0f172a"
-    accent = "#60a5fa" if is_dark else "#2563eb"
-    text_color = "#e2e8f0" if is_dark else "#334155"
-    input_bg = "#1d2024" if is_dark else "#ffffff"
-    input_border = "#4c525e" if is_dark else "#cbd5e1"
-
+    placeholder = _warna_placeholder(is_dark)
     if is_dark:
         history_qss = f"""
             QTableWidget {{
@@ -146,19 +155,19 @@ def get_invoice_styles(
             font-size:{size_title}px;
             font-weight:bold;
             font-family:'{get_master_font()}';
-            color:{title_color};
+            color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
         """,
         "lbl_title_editor": f"""
             font-size:{size_title + 1}px;
             font-weight:bold;
             font-family:'{get_master_font()}';
-            color:{accent};
+            color:{_warna_tema(is_dark, "#60a5fa", "#2563eb")};
         """,
         "lbl_subtotal": f"""
             font-size:{size_base}px;
             font-weight:bold;
             font-family:'{get_master_font()}';
-            color:{text_color};
+            color:{_warna_tema(is_dark, "#e2e8f0", "#334155")};
         """,
         "lbl_total_tagihan": f"""
             font-size:{size_total}px;
@@ -171,9 +180,10 @@ def get_invoice_styles(
             font-size:{size_input}px;
             font-family:'{get_master_font()}';
             padding:6px;
-            background:{input_bg};
-            color:{title_color};
-            border:1px solid {input_border};
+            background:{_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            placeholder-text-color:{placeholder};
+            border:1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
             border-radius:4px;
         """,
         "tabel_histori": history_qss,
@@ -262,9 +272,9 @@ def get_invoice_styles(
 
         "menu_cetak": f"""
             QMenu {{
-                background-color: {input_bg};
-                color: {title_color};
-                border: 1px solid {input_border};
+                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
             }}
             QMenu::item:selected {{
                 background-color: #2563eb;
