@@ -10,6 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from config import CURRENT_SESSION, DATA_CLIENT
+import services.database_service as db_service
 from utils.number_formatters import (
     format_angka_indonesia,
     format_decimal_indonesia,
@@ -104,19 +105,35 @@ def _format_desimal(
     )
 
 
+def _persen_ppn_cetak(data: dict | None = None) -> Decimal:
+    """Ambil PPN dari snapshot data cetak bila ada, selain itu dari setting aktif."""
+    raw = (data or {}).get("ppn_persen")
+    if raw not in (None, ""):
+        try:
+            nilai = Decimal(str(raw).strip().replace(",", "."))
+            if nilai.is_finite() and Decimal("0") <= nilai <= Decimal("100"):
+                return nilai
+        except Exception:
+            pass
+    return db_service.ambil_persen_ppn_resi()
+
+
 def _hitung_tarif_satuan_cetak(
     nilai: Any,
     tipe_pajak: str,
+    ppn_persen: Decimal | None = None,
 ) -> int:
-    """Mengembalikan tarif satuan untuk preview, termasuk PPN 1,1% bila pajak."""
+    """Mengembalikan tarif satuan untuk preview, termasuk PPN bila transaksi pajak."""
     tarif_dasar = max(0, rupiah_to_int(str(nilai or "")))
 
     if tarif_dasar <= 0:
         return 0
 
     if str(tipe_pajak or "").strip().upper().startswith("PAJAK"):
+        persen = ppn_persen if ppn_persen is not None else db_service.ambil_persen_ppn_resi()
+        pengali = Decimal("1") + (persen / Decimal("100"))
         return int(
-            (Decimal(tarif_dasar) * Decimal("1.011")).quantize(
+            (Decimal(tarif_dasar) * pengali).quantize(
                 Decimal("1"),
                 rounding=ROUND_HALF_UP,
             )
@@ -271,9 +288,15 @@ def _ambil_tarif_resi(data: dict):
 
 def _buat_teks_tarif_satuan(data: dict, tipe_pajak: str) -> str:
     tarif_kg, tarif_m3 = _ambil_tarif_resi(data)
-    tarif_kg_cetak = _format_rupiah(_hitung_tarif_satuan_cetak(tarif_kg, tipe_pajak))
-    tarif_m3_cetak = _format_rupiah(_hitung_tarif_satuan_cetak(tarif_m3, tipe_pajak))
-    label_tarif = "Tarif + PPN 1,1%" if tipe_pajak.startswith("PAJAK") else "Tarif"
+    ppn_persen = _persen_ppn_cetak(data)
+    tarif_kg_cetak = _format_rupiah(
+        _hitung_tarif_satuan_cetak(tarif_kg, tipe_pajak, ppn_persen)
+    )
+    tarif_m3_cetak = _format_rupiah(
+        _hitung_tarif_satuan_cetak(tarif_m3, tipe_pajak, ppn_persen)
+    )
+    label_ppn = format_decimal_indonesia(ppn_persen)
+    label_tarif = f"Tarif + PPN {label_ppn}%" if tipe_pajak.startswith("PAJAK") else "Tarif"
 
     if tarif_kg_cetak:
         return '<div class="tarif-satuan">' f"{label_tarif}: Rp{tarif_kg_cetak} per kg" "</div>"

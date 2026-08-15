@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QStyle,
-    QStyledItemDelegate,
     QStyleOptionViewItem,
 )
+
+from delegates.overflow_tooltip_delegate import OverflowTooltipDelegate
 
 ColorValue = Union[QColor, str]
 ColorResult = Tuple[Optional[ColorValue], Optional[ColorValue]]
@@ -29,7 +30,7 @@ def _to_qcolor(value: Optional[ColorValue]) -> Optional[QColor]:
     return color if color.isValid() else None
 
 
-class StatusColorDelegate(QStyledItemDelegate):
+class StatusColorDelegate(OverflowTooltipDelegate):
 
     def __init__(
         self,
@@ -98,6 +99,14 @@ class StatusColorDelegate(QStyledItemDelegate):
                 text_brush = QBrush(foreground_color)
                 opt.palette.setBrush(QPalette.ColorRole.Text, text_brush)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, text_brush)
+
+        # Jika cell memakai setCellWidget()/indexWidget (mis. STATUS PENAGIHAN
+        # dengan QLabel hyperlink), widget tersebut menjadi renderer teks utama.
+        # Delegate tetap menggambar background/selection/highlight, tetapi teks
+        # QTableWidgetItem di bawahnya harus disembunyikan agar tidak dobel.
+        view = self.parent()
+        if isinstance(view, QAbstractItemView) and view.indexWidget(index) is not None:
+            opt.text = ""
 
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()

@@ -35,6 +35,37 @@ from utils.typography import (
     get_master_font,
     perbarui_font_master,
 )
+from utils.widget_helpers import atur_tinggi_input
+from utils.modules.setting_metrics import (
+    SETTING_ACCOUNT_ACTION_WIDTH,
+    SETTING_ACCOUNT_GROUP_MARGINS,
+    SETTING_ACCOUNT_GROUP_SPACING,
+    SETTING_ACCOUNT_INPUT_SPACING,
+    SETTING_ACCOUNT_NUMBER_WIDTH,
+    SETTING_ACCOUNT_TABLE_MIN_HEIGHT,
+    SETTING_BANK_FIELD_WIDTH,
+    SETTING_BRANCH_CODE_WIDTH,
+    SETTING_BRANCH_GROUP_MARGINS,
+    SETTING_BRANCH_GROUP_SPACING,
+    SETTING_BRANCH_JSON_WIDTH,
+    SETTING_BRANCH_PREFIX_WIDTH,
+    SETTING_BRANCH_TABLE_HEIGHT,
+    SETTING_CONTENT_MARGINS,
+    SETTING_CONTENT_SPACING,
+    SETTING_DESTINATION_LIST_HEIGHT,
+    SETTING_FORM_HORIZONTAL_SPACING,
+    SETTING_FORM_MARGINS,
+    SETTING_FORM_VERTICAL_SPACING,
+    SETTING_PREFIX_INVOICE_MAX_WIDTH,
+    SETTING_RESI_MODE_MAX_WIDTH,
+    SETTING_ROOT_MARGINS,
+    SETTING_ROOT_SPACING,
+    SETTING_SAVE_BUTTON_HEIGHT,
+    SETTING_SIDEBAR_MARGINS,
+    SETTING_SIDEBAR_SPACING,
+    SETTING_SIDEBAR_WIDTH,
+    SETTING_SUFFIX_MAX_WIDTH,
+)
 
 
 class TabSettingSistem(QWidget):
@@ -45,15 +76,15 @@ class TabSettingSistem(QWidget):
 
     def init_ui(self):
         root_layout = QHBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        root_layout.setContentsMargins(*SETTING_ROOT_MARGINS)
+        root_layout.setSpacing(SETTING_ROOT_SPACING)
 
         # ── 1. SIDEBAR KIRI (Navigasi) ──
         self.sidebar_container = QWidget()
-        self.sidebar_container.setFixedWidth(240)
+        self.sidebar_container.setFixedWidth(SETTING_SIDEBAR_WIDTH)
         sidebar_layout = QVBoxLayout(self.sidebar_container)
-        sidebar_layout.setContentsMargins(16, 24, 16, 24)
-        sidebar_layout.setSpacing(8)
+        sidebar_layout.setContentsMargins(*SETTING_SIDEBAR_MARGINS)
+        sidebar_layout.setSpacing(SETTING_SIDEBAR_SPACING)
 
         self.lbl_menu = QLabel("Preferences")
         sidebar_layout.addWidget(self.lbl_menu)
@@ -77,8 +108,8 @@ class TabSettingSistem(QWidget):
         # ── 2. KONTEN KANAN (Tumpukan Halaman) ──
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(32, 24, 40, 24)
-        right_layout.setSpacing(20)
+        right_layout.setContentsMargins(*SETTING_CONTENT_MARGINS)
+        right_layout.setSpacing(SETTING_CONTENT_SPACING)
 
         self.stacked_widget = QStackedWidget()
 
@@ -93,6 +124,25 @@ class TabSettingSistem(QWidget):
         self._build_page_bank()
         self._build_page_cabang()
         self._build_page_font()
+
+        atur_tinggi_input((
+            self.txt_nama_perusahaan,
+            self.txt_alamat_perusahaan,
+            self.txt_telp_perusahaan,
+            self.txt_logo_aplikasi,
+            self.txt_db_path,
+            self.txt_template_resi,
+            self.txt_suffix_pajak,
+            self.txt_prefix_invoice,
+            self.cmb_format_resi_manual,
+            self.txt_in_bank_np,
+            self.txt_in_norek_np,
+            self.txt_in_nama_np,
+            self.txt_in_bank_p,
+            self.txt_in_norek_p,
+            self.txt_in_nama_p,
+            self.combo_font,
+        ))
 
         terapkan_popup_bawah_combobox(
             (
@@ -113,7 +163,7 @@ class TabSettingSistem(QWidget):
 
         # ── 3. TOMBOL SIMPAN GLOBAL (Selalu Terlihat di Bawah) ──
         self.btn_simpan_all = QPushButton("💾 SIMPAN PENGATURAN")
-        self.btn_simpan_all.setFixedHeight(48)
+        self.btn_simpan_all.setFixedHeight(SETTING_SAVE_BUTTON_HEIGHT)
         self.btn_simpan_all.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
@@ -207,23 +257,23 @@ class TabSettingSistem(QWidget):
         self.txt_template_resi.setPlaceholderText("Contoh: [PREFIX][COUNTER][SUFFIX]")
 
         self.txt_suffix_pajak = QLineEdit()
-        self.txt_suffix_pajak.setMaximumWidth(160)
+        self.txt_suffix_pajak.setMaximumWidth(SETTING_SUFFIX_MAX_WIDTH)
         self.txt_suffix_pajak.setPlaceholderText("Contoh: -P")
 
         self.txt_prefix_invoice = QLineEdit()
-        self.txt_prefix_invoice.setMaximumWidth(180)
+        self.txt_prefix_invoice.setMaximumWidth(SETTING_PREFIX_INVOICE_MAX_WIDTH)
         self.txt_prefix_invoice.setPlaceholderText("Contoh: INV")
 
         self.cmb_format_resi_manual = QComboBox()
         self.cmb_format_resi_manual.addItem("OTOMATIS", False)
         self.cmb_format_resi_manual.addItem("MANUAL", True)
-        self.cmb_format_resi_manual.setMaximumWidth(180)
+        self.cmb_format_resi_manual.setMaximumWidth(SETTING_RESI_MODE_MAX_WIDTH)
 
         self.txt_provinsi_tujuan = QTextEdit()
         self.txt_provinsi_tujuan.setPlaceholderText(
             "Pisahkan dengan koma. Contoh: KALIMANTAN TIMUR, BALI"
         )
-        self.txt_provinsi_tujuan.setFixedHeight(70)
+        atur_tinggi_input(self.txt_provinsi_tujuan, tinggi=SETTING_DESTINATION_LIST_HEIGHT)
 
         form_resi.addRow("Template Nomor Resi:", self.txt_template_resi)
         form_resi.addRow("Akhiran Pajak (Suffix):", self.txt_suffix_pajak)
@@ -244,26 +294,26 @@ class TabSettingSistem(QWidget):
         # --- 1. TABEL NON-PAJAK ---
         self.group_np = QGroupBox("Daftar Rekening Non-Pajak")
         vbox_np = QVBoxLayout(self.group_np)
-        vbox_np.setContentsMargins(16, 22, 16, 16)
-        vbox_np.setSpacing(8)
+        vbox_np.setContentsMargins(*SETTING_ACCOUNT_GROUP_MARGINS)
+        vbox_np.setSpacing(SETTING_ACCOUNT_GROUP_SPACING)
 
         self.table_np = QTableWidget(0, 4)
         self.setup_tabel_rekening(self.table_np)
         vbox_np.addWidget(self.table_np)
 
         hbox_in_np = QHBoxLayout()
-        hbox_in_np.setSpacing(4)
+        hbox_in_np.setSpacing(SETTING_ACCOUNT_INPUT_SPACING)
 
         self.txt_in_bank_np = QLineEdit()
         self.txt_in_bank_np.setPlaceholderText("BANK...")
-        self.txt_in_bank_np.setFixedWidth(100)
+        self.txt_in_bank_np.setFixedWidth(SETTING_BANK_FIELD_WIDTH)
         self.txt_in_bank_np.textChanged.connect(
             lambda: self.paksa_kapital_lineedit(self.txt_in_bank_np),
         )
 
         self.txt_in_norek_np = QLineEdit()
         self.txt_in_norek_np.setPlaceholderText("NO. REK...")
-        self.txt_in_norek_np.setFixedWidth(160)
+        self.txt_in_norek_np.setFixedWidth(SETTING_ACCOUNT_NUMBER_WIDTH)
         self.txt_in_norek_np.textChanged.connect(
             lambda: self.paksa_kapital_lineedit(self.txt_in_norek_np),
         )
@@ -275,7 +325,7 @@ class TabSettingSistem(QWidget):
         )
 
         self.btn_add_np = QPushButton("+")
-        self.btn_add_np.setFixedWidth(40)
+        self.btn_add_np.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
         self.btn_add_np.clicked.connect(self.tambah_rek_np)
 
         hbox_in_np.addWidget(self.txt_in_bank_np)
@@ -289,26 +339,26 @@ class TabSettingSistem(QWidget):
         # --- 2. TABEL PAJAK ---
         self.group_p = QGroupBox("Daftar Rekening Pajak (PT)")
         vbox_p = QVBoxLayout(self.group_p)
-        vbox_p.setContentsMargins(16, 22, 16, 16)
-        vbox_p.setSpacing(8)
+        vbox_p.setContentsMargins(*SETTING_ACCOUNT_GROUP_MARGINS)
+        vbox_p.setSpacing(SETTING_ACCOUNT_GROUP_SPACING)
 
         self.table_p = QTableWidget(0, 4)
         self.setup_tabel_rekening(self.table_p)
         vbox_p.addWidget(self.table_p)
 
         hbox_in_p = QHBoxLayout()
-        hbox_in_p.setSpacing(4)
+        hbox_in_p.setSpacing(SETTING_ACCOUNT_INPUT_SPACING)
 
         self.txt_in_bank_p = QLineEdit()
         self.txt_in_bank_p.setPlaceholderText("BANK...")
-        self.txt_in_bank_p.setFixedWidth(100)
+        self.txt_in_bank_p.setFixedWidth(SETTING_BANK_FIELD_WIDTH)
         self.txt_in_bank_p.textChanged.connect(
             lambda: self.paksa_kapital_lineedit(self.txt_in_bank_p),
         )
 
         self.txt_in_norek_p = QLineEdit()
         self.txt_in_norek_p.setPlaceholderText("NO. REK...")
-        self.txt_in_norek_p.setFixedWidth(160)
+        self.txt_in_norek_p.setFixedWidth(SETTING_ACCOUNT_NUMBER_WIDTH)
         self.txt_in_norek_p.textChanged.connect(
             lambda: self.paksa_kapital_lineedit(self.txt_in_norek_p),
         )
@@ -320,7 +370,7 @@ class TabSettingSistem(QWidget):
         )
 
         self.btn_add_p = QPushButton("+")
-        self.btn_add_p.setFixedWidth(40)
+        self.btn_add_p.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
         self.btn_add_p.clicked.connect(self.tambah_rek_p)
 
         hbox_in_p.addWidget(self.txt_in_bank_p)
@@ -341,8 +391,8 @@ class TabSettingSistem(QWidget):
 
         self.group_branches = QGroupBox("Manajemen Data Cabang")
         vbox_branch = QVBoxLayout(self.group_branches)
-        vbox_branch.setContentsMargins(16, 22, 16, 16)
-        vbox_branch.setSpacing(8)
+        vbox_branch.setContentsMargins(*SETTING_BRANCH_GROUP_MARGINS)
+        vbox_branch.setSpacing(SETTING_BRANCH_GROUP_SPACING)
 
         self.table_cabang = QTableWidget()
         self.table_cabang.setColumnCount(5)
@@ -356,7 +406,7 @@ class TabSettingSistem(QWidget):
         self.table_cabang.setRowCount(10)
         self.table_cabang.setAlternatingRowColors(True)
         self.table_cabang.verticalHeader().setVisible(True)
-        self.table_cabang.setFixedHeight(280)
+        self.table_cabang.setFixedHeight(SETTING_BRANCH_TABLE_HEIGHT)
         self.table_cabang.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows,
         )
@@ -366,14 +416,14 @@ class TabSettingSistem(QWidget):
 
         hdr = self.table_cabang.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang.setColumnWidth(0, 64)
+        self.table_cabang.setColumnWidth(0, SETTING_BRANCH_CODE_WIDTH)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang.setColumnWidth(2, 96)
+        self.table_cabang.setColumnWidth(2, SETTING_BRANCH_PREFIX_WIDTH)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        self.table_cabang.setColumnWidth(3, 185)
+        self.table_cabang.setColumnWidth(3, SETTING_BRANCH_JSON_WIDTH)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        self.table_cabang.setColumnWidth(4, 185)
+        self.table_cabang.setColumnWidth(4, SETTING_BRANCH_JSON_WIDTH)
 
         self._tbl_hint_label = QLabel(
             "💡 Double-click sel untuk mengedit. Kolom JSON harus berformat valid.",
@@ -400,7 +450,6 @@ class TabSettingSistem(QWidget):
         self._init_form(form_font)
 
         self.combo_font = QComboBox()
-        self.combo_font.setFixedHeight(36)
 
         font_kandidat = [
             "Roboto",
@@ -460,9 +509,9 @@ class TabSettingSistem(QWidget):
 
     @staticmethod
     def _init_form(form: QFormLayout):
-        form.setContentsMargins(16, 22, 16, 16)
-        form.setVerticalSpacing(16)
-        form.setHorizontalSpacing(16)
+        form.setContentsMargins(*SETTING_FORM_MARGINS)
+        form.setVerticalSpacing(SETTING_FORM_VERTICAL_SPACING)
+        form.setHorizontalSpacing(SETTING_FORM_HORIZONTAL_SPACING)
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
@@ -517,16 +566,16 @@ class TabSettingSistem(QWidget):
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
-        table.setMinimumHeight(120)
+        table.setMinimumHeight(SETTING_ACCOUNT_TABLE_MIN_HEIGHT)
 
         hdr = table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(0, 100)
+        table.setColumnWidth(0, SETTING_BANK_FIELD_WIDTH)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        table.setColumnWidth(1, 160)
+        table.setColumnWidth(1, SETTING_ACCOUNT_NUMBER_WIDTH)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(3, 40)
+        table.setColumnWidth(3, SETTING_ACCOUNT_ACTION_WIDTH)
 
     def tambah_rek_np(self):
         self._tambah_ke_tabel(

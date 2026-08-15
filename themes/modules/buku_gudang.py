@@ -3,21 +3,15 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor
 
-from themes.palette import get_theme_palette
+from themes.colors import get_theme_colors
 from utils.typography import get_master_font
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
     return gelap if is_dark else terang
-
-
-def _warna_placeholder(is_dark: bool) -> str:
-    """Ambil warna placeholder langsung dari themes/palette.py."""
-    palette = get_theme_palette(is_dark)
-    return palette.color(QPalette.ColorRole.PlaceholderText).name()
 
 
 DIALOG_PILIH_PENAGIH_STYLE = f"""
@@ -71,7 +65,7 @@ BUKU_GUDANG_BUTTON_INVOICE_STYLE = f"""
         background-color: #3b82f6;
         color: white;
         font-weight: bold;
-        padding: 6px 15px;
+        padding: 5px 14px;
         border-radius: 4px;
         border: none;
     }}
@@ -88,7 +82,7 @@ BUKU_GUDANG_BUTTON_SAVE_STYLE = f"""
         background-color: #10b981;
         color: white;
         font-weight: bold;
-        padding: 6px 15px;
+        padding: 5px 14px;
         border-radius: 4px;
         border: none;
     }}
@@ -105,7 +99,7 @@ BUKU_GUDANG_BUTTON_CANCEL_STYLE = f"""
         background-color: #ef4444;
         color: white;
         font-weight: bold;
-        padding: 6px 15px;
+        padding: 5px 14px;
         border-radius: 4px;
         border: none;
     }}
@@ -144,67 +138,100 @@ def get_buku_gudang_styles(
     sz_title: int,
 ) -> Dict[str, str]:
     """Menghasilkan style dinamis Buku Gudang berdasarkan tema dan zoom."""
-    placeholder = _warna_placeholder(is_dark)
+    ui = get_theme_colors(is_dark)["ui"]
+    ukuran_judul = max(14, sz_title - 2)
+    ukuran_filter = max(10, sz_input - 1)
+    ukuran_label = max(10, sz_input - 2)
+    ukuran_tabel = max(10, sz_base - 1)
+
     return {
         "lbl_judul": f"""
             color: {_warna_tema(is_dark, "#ffffff", "#1e293b")};
-            font: bold {sz_title}px '{get_master_font()}';
-            margin-bottom: 2px;
+            font-size: {ukuran_judul}px;
+            font-weight: 600;
+            font-family: '{get_master_font()}';
+            margin: 0px;
+            padding: 0px;
+        """,
+
+        "lbl_filter": f"""
+            color: {ui["text_primary"]};
+            font-size: {ukuran_label}px;
+            font-weight: 600;
+            font-family: '{get_master_font()}';
+            padding-right: 2px;
         """,
 
         "btn_tahun": f"""
-            font-size: {sz_input + 4}px;
-            font-weight: bold;
-            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
-            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
-            padding: 6px 12px;
-            border-radius: 6px;
+            font-size: {ukuran_filter}px;
+            font-weight: 600;
+            background-color: {ui["field_background"]};
+            color: {ui["text_primary"]};
+            border: 1px solid {ui["field_border"]};
+            padding: 4px 10px;
+            border-radius: 5px;
             font-family: '{get_master_font()}';
         """,
 
+        "btn_reset_filter": f"""
+            QToolButton {{
+                font-size: {ukuran_filter}px;
+                font-weight: 500;
+                background-color: transparent;
+                color: {ui["text_primary"]};
+                border: 1px solid transparent;
+                padding: 4px 8px;
+                border-radius: 5px;
+                font-family: '{get_master_font()}';
+            }}
+            QToolButton:hover {{
+                background-color: {ui["field_background"]};
+                border: 1px solid {ui["field_border"]};
+            }}
+        """,
+
         "txt_cari": f"""
-            font-size: {sz_input}px;
-            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
-            placeholder-text-color: {placeholder};
-            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
-            padding: 6px;
-            border-radius: 4px;
+            font-size: {ukuran_filter}px;
+            background-color: {ui["field_background"]};
+            color: {ui["text_primary"]};
+            placeholder-text-color: {ui["placeholder_text"]};
+            border: 1px solid {ui["field_border"]};
+            padding: 5px 9px;
+            border-radius: 5px;
             font-family: '{get_master_font()}';
         """,
 
         "inline_editor": f"""
-            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
-            placeholder-text-color: {placeholder};
+            background-color: {ui["field_background"]};
+            color: {ui["text_primary"]};
+            placeholder-text-color: {ui["placeholder_text"]};
             padding: 2px;
-            border: 2px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
+            border: 2px solid {ui["primary"]};
             border-radius: 3px;
-            selection-background-color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
-            selection-color: #ffffff;
+            selection-background-color: {ui["selection_background"]};
+            selection-color: {ui["selection_text"]};
         """,
 
         "tabel": f"""
             QTableWidget {{
-                background-color: {_warna_tema(is_dark, "#1a1d24", "#ffffff")};
-                alternate-background-color: {_warna_tema(is_dark, "#20242b", "#f1f5f9")};
-                color: {_warna_tema(is_dark, "#f8fafc", "#0f172a")};
-                gridline-color: {_warna_tema(is_dark, "#334155", "#e2e8f0")};
-                font-size: {sz_base}px;
+                background-color: {ui["table_background"]};
+                alternate-background-color: {ui["table_alternate_background"]};
+                color: {ui["table_text"]};
+                gridline-color: {ui["table_grid"]};
+                font-size: {ukuran_tabel}px;
                 font-family: '{get_master_font()}';
             }}
             QHeaderView::section {{
-                background-color: {_warna_tema(is_dark, "#1e293b", "#243752")};
+                background-color: {ui["table_header_background"]};
                 color: {_warna_tema(is_dark, "#f8fafc", "#ffffff")};
-                border: 1px solid {_warna_tema(is_dark, "#334155", "#cbd5e1")};
-                font-size: {sz_base}px;
-                font-weight: bold;
-                padding: 6px;
+                border: 1px solid {_warna_tema(is_dark, ui["table_grid"], ui["field_border"])};
+                font-size: {ukuran_tabel}px;
+                font-weight: 600;
+                padding: 4px 6px;
                 font-family: '{get_master_font()}';
             }}
             QTableWidget::item:selected {{
-                background-color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
+                background-color: {ui["selection_background"]};
                 color: white;
             }}
         """,
@@ -227,42 +254,28 @@ def get_buku_gudang_status_colors(
     status: str,
     is_alternate_row: bool = False,
 ) -> Tuple[Optional[QColor], Optional[QColor]]:
-    """Menghasilkan warna baris berdasarkan status pengiriman."""
-    normalized = str(status or "").strip().upper()
+    """Menghasilkan warna highlight baris berdasarkan status resi/penagihan."""
+    state = str(status or "").strip().upper()
 
-    if is_dark:
-        background_map = {
-            "PERJALANAN": "#142d22",
-            "SELESAI": "#162545",
-        }
-        foreground_map = {
-            "PERJALANAN": "#a7f3d0",
-            "SELESAI": "#bfdbfe",
-        }
+    if "|" in state:
+        status_penagihan, status_resi = state.split("|", 1)
     else:
-        background_map = {
-            "PERJALANAN": "#bbf7d0",
-            "SELESAI": "#c7d2fe",
-        }
-        foreground_map = {
-            "PERJALANAN": "#14532d",
-            "SELESAI": "#1e40af",
-        }
+        status_penagihan, status_resi = "", state
 
-    background_hex = background_map.get(normalized)
-    foreground_hex = foreground_map.get(normalized)
-
-    if not background_hex or not foreground_hex:
+    # Prioritas visual: MACET > LUNAS/SELESAI > PERJALANAN.
+    if status_penagihan == "MACET":
+        status_warna = "MACET"
+    elif status_penagihan == "LUNAS" or status_resi == "SELESAI":
+        status_warna = "SELESAI"
+    elif status_resi == "PERJALANAN":
+        status_warna = "PERJALANAN"
+    else:
         return None, None
 
-    background = QColor(background_hex)
-    foreground = QColor(foreground_hex)
+    colors = get_theme_colors(is_dark)
+    warna = colors["buku_gudang"]["status"][status_warna]
+    background_hex = (
+        warna["row_alternate_background"] if is_alternate_row else warna["row_background"]
+    )
 
-    if is_alternate_row:
-        background = (
-            background.lighter(115)
-            if is_dark
-            else background.darker(108)
-        )
-
-    return background, foreground
+    return QColor(background_hex), QColor(warna["text_color"])

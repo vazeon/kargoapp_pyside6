@@ -5,9 +5,7 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from PySide6.QtGui import QPalette
-
-from themes.palette import get_theme_palette
+from themes.colors import get_theme_colors
 
 
 ARMADA_PREVIEW_FOTO_STYLE = """
@@ -18,62 +16,36 @@ ARMADA_PREVIEW_FOTO_STYLE = """
 """
 
 
-def _warna_placeholder(is_dark: bool) -> str:
-    """Ambil warna placeholder langsung dari themes/palette.py."""
-    palette = get_theme_palette(is_dark)
-    return palette.color(QPalette.ColorRole.PlaceholderText).name()
+def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
+    """Pilih warna khusus modul yang memang berbeda antara tema gelap/terang."""
+    return gelap if is_dark else terang
 
 
 def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
     """Style bersama untuk subtab Pengirim dan Penerima."""
-    placeholder = _warna_placeholder(is_dark)
-    if is_dark:
-        return {
-            "judul": f"""
-                color: #ffffff;
-                font-weight: bold;
-            """,
-            "judul_histori": f"""
-                color: #60a5fa;
-                font-weight: bold;
-            """,
-            "input": f"""
-                background-color: #1d2024;
-                color: white;
-                placeholder-text-color: {placeholder};
-                border: 1px solid #4c525e;
-                border-radius: 4px;
-            """,
-            "panel": f"""
-                QFrame#panelHistori {{
-                    background-color: #1e293b;
-                    border-radius: 8px;
-                    border: 1px solid #334155;
-                }}
-            """,
-        }
+    ui = get_theme_colors(is_dark)["ui"]
 
     return {
         "judul": f"""
-            color: #1e293b;
+            color: {_warna_tema(is_dark, "#ffffff", "#1e293b")};
             font-weight: bold;
         """,
         "judul_histori": f"""
-            color: #2563eb;
+            color: {ui["accent"]};
             font-weight: bold;
         """,
         "input": f"""
-            background-color: white;
-            color: #0f172a;
-            placeholder-text-color: {placeholder};
-            border: 1px solid #cbd5e1;
+            background-color: {ui["field_background"]};
+            color: {ui["text_primary"]};
+            placeholder-text-color: {ui["placeholder_text"]};
+            border: 1px solid {ui["field_border"]};
             border-radius: 4px;
         """,
         "panel": f"""
             QFrame#panelHistori {{
-                background-color: #f8fafc;
+                background-color: {ui["panel_background"]};
                 border-radius: 8px;
-                border: 1px solid #e2e8f0;
+                border: 1px solid {ui["panel_border"]};
             }}
         """,
     }
@@ -81,137 +53,75 @@ def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
 
 def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
     """Menghasilkan style SubTab Truk dan SubTab Armada berdasarkan tema dan mode form."""
-    placeholder = _warna_placeholder(is_dark)
+    ui = get_theme_colors(is_dark)["ui"]
     mode_normalized = str(mode or "IDLE").upper()
     is_primary_mode = mode_normalized in {"IDLE", "PREVIEW"}
     warna_btn_utama = "#3b82f6" if is_primary_mode else "#22c55e"
     warna_btn_utama_hover = "#2563eb" if is_primary_mode else "#16a34a"
     warna_btn_utama_pressed = "#1d4ed8" if is_primary_mode else "#15803d"
 
-    if is_dark:
-        styles = {
-            "panel_kanan": f"""
-                QFrame#panelEditor {{
-                    background-color: #1e293b;
-                    border-radius: 8px;
-                    border: 1px solid #334155;
-                }}
-            """,
-            "input_normal": f"""
-                background-color: #0f172a;
-                color: #ffffff;
-                placeholder-text-color: {placeholder};
-                border: 1px solid #4c525e;
-                border-radius: 4px;
-            """,
-            "input_locked": f"""
-                background-color: #1e293b;
-                color: #94a3b8;
-                placeholder-text-color: {placeholder};
-                border: 1px dashed #475569;
-                border-radius: 4px;
-            """,
-            "btn_batal": f"""
-                QPushButton {{
-                    background-color: transparent;
-                    color: #ef4444;
-                    border: 1px solid #ef4444;
-                    font-weight: bold;
-                    border-radius: 4px;
-                }}
-                QPushButton:hover {{
-                    background-color: #7f1d1d;
-                    color: white;
-                }}
-                QPushButton:pressed {{
-                    background-color: #450a0a;
-                    color: white;
-                }}
-            """,
-            "btn_foto": f"""
-                QPushButton {{
-                    background-color: #334155;
-                    color: white;
-                    border: 1px solid #475569;
-                    border-radius: 4px;
-                }}
-                QPushButton:hover {{
-                    background-color: #475569;
-                }}
-                QPushButton:pressed {{
-                    background-color: #1e293b;
-                }}
-            """,
-            "label_judul": f"""
-                color: #ffffff;
+    styles = {
+        "panel_kanan": f"""
+            QFrame#panelEditor {{
+                background-color: {ui["panel_background"]};
+                border-radius: 8px;
+                border: 1px solid {ui["panel_border"]};
+            }}
+        """,
+        "input_normal": f"""
+            background-color: {_warna_tema(is_dark, "#0f172a", "#ffffff")};
+            color: {ui["text_primary"]};
+            placeholder-text-color: {ui["placeholder_text"]};
+            border: 1px solid {ui["field_border"]};
+            border-radius: 4px;
+        """,
+        "input_locked": f"""
+            background-color: {ui["locked_background"]};
+            color: {ui["locked_text"]};
+            placeholder-text-color: {ui["placeholder_text"]};
+            border: 1px dashed {ui["locked_border"]};
+            border-radius: 4px;
+        """,
+        "btn_batal": f"""
+            QPushButton {{
+                background-color: transparent;
+                color: #ef4444;
+                border: 1px solid #ef4444;
                 font-weight: bold;
-            """,
-            "label_judul_kanan": f"""
-                color: #60a5fa;
-                font-weight: bold;
-            """,
-        }
-    else:
-        styles = {
-            "panel_kanan": f"""
-                QFrame#panelEditor {{
-                    background-color: #f8fafc;
-                    border-radius: 8px;
-                    border: 1px solid #e2e8f0;
-                }}
-            """,
-            "input_normal": f"""
-                background-color: #ffffff;
-                color: #0f172a;
-                placeholder-text-color: {placeholder};
-                border: 1px solid #cbd5e1;
                 border-radius: 4px;
-            """,
-            "input_locked": f"""
-                background-color: #f1f5f9;
-                color: #64748b;
-                placeholder-text-color: {placeholder};
-                border: 1px dashed #cbd5e1;
+            }}
+            QPushButton:hover {{
+                background-color: {_warna_tema(is_dark, "#7f1d1d", "#fef2f2")};
+                {_warna_tema(is_dark, "color: white;", "")}
+            }}
+            QPushButton:pressed {{
+                background-color: {_warna_tema(is_dark, "#450a0a", "#fee2e2")};
+                {_warna_tema(is_dark, "color: white;", "")}
+            }}
+        """,
+        "btn_foto": f"""
+            QPushButton {{
+                background-color: {_warna_tema(is_dark, "#334155", "#e2e8f0")};
+                color: {ui["text_primary"]};
+                border: 1px solid {_warna_tema(is_dark, "#475569", "#cbd5e1")};
                 border-radius: 4px;
-            """,
-            "btn_batal": f"""
-                QPushButton {{
-                    background-color: transparent;
-                    color: #ef4444;
-                    border: 1px solid #ef4444;
-                    font-weight: bold;
-                    border-radius: 4px;
-                }}
-                QPushButton:hover {{
-                    background-color: #fef2f2;
-                }}
-                QPushButton:pressed {{
-                    background-color: #fee2e2;
-                }}
-            """,
-            "btn_foto": f"""
-                QPushButton {{
-                    background-color: #e2e8f0;
-                    color: #0f172a;
-                    border: 1px solid #cbd5e1;
-                    border-radius: 4px;
-                }}
-                QPushButton:hover {{
-                    background-color: #cbd5e1;
-                }}
-                QPushButton:pressed {{
-                    background-color: #94a3b8;
-                }}
-            """,
-            "label_judul": f"""
-                color: #0f172a;
-                font-weight: bold;
-            """,
-            "label_judul_kanan": f"""
-                color: #2563eb;
-                font-weight: bold;
-            """,
-        }
+            }}
+            QPushButton:hover {{
+                background-color: {_warna_tema(is_dark, "#475569", "#cbd5e1")};
+            }}
+            QPushButton:pressed {{
+                background-color: {_warna_tema(is_dark, "#1e293b", "#94a3b8")};
+            }}
+        """,
+        "label_judul": f"""
+            color: {ui["text_primary"]};
+            font-weight: bold;
+        """,
+        "label_judul_kanan": f"""
+            color: {ui["accent"]};
+            font-weight: bold;
+        """,
+    }
 
     styles["btn_aksi"] = f"""
         QPushButton {{

@@ -28,10 +28,12 @@ from utils.typography import (
     konversi_style_font_ke_point,
 )
 from utils.splitter_helper import perbarui_semua_style_splitter
+from utils.ui_metrics import dapatkan_ui_scale
+from utils.ui_scaler import ResponsiveUIScaler
 
 from config import DATA_CLIENT, CURRENT_SESSION, muat_pengaturan_sistem
 
-from themes.base import BASE_STYLE
+from themes.base import get_base_style
 from themes.shell import get_main_shell_styles
 from themes.components.top_right import get_top_right_styles
 from themes.palette import get_theme_palette
@@ -77,6 +79,15 @@ class MainWindow(QMainWindow):
         self._siapkan_tema_aplikasi(app)
         self._siapkan_scrollbar_global(app)
         self.init_ui()
+
+        # Responsive geometry adalah layer otomatis berbasis screen. Zoom user
+        # tetap terpisah dan hanya berlaku untuk tabel.
+        self._ui_scaler = ResponsiveUIScaler(
+            self,
+            on_scale_changed=self._saat_ui_scale_berubah,
+        )
+        self._ui_scaler.apply_now()
+
         self._session_signature_terakhir = self._buat_signature_session()
 
     def _muat_tema_tersimpan(self):
@@ -90,7 +101,7 @@ class MainWindow(QMainWindow):
         if app is None:
             return
         if not bool(app.property("_base_style_terpasang")):
-            app.setStyleSheet(konversi_font_qss_ke_point(BASE_STYLE))
+            app.setStyleSheet(konversi_font_qss_ke_point(get_base_style()))
             app.setProperty("_base_style_terpasang", True)
         app.setPalette(get_theme_palette(self.current_theme == self.THEME_DARK))
 
@@ -99,6 +110,20 @@ class MainWindow(QMainWindow):
         if ENABLE_GLOBAL_SCROLLBAR_STYLE and app is not None:
             self.scrollbar_manager = GlobalScrollbarManager(root_widget=self)
             self.scrollbar_manager.install(app)
+
+
+    def _saat_ui_scale_berubah(self, scale):
+        """Sinkronkan stylesheet/theme saat window berpindah screen/density."""
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(
+                konversi_font_qss_ke_point(get_base_style(scale=scale))
+            )
+            app.setProperty("_base_style_terpasang", True)
+
+        self._cache_tema_tab.clear()
+        if hasattr(self, "tabs"):
+            self.apply_theme(force=True)
 
 
     def init_ui(self):
@@ -224,6 +249,7 @@ class MainWindow(QMainWindow):
         return (
             self.current_theme,
             zoom,
+            round(dapatkan_ui_scale(), 4),
         )
 
     def _terapkan_tema_lokal(

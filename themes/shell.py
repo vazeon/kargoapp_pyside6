@@ -1,25 +1,29 @@
 # themes/shell.py
 """Style ringan untuk kerangka utama aplikasi."""
 
+from themes.colors import get_theme_colors
 from utils.typography import get_master_font
 
 
 def get_main_shell_styles(is_dark: bool) -> dict:
+    colors = get_theme_colors(is_dark)
+    palette = colors["palette"]
+
+    # Warna global mengikuti source of truth themes/colors.py.
+    bg_main = palette["window"]
+    bg_pane = palette["window"]
+    text = palette["window_text"]
+
+    # Warna berikut khusus shell/tab utama dan sengaja tetap lokal.
     if is_dark:
-        bg_main = "#1a1d24"
-        bg_pane = "#1a1d24"
         bg_tab = "#242932"
         bg_tab_hover = "#2b313c"
-        text = "#f8fafc"
         text_muted = "#aeb7c4"
         accent = "#4f9cff"
         border = "#3a414d"
     else:
-        bg_main = "#f8fafc"
-        bg_pane = "#f8fafc"
         bg_tab = "#e9edf3"
         bg_tab_hover = "#f2f5f9"
-        text = "#0f172a"
         text_muted = "#475569"
         accent = "#2563eb"
         border = "#c8d0dc"

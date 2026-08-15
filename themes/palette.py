@@ -4,68 +4,50 @@
 
 from PySide6.QtGui import QColor, QPalette
 
+from themes.colors import get_theme_colors
+
 
 def get_theme_palette(is_dark: bool) -> QPalette:
     """Membuat palette gelap/terang tanpa mengganti stylesheet global."""
     palette = QPalette()
+    theme_colors = get_theme_colors(is_dark)
+    colors = theme_colors["palette"]
 
-    if is_dark:
-        colors = {
-            QPalette.ColorRole.Window: "#1a1d24",
-            QPalette.ColorRole.WindowText: "#f8fafc",
-            QPalette.ColorRole.Base: "#1a1d24",
-            QPalette.ColorRole.AlternateBase: "#20242b",
-            QPalette.ColorRole.ToolTipBase: "#0f172a",
-            QPalette.ColorRole.ToolTipText: "#f8fafc",
-            QPalette.ColorRole.Text: "#f8fafc",
-            QPalette.ColorRole.PlaceholderText: "#4c525e",
-            QPalette.ColorRole.Button: "#1e222b",
-            QPalette.ColorRole.ButtonText: "#f8fafc",
-            QPalette.ColorRole.BrightText: "#ffffff",
-            QPalette.ColorRole.Link: "#60a5fa",
-            QPalette.ColorRole.Highlight: "#3b82f6",
-            QPalette.ColorRole.HighlightedText: "#ffffff",
-            QPalette.ColorRole.Light: "#475569",
-            QPalette.ColorRole.Midlight: "#3f434d",
-            QPalette.ColorRole.Mid: "#4c525e",
-            QPalette.ColorRole.Dark: "#64748b",
-            QPalette.ColorRole.Shadow: "#0f172a",
-        }
-    else:
-        colors = {
-            QPalette.ColorRole.Window: "#f8fafc",
-            QPalette.ColorRole.WindowText: "#0f172a",
-            QPalette.ColorRole.Base: "#ffffff",
-            QPalette.ColorRole.AlternateBase: "#f1f5f9",
-            QPalette.ColorRole.ToolTipBase: "#ffffff",
-            QPalette.ColorRole.ToolTipText: "#0f172a",
-            QPalette.ColorRole.Text: "#0f172a",
-            QPalette.ColorRole.PlaceholderText: "#cbd5e1",
-            QPalette.ColorRole.Button: "#e2e8f0",
-            QPalette.ColorRole.ButtonText: "#0f172a",
-            QPalette.ColorRole.BrightText: "#000000",
-            QPalette.ColorRole.Link: "#2563eb",
-            QPalette.ColorRole.Highlight: "#2563eb",
-            QPalette.ColorRole.HighlightedText: "#ffffff",
-            QPalette.ColorRole.Light: "#ffffff",
-            QPalette.ColorRole.Midlight: "#e2e8f0",
-            QPalette.ColorRole.Mid: "#94a3b8",
-            QPalette.ColorRole.Dark: "#64748b",
-            QPalette.ColorRole.Shadow: "#334155",
-        }
+    role_colors = {
+        QPalette.ColorRole.Window: colors["window"],
+        QPalette.ColorRole.WindowText: colors["window_text"],
+        QPalette.ColorRole.Base: colors["base"],
+        QPalette.ColorRole.AlternateBase: colors["alternate_base"],
+        QPalette.ColorRole.ToolTipBase: colors["tooltip_base"],
+        QPalette.ColorRole.ToolTipText: colors["tooltip_text"],
+        QPalette.ColorRole.Text: colors["text"],
+        QPalette.ColorRole.PlaceholderText: colors["placeholder_text"],
+        QPalette.ColorRole.Button: colors["button"],
+        QPalette.ColorRole.ButtonText: colors["button_text"],
+        QPalette.ColorRole.BrightText: colors["bright_text"],
+        QPalette.ColorRole.Link: colors["link"],
+        QPalette.ColorRole.Highlight: colors["highlight"],
+        QPalette.ColorRole.HighlightedText: colors["highlighted_text"],
+        QPalette.ColorRole.Light: colors["light"],
+        QPalette.ColorRole.Midlight: colors["midlight"],
+        QPalette.ColorRole.Mid: colors["mid"],
+        QPalette.ColorRole.Dark: colors["dark"],
+        QPalette.ColorRole.Shadow: colors["shadow"],
+    }
 
-    for role, color in colors.items():
+    for role, color in role_colors.items():
         palette.setColor(role, QColor(color))
 
+    disabled_color = QColor(colors["disabled_text"])
     palette.setColor(
         QPalette.ColorGroup.Disabled,
         QPalette.ColorRole.Text,
-        QColor("#94a3b8"),
+        disabled_color,
     )
     palette.setColor(
         QPalette.ColorGroup.Disabled,
         QPalette.ColorRole.ButtonText,
-        QColor("#94a3b8"),
+        disabled_color,
     )
 
     return palette

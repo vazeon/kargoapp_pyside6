@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from config import DATA_CLIENT
 from utils.typography import get_master_font
+from utils.widget_helpers import atur_tinggi_input
 
 JENIS_RESI = "resi"
 JENIS_MANIFEST = "manifest"
@@ -262,6 +263,7 @@ class JendelaPreviewCustom(QDialog):
         toolbar_layout.addWidget(lbl_printer)
 
         self.cb_printers = QComboBox()
+        atur_tinggi_input(self.cb_printers)
         self.cb_printers.setStyleSheet(
             f"""
                 QComboBox {{

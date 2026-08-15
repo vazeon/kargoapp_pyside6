@@ -1,48 +1,52 @@
 # themes/components/top_right.py
 """Style widget pada bagian kanan atas aplikasi."""
+
+from themes.colors import get_theme_colors
 from utils.typography import get_master_font
 
 
 def get_top_right_styles(is_dark: bool) -> tuple:
-    if is_dark:
-        btn_style = f"""
-            QPushButton {{
-                font-family: '{get_master_font()}';
-                background-color: #1e293b;
-                color: white;
-                border: 1px solid #24334d;
-                font-weight: bold;
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{
-                background-color: #2c3e50;
-                border: 1px solid #3b82f6;
-            }}
-            QPushButton:pressed {{
-                background-color: #0f172a;
-                /* Biru sangat gelap saat ditekan */
-                border: 1px solid #2563eb;
-            }}
-        """
-    else:
-        btn_style = f"""
-            QPushButton {{
-                font-family: '{get_master_font()}';
-                background-color: #edf2f7;
-                color: #2d3748;
-                border: 1px solid #cbd5e1;
-                font-weight: bold;
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{
-                background-color: #e2e8f0;
-            }}
-            QPushButton:pressed {{
-                background-color: #cbd5e1;
-                /* Abu-abu lebih pekat saat ditekan */
-            }}
-        """
+    colors = get_theme_colors(is_dark)
+    palette = colors["palette"]
+    ui = colors["ui"]
 
+    if is_dark:
+        btn_background = ui["panel_background"]
+        btn_text = ui["on_primary"]
+        btn_border = "#24334d"
+        btn_hover_background = "#2c3e50"
+        btn_pressed_background = palette["shadow"]
+        hover_border_rule = f"border: 1px solid {ui['primary']};"
+        pressed_border_rule = f"border: 1px solid {ui['primary_hover']};"
+    else:
+        btn_background = "#edf2f7"
+        btn_text = "#2d3748"
+        btn_border = ui["field_border"]
+        btn_hover_background = palette["button"]
+        btn_pressed_background = ui["field_border"]
+        hover_border_rule = ""
+        pressed_border_rule = ""
+
+    btn_style = f"""
+        QPushButton {{
+            font-family: '{get_master_font()}';
+            background-color: {btn_background};
+            color: {btn_text};
+            border: 1px solid {btn_border};
+            font-weight: bold;
+            border-radius: 4px;
+        }}
+        QPushButton:hover {{
+            background-color: {btn_hover_background};
+            {hover_border_rule}
+        }}
+        QPushButton:pressed {{
+            background-color: {btn_pressed_background};
+            {pressed_border_rule}
+        }}
+    """
+
+    # Warna label cabang merupakan aksen khusus komponen top-right.
     lbl_style = f"""
         font-family: '{get_master_font()}';
         font-size: 13px;

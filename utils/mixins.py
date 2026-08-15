@@ -28,7 +28,7 @@ class ZoomTableMixin:
 
     def _faktor_zoom_aktif(self, zoom_key: Optional[str] = None) -> float:
         zoom = zoom_helper.dapatkan_zoom_level(self._zoom_key(zoom_key))
-        return max(0.68, min(1.0 + (zoom * 0.08), 1.80))
+        return zoom_helper.dapatkan_faktor_geometri(zoom)
 
     def _lebar_dasar_tabel(
         self,

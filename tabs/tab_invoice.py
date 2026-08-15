@@ -52,6 +52,7 @@ from utils.typography import (
 )
 from utils.printer.print_invoice import tampilkan_preview_invoice, simpan_invoice_pdf
 from utils import zoom as zoom_helper
+from utils.ui_metrics import skalakan_px
 from utils.number_formatters import (
     rupiah_to_int,
     format_ke_rupiah,
@@ -61,11 +62,9 @@ from utils.table_helper import buat_tabel_item
 from utils.reset_form_helper import reset_form_input_global
 from utils.validators import UppercaseValidator
 from utils.mixins import ZoomTableMixin
-from utils.widget_helpers import blokir_signal_sementara
+from utils.widget_helpers import atur_tinggi_input, blokir_signal_sementara
 
-# ==========================================================
 # KONFIGURASI TEMPLATE
-# ==========================================================
 INVOICE_TEMPLATES = {
     "Standar": {
         "version": 3,
@@ -208,10 +207,7 @@ INVOICE_TEMPLATES = {
     },
 }
 
-# ==========================================================
 # SPREADSHEET EDITOR
-# ==========================================================
-
 
 class InvoiceSheet(QTableWidget):
     sheetEdited = Signal()
@@ -296,7 +292,6 @@ class InvoiceSheet(QTableWidget):
                     target_column = start_column + column_offset
                     if target_column >= self.columnCount():
                         break
-                    # PENGGUNAAN HELPER
                     self.setItem(
                         target_row,
                         target_column,
@@ -392,7 +387,6 @@ class InvoiceSheet(QTableWidget):
         with blokir_signal_sementara(self):
             self.setRowCount(1)
             for column in range(self.columnCount()):
-                # PENGGUNAAN HELPER
                 self.setItem(0, column, buat_tabel_item(""))
         self.setCurrentCell(0, 0)
         self.sheetEdited.emit()
@@ -425,10 +419,7 @@ class InvoiceSheet(QTableWidget):
         elif selected == act_delete:
             self.delete_selected_rows()
 
-# ==========================================================
 # DIALOG PENGATURAN KOLOM
-# ==========================================================
-
 
 class ColumnDesignerDialog(QDialog):
     """Pengaturan kolom Invoice versi ramah pengguna."""
@@ -584,6 +575,7 @@ class ColumnDesignerDialog(QDialog):
         combo = QComboBox()
         combo.addItems(list(items))
         combo.setCurrentText(current)
+        atur_tinggi_input(combo)
         return combo
 
     def _pasang_row(self, row, title, key, data_type, width, is_amount):
@@ -827,10 +819,7 @@ class ColumnDesignerDialog(QDialog):
         self.result_amount_key = amount_key
         self.accept()
 
-# ==========================================================
 # TAB INVOICE
-# ==========================================================
-
 
 class TabInvoice(ZoomTableMixin, QWidget):
     KOL_HISTORI_NO_INV = 0
@@ -866,9 +855,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
         self.init_ui()
 
-    # ------------------------------------------------------
     # UI & PENERAPAN HELPER INITIAL
-    # ------------------------------------------------------
 
     def init_ui(self):
         layout_utama = QHBoxLayout(self)
@@ -896,6 +883,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         widget.setPlaceholderText(placeholder)
         if validator is not None:
             widget.setValidator(validator)
+        atur_tinggi_input(widget)
         return widget
 
     def _bangun_panel_histori_invoice(self):
@@ -999,8 +987,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             self.txt_catatan,
             self.txt_penanda_tangan,
         )
-        for widget in inputs:
-            widget.setFixedHeight(36)
+        atur_tinggi_input(inputs)
 
         fields = (
             ("Bill To", self.txt_client, 0, 0, 1, 1),
@@ -1140,9 +1127,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self.sesuaikan_tema_lokal()
         self.load_histori_invoice()
 
-    # ------------------------------------------------------
     # FUNGSI PENDUKUNG HISTORI KOLOM
-    # ------------------------------------------------------
 
     def _settings_histori(self):
         return QSettings(
@@ -1217,9 +1202,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         finally:
             self._sedang_menerapkan_zoom = False
 
-    # ------------------------------------------------------
     # TEMPLATE DAN KOLOM
-    # ------------------------------------------------------
 
     @staticmethod
     def _alignment_tipe_invoice(data_type):
@@ -1274,63 +1257,56 @@ class TabInvoice(ZoomTableMixin, QWidget):
         if self.tabel_item_invoice.rowCount() == 0:
             self.tabel_item_invoice.insertRow(0)
 
+    def _pasang_struktur_template_invoice(self, old_rows):
+        with blokir_signal_sementara(self.tabel_item_invoice):
+            self.tabel_item_invoice.clear()
+            self.tabel_item_invoice.setColumnCount(len(self.active_columns))
+            self.tabel_item_invoice.setHorizontalHeaderLabels(self.headers_aktif)
+            self.tabel_item_invoice.setRowCount(0)
+
+            header = self.tabel_item_invoice.horizontalHeader()
+            has_stretch = False
+            for index, column in enumerate(self.active_columns):
+                header.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
+                if column.get("stretch") and not has_stretch:
+                    has_stretch = True
+                else:
+                    self.tabel_item_invoice.setColumnWidth(
+                        index,
+                        int(column.get("width", 110)),
+                    )
+
+            lebar_dasar = [
+                int(column.get("width", 110))
+                for column in self.active_columns
+            ]
+            self._perbarui_cache_lebar_zoom(
+                self.tabel_item_invoice,
+                lebar_dasar,
+            )
+            for row_data in old_rows:
+                self._tambahkan_row_invoice(row_data)
+            self._pastikan_baris_invoice()
+
     def apply_template(self, preserve_rows=True, rows_override=None):
         old_rows = rows_override if rows_override is not None else (
-            self._capture_rows_by_key() if preserve_rows else [])
+            self._capture_rows_by_key() if preserve_rows else []
+        )
         template = self._current_template_config()
-
         self.active_template = template
         self.active_columns = deepcopy(template.get("columns", []))
-        self.headers_aktif = [column.get(
-            "title",
-            column.get("key", ""),
-        ) for column in self.active_columns]
+        self.headers_aktif = [
+            column.get("title", column.get("key", ""))
+            for column in self.active_columns
+        ]
 
         self._sedang_memuat_item = True
         try:
-            with blokir_signal_sementara(self.tabel_item_invoice):
-                self.tabel_item_invoice.clear()
-                self.tabel_item_invoice.setColumnCount(len(self.active_columns))
-                self.tabel_item_invoice.setHorizontalHeaderLabels(self.headers_aktif)
-                self.tabel_item_invoice.setRowCount(0)
-
-                header = self.tabel_item_invoice.horizontalHeader()
-                has_stretch = False
-                for index, column in enumerate(self.active_columns):
-                    if column.get("stretch") and not has_stretch:
-                        header.setSectionResizeMode(
-                            index,
-                            QHeaderView.ResizeMode.Interactive,
-                        )
-                        has_stretch = True
-                    else:
-                        header.setSectionResizeMode(
-                            index,
-                            QHeaderView.ResizeMode.Interactive,
-                        )
-                        self.tabel_item_invoice.setColumnWidth(
-                            index,
-                            int(column.get("width", 110)),
-                        )
-
-                lebar_dasar = [
-                    int(column.get("width", 110))
-                    for column in self.active_columns
-                ]
-                self._perbarui_cache_lebar_zoom(
-                    self.tabel_item_invoice,
-                    lebar_dasar,
-                )
-                for row_data in old_rows:
-                    self._tambahkan_row_invoice(row_data)
-                self._pastikan_baris_invoice()
+            self._pasang_struktur_template_invoice(old_rows)
         finally:
             self._sedang_memuat_item = False
 
         self.hitung_ulang_total_tagihan()
-
-        # Template mengubah struktur dan lebar dasar kolom. Terapkan kembali
-        # zoom hanya pada tabel editor melalui satu entry point terpusat.
         self._terapkan_zoom_tabel_invoice(
             is_dark=self._tema_gelap_aktif(),
             z=zoom_helper.dapatkan_zoom_level(self.__class__.__name__),
@@ -1370,9 +1346,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 return index
         return -1
 
-    # ------------------------------------------------------
     # EVENT EDITOR DAN TOTAL
-    # ------------------------------------------------------
 
     def _on_table_item_changed(self, item):
         if self._sedang_memuat_item or self._sedang_menghitung:
@@ -1446,7 +1420,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
         for index in source_indexes:
             item = self.tabel_item_invoice.item(row, index)
 
-            # PENGGUNAAN HELPER
             value = ambil_angka_dari_teks(item.text() if item else "")
             values.append(value)
 
@@ -1459,7 +1432,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
             item = self.tabel_item_invoice.item(row, target_index)
             nilai_akhir = int(result.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
-            # PENGGUNAAN HELPER FORMAT KE RUPIAH (Ribuan)
             teks_akhir = format_ke_rupiah(nilai_akhir)
 
             if item is None:
@@ -1577,6 +1549,19 @@ class TabInvoice(ZoomTableMixin, QWidget):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    @staticmethod
+    def _row_invoice_dari_resi(nomor, data):
+        return {
+            "no": str(nomor),
+            "resi": str(data.get("no_resi", "")).strip().upper(),
+            "destination": str(data.get("tujuan", "")).strip().upper(),
+            "description": str(data.get("nama_barang", "")).strip().upper(),
+            "package": str(data.get("koli", "0")).strip(),
+            "weight": str(data.get("berat", "0")).strip(),
+            "volume": str(data.get("kubik", "0")).strip(),
+            "amount": str(data.get("ongkir", "0")).strip(),
+        }
+
     def terima_data_baru(self, nama_client, list_resi_data):
         if not self.buat_invoice_baru():
             return False
@@ -1592,19 +1577,10 @@ class TabInvoice(ZoomTableMixin, QWidget):
             with blokir_signal_sementara(self.tabel_item_invoice):
                 self.tabel_item_invoice.setRowCount(0)
                 for nomor, data in enumerate(list_resi_data or [], start=1):
-                    if not isinstance(data, dict):
-                        continue
-                    values = {
-                        "no": str(nomor),
-                        "resi": str(data.get("no_resi", "")).strip().upper(),
-                        "destination": str(data.get("tujuan", "")).strip().upper(),
-                        "description": str(data.get("nama_barang", "")).strip().upper(),
-                        "package": str(data.get("koli", "0")).strip(),
-                        "weight": str(data.get("berat", "0")).strip(),
-                        "volume": str(data.get("kubik", "0")).strip(),
-                        "amount": str(data.get("ongkir", "0")).strip(),
-                    }
-                    self._tambahkan_row_invoice(values)
+                    if isinstance(data, dict):
+                        self._tambahkan_row_invoice(
+                            self._row_invoice_dari_resi(nomor, data)
+                        )
                 self._pastikan_baris_invoice()
         finally:
             self._sedang_memuat_item = False
@@ -1665,7 +1641,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 amount_column,
             ) if amount_column >= 0 else None
 
-            # PENGGUNAAN HELPER
             nominal = rupiah_to_int(amount_item.text() if amount_item else "0")
             items.append(
                 {
@@ -1723,18 +1698,23 @@ class TabInvoice(ZoomTableMixin, QWidget):
             f"Invoice {no_invoice} berhasil disimpan.",
         )
 
-    def simpan_invoice_ke_db(self):
-        if self._sedang_menyimpan_invoice:
-            return
-
+    def _siapkan_simpan_invoice(self):
         client = self.txt_client.text().strip().upper()
         items = self.ambil_data_item_invoice()
         if not client:
-            QMessageBox.warning(self, "Peringatan", "Nama client / Bill To tidak boleh kosong.")
-            return
+            QMessageBox.warning(
+                self,
+                "Peringatan",
+                "Nama client / Bill To tidak boleh kosong.",
+            )
+            return None
         if not items:
-            QMessageBox.warning(self, "Peringatan", "Belum ada item tagihan yang akan disimpan.")
-            return
+            QMessageBox.warning(
+                self,
+                "Peringatan",
+                "Belum ada item tagihan yang akan disimpan.",
+            )
+            return None
 
         self.hitung_ulang_total_tagihan()
         try:
@@ -1745,7 +1725,17 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 "Nomor Invoice Tidak Valid",
                 f"Invoice belum dapat disimpan:\n{exc}",
             )
+            return None
+        return no_invoice, header_data, items
+
+    def simpan_invoice_ke_db(self):
+        if self._sedang_menyimpan_invoice:
             return
+
+        prepared = self._siapkan_simpan_invoice()
+        if prepared is None:
+            return
+        no_invoice, header_data, items = prepared
 
         self._sedang_menyimpan_invoice = True
         self.btn_simpan_db.setEnabled(False)
@@ -1765,30 +1755,30 @@ class TabInvoice(ZoomTableMixin, QWidget):
             self._sedang_menyimpan_invoice = False
             self.btn_simpan_db.setEnabled(self._dirty)
 
+    def _tambahkan_baris_histori_invoice(self, tabel, data):
+        row = tabel.rowCount()
+        tabel.insertRow(row)
+        for column in range(min(len(data), tabel.columnCount())):
+            value = data[column]
+            item = buat_tabel_item(
+                text=str(value if value is not None else ""),
+                editable=False,
+            )
+            item.setFont(tabel.font())
+            item.setFlags(
+                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled,
+            )
+            tabel.setItem(row, column, item)
+
     def load_histori_invoice(self):
         tabel = self.tabel_histori_invoice
         tabel.setUpdatesEnabled(False)
         tabel.blockSignals(True)
         try:
             tabel.setRowCount(0)
-            rows = db_service.ambil_histori_invoice(limit=300) or []
-            for data in rows:
-                if not isinstance(data, (list, tuple)):
-                    continue
-
-                row = tabel.rowCount()
-                tabel.insertRow(row)
-                for column in range(min(len(data), tabel.columnCount())):
-                    value = data[column]
-                    item = buat_tabel_item(
-                        text=str(value if value is not None else ""),
-                        editable=False,
-                    )
-                    item.setFont(tabel.font())
-                    item.setFlags(
-                        Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled,
-                    )
-                    tabel.setItem(row, column, item)
+            for data in db_service.ambil_histori_invoice(limit=300) or []:
+                if isinstance(data, (list, tuple)):
+                    self._tambahkan_baris_histori_invoice(tabel, data)
             return True
         except Exception as exc:
             QMessageBox.critical(
@@ -1867,6 +1857,22 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 )
             self._pastikan_baris_invoice()
 
+    def _terapkan_invoice_loaded(self, no_invoice, header, details):
+        self._loading_invoice = True
+        self._sedang_memuat_item = True
+        try:
+            self._terapkan_header_invoice_loaded(no_invoice, header)
+            self._muat_detail_invoice(details)
+            self.lbl_title_editor.setText(
+                f"{self.status_invoice_aktif} INVOICE: {no_invoice}",
+            )
+            self._dirty = False
+            self.btn_simpan_db.setEnabled(False)
+            self.btn_cetak.setEnabled(True)
+        finally:
+            self._sedang_memuat_item = False
+            self._loading_invoice = False
+
     def load_invoice_by_no(self, no_invoice):
         no_invoice = str(no_invoice or "").strip().upper()
         if not no_invoice or not self._konfirmasi_buang_perubahan("membuka invoice lain"):
@@ -1884,21 +1890,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             if len(header) < 6:
                 raise ValueError("Format header invoice dari database tidak lengkap.")
 
-            self._loading_invoice = True
-            self._sedang_memuat_item = True
-            try:
-                self._terapkan_header_invoice_loaded(no_invoice, header)
-                self._muat_detail_invoice(details)
-                self.lbl_title_editor.setText(
-                    f"{self.status_invoice_aktif} INVOICE: {no_invoice}",
-                )
-                self._dirty = False
-                self.btn_simpan_db.setEnabled(False)
-                self.btn_cetak.setEnabled(True)
-            finally:
-                self._sedang_memuat_item = False
-                self._loading_invoice = False
-
+            self._terapkan_invoice_loaded(no_invoice, header, details)
             self.hitung_ulang_total_tagihan()
             return True
         except Exception as exc:
@@ -1944,9 +1936,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         if answer == QMessageBox.StandardButton.Yes:
             self.tabel_item_invoice.clear_all_rows()
 
-    # ------------------------------------------------------
     # PREVIEW DAN PDF
-    # ------------------------------------------------------
 
     @staticmethod
     def _parse_json_object(value):
@@ -2000,48 +1990,32 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 rows.append(data)
         return rows
 
-    def build_invoice_html(self):
-        self.hitung_ulang_total_tagihan()
+    def _konteks_header_html_invoice(self):
         invoice_number = self.no_invoice_aktif or self.txt_no_invoice.text().strip() or "DRAFT"
         client = self.txt_client.text().strip().upper() or "-"
         ship_to = self.txt_ship_to.text().strip().upper() or "-"
         date_text = self.date_invoice.date().toString("dd MMMM yyyy")
         payment = self.txt_payment_info.text().strip()
         notes = self.txt_catatan.text().strip()
-        layout_type = self.active_template.get("layout", "standard")
-        rows = self._visible_rows()
-
         data_perusahaan = self._muat_data_perusahaan()
 
         nama_perusahaan = (
             str(data_perusahaan.get("nama_perusahaan", "")).strip()
             or "PT KARGO EKSPEDISI"
         )
-        alamat = str(
-            data_perusahaan.get("alamat_perusahaan", "")
-        ).strip()
-        telp = str(
-            data_perusahaan.get("telp_perusahaan", "")
-        ).strip()
+        alamat = str(data_perusahaan.get("alamat_perusahaan", "")).strip()
+        telp = str(data_perusahaan.get("telp_perusahaan", "")).strip()
         logo_html = (
             str(data_perusahaan.get("logo_text_html", "")).strip()
             or self._esc(nama_perusahaan)
         )
-        default_signer = (
-            str(CURRENT_SESSION.get("username", "")).strip()
-            or "ADMIN"
-        )
+        default_signer = str(CURRENT_SESSION.get("username", "")).strip() or "ADMIN"
 
         bagian_alamat = []
         if alamat:
-            bagian_alamat.append(
-                self._esc(alamat).replace("\n", "<br>")
-            )
+            bagian_alamat.append(self._esc(alamat).replace("\n", "<br>"))
         if telp:
-            bagian_alamat.append(
-                f"Telp. {self._esc(telp)}"
-            )
-        alamat_lengkap = "<br>".join(bagian_alamat) or "-"
+            bagian_alamat.append(f"Telp. {self._esc(telp)}")
 
         kota_tanda_tangan = str(
             data_perusahaan.get("kota_tanda_tangan", "")
@@ -2051,17 +2025,29 @@ class TabInvoice(ZoomTableMixin, QWidget):
             if kota_tanda_tangan
             else self._esc(date_text)
         )
+        signer = self.txt_penanda_tangan.text().strip() or default_signer
+        return {
+            "invoice_number": invoice_number,
+            "client": client,
+            "ship_to": ship_to,
+            "date_text": date_text,
+            "payment": payment,
+            "notes": notes,
+            "layout_type": self.active_template.get("layout", "standard"),
+            "nama_perusahaan": nama_perusahaan,
+            "logo_html": logo_html,
+            "alamat_lengkap": "<br>".join(bagian_alamat) or "-",
+            "tempat_tanggal": tempat_tanggal,
+            "signer": signer,
+        }
 
-        signer = (
-            self.txt_penanda_tangan.text().strip()
-            or default_signer
-        )
-
-        headers_html = "".join(
+    def _headers_html_invoice(self):
+        return "".join(
             f'<th style="width:{int(column.get("width", 100))}px">{self._esc(column.get("title", ""))}</th>'
             for column in self.active_columns
         )
 
+    def _body_html_invoice(self, rows):
         body_lines = []
         for row_data in rows:
             cells = []
@@ -2069,12 +2055,9 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 value = row_data.get(column["key"], "")
                 data_type = column.get("type", "text")
                 cls = "num" if data_type in {"currency", "integer", "decimal"} else ""
-
-                # PENGGUNAAN HELPER
                 if data_type == "currency" and value:
                     parsed = rupiah_to_int(value)
                     value = format_ke_rupiah(parsed) if parsed else value
-
                 cells.append(f'<td class="{cls}">{self._esc(value)}</td>')
             body_lines.append("<tr>" + "".join(cells) + "</tr>")
 
@@ -2082,128 +2065,119 @@ class TabInvoice(ZoomTableMixin, QWidget):
             body_lines.append(
                 f'<tr><td colspan="{max(len(self.active_columns), 1)}" class="empty">Belum ada item</td></tr>',
             )
+        return "".join(body_lines)
 
+    def _party_header_html_invoice(self, layout_type, client, ship_to):
+        if layout_type == "logistics":
+            return f"""
+                    <table class="party single">
+                        <tr><th>TO :</th><td>{self._esc(client)}</td></tr>
+                    </table>
+                """
+        return f"""
+                    <table class="party">
+                        <tr>
+                            <th>BILL TO</th>
+                            <th>SHIP TO</th>
+                        </tr>
+                        <tr>
+                            <td>{self._esc(client)}</td>
+                            <td>{self._esc(ship_to)}</td>
+                        </tr>
+                    </table>
+                """
+
+    @staticmethod
+    @staticmethod
+    def _style_html_invoice(font_family_css):
+        return f"""
+        @page {{ size: A4; margin: 8mm; }}
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: "{font_family_css}"; color: #111; font-size: 10pt; margin: 0; }}
+        .page {{ width: 100%; }}
+        .company {{ width: 100%; border: 1px solid #111; border-bottom: none; border-collapse: collapse; }}
+        .company td {{ padding: 7px 10px; vertical-align: middle; }}
+        .brand {{ font-size: 18pt; font-weight: bold; color: #1747a6; }} .logo-kargo {{ color: #e00000; }}
+        .address {{ text-align:right; font-size:9pt; }} .invoice-title {{ border: 1px solid #111; text-align:center; padding:5px; }}
+        .invoice-title .title {{ font-size:13pt; font-weight:bold; }} .invoice-title .number {{ font-size:10pt; margin-top:2px; }}
+        .party {{ width:100%; border-collapse:collapse; margin-top:0; table-layout:fixed; }}
+        .party th, .party td {{ border:1px solid #111; padding:5px 8px; text-align:center; }} .party th {{ background:#e5e5e5; font-weight:bold; }}
+        .party.single th {{ width:70px; text-align:left; }} .party.single td {{ text-align:left; font-size:13pt; font-weight:bold; }}
+        .items {{ width:100%; border-collapse:collapse; table-layout:fixed; margin-top:0; }}
+        .items th, .items td {{ border:1px solid #111; padding:4px 5px; word-wrap:break-word; vertical-align:top; }}
+        .items th {{ background:#d9d9d9; text-align:center; font-size:8.5pt; }} .items td {{ font-size:8.5pt; }}
+        .items .num {{ text-align:right; white-space:nowrap; }} .items .empty {{ text-align:center; color:#777; padding:20px; }}
+        .bottom {{ width:100%; border-collapse:collapse; margin-top:0; }} .bottom td {{ vertical-align:top; }}
+        .payment {{ width:65%; padding:8px 4px; line-height:1.45; }} .totals {{ width:35%; border-collapse:collapse; }}
+        .totals td {{ border:1px solid #111; padding:5px 7px; }} .totals .label {{ text-align:right; font-weight:bold; }}
+        .totals .value {{ text-align:right; white-space:nowrap; }} .totals .grand {{ font-size:13pt; font-weight:bold; }}
+        .notes {{ margin-top:8px; padding:6px; border:1px solid #999; }} .signature {{ margin-top:12px; text-align:right; padding-right:18px; }}
+        .signature .space {{ height:55px; }} .signature .name {{ font-weight:bold; text-decoration:underline; }}
+    """
+
+    def _render_invoice_html(
+        self,
+        context,
+        headers_html,
+        body_html,
+        party_header,
+        subtotal,
+        tax_name,
+        tax_value,
+    ):
+        notes = context["notes"]
+        payment = context["payment"]
+        notes_html = f'<div class="notes"><b>Catatan:</b> {self._esc(notes)}</div>' if notes else ""
+        payment_html = self._esc(payment).replace("\n", "<br>") if payment else "-"
+        style_html = self._style_html_invoice(self._font_family_css())
+        return f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"><style>{style_html}</style></head>
+    <body><div class="page">
+    <table class="company"><tr>
+    <td><span class="brand">{context["logo_html"]}</span><br><span style="font-weight:bold;">{self._esc(context["nama_perusahaan"])}</span></td>
+    <td class="address">{context["alamat_lengkap"]}</td>
+    </tr></table>
+    <div class="invoice-title"><div class="title">INVOICE</div><div class="number">No. {self._esc(context["invoice_number"])}</div></div>
+    {party_header}
+    <table class="items"><thead><tr>{headers_html}</tr></thead><tbody>{body_html}</tbody></table>
+    <table class="bottom"><tr>
+    <td class="payment"><b>PAYMENT INFO</b><br>{payment_html}{notes_html}</td>
+    <td><table class="totals">
+    <tr><td class="label">SUB TOTAL</td><td class="value">Rp {format_ke_rupiah(subtotal)}</td></tr>
+    <tr><td class="label">{self._esc(tax_name)}</td><td class="value">Rp {format_ke_rupiah(tax_value)}</td></tr>
+    <tr><td class="label grand">TOTAL</td><td class="value grand">Rp {format_ke_rupiah(self.total_invoice_aktif)}</td></tr>
+    </table></td>
+    </tr></table>
+    <div class="signature">{context["tempat_tanggal"]}<div class="space"></div><div class="name">{self._esc(context["signer"])}</div></div>
+    </div></body>
+    </html>
+            """
+
+    def build_invoice_html(self):
+        self.hitung_ulang_total_tagihan()
+        context = self._konteks_header_html_invoice()
+        rows = self._visible_rows()
+        headers_html = self._headers_html_invoice()
+        body_html = self._body_html_invoice(rows)
         subtotal = sum(item["nominal"] for item in self.ambil_data_item_invoice())
         tax_name = self.cmb_pajak.currentText()
         tax_value = self.total_invoice_aktif - subtotal
-
-        if layout_type == "logistics":
-            party_header = f"""
-                <table class="party single">
-                    <tr><th>TO :</th><td>{self._esc(client)}</td></tr>
-                </table>
-            """
-        else:
-            party_header = f"""
-                <table class="party">
-                    <tr>
-                        <th>BILL TO</th>
-                        <th>SHIP TO</th>
-                    </tr>
-                    <tr>
-                        <td>{self._esc(client)}</td>
-                        <td>{self._esc(ship_to)}</td>
-                    </tr>
-                </table>
-            """
-
-        notes_html = f'<div class="notes"><b>Catatan:</b> {self._esc(notes)}</div>' if notes else ""
-        payment_html = self._esc(payment).replace("\n", "<br>") if payment else "-"
-        font_family_css = self._font_family_css()
-
-        # PENGGUNAAN HELPER DALAM F-STRING TABEL HTML BAWAH (Rp {format_ke_rupiah(subtotal)})
-        return f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-    @page {{ size: A4; margin: 8mm; }}
-    * {{ box-sizing: border-box; }}
-    body {{ font-family: "{font_family_css}"; color: #111; font-size: 10pt; margin: 0; }}
-    .page {{ width: 100%; }}
-    .company {{ width: 100%; border: 1px solid #111; border-bottom: none; border-collapse: collapse; }}
-    .company td {{ padding: 7px 10px; vertical-align: middle; }}
-    .brand {{ font-size: 18pt; font-weight: bold; color: #1747a6; }}
-    .logo-kargo {{ color: #e00000; }}
-    .address {{ text-align:right; font-size:9pt; }}
-    .invoice-title {{ border: 1px solid #111; text-align:center; padding:5px; }}
-    .invoice-title .title {{ font-size:13pt; font-weight:bold; }}
-    .invoice-title .number {{ font-size:10pt; margin-top:2px; }}
-    .party {{ width:100%; border-collapse:collapse; margin-top:0; table-layout:fixed; }}
-    .party th, .party td {{ border:1px solid #111; padding:5px 8px; text-align:center; }}
-    .party th {{ background:#e5e5e5; font-weight:bold; }}
-    .party.single th {{ width:70px; text-align:left; }}
-    .party.single td {{ text-align:left; font-size:13pt; font-weight:bold; }}
-    .items {{ width:100%; border-collapse:collapse; table-layout:fixed; margin-top:0; }}
-    .items th, .items td {{ border:1px solid #111; padding:4px 5px; word-wrap:break-word; vertical-align:top; }}
-    .items th {{ background:#d9d9d9; text-align:center; font-size:8.5pt; }}
-    .items td {{ font-size:8.5pt; }}
-    .items .num {{ text-align:right; white-space:nowrap; }}
-    .items .empty {{ text-align:center; color:#777; padding:20px; }}
-    .bottom {{ width:100%; border-collapse:collapse; margin-top:0; }}
-    .bottom td {{ vertical-align:top; }}
-    .payment {{ width:65%; padding:8px 4px; line-height:1.45; }}
-    .totals {{ width:35%; border-collapse:collapse; }}
-    .totals td {{ border:1px solid #111; padding:5px 7px; }}
-    .totals .label {{ text-align:right; font-weight:bold; }}
-    .totals .value {{ text-align:right; white-space:nowrap; }}
-    .totals .grand {{ font-size:13pt; font-weight:bold; }}
-    .notes {{ margin-top:8px; padding:6px; border:1px solid #999; }}
-    .signature {{ margin-top:12px; text-align:right; padding-right:18px; }}
-    .signature .space {{ height:55px; }}
-    .signature .name {{ font-weight:bold; text-decoration:underline; }}
-</style>
-</head>
-<body>
-<div class="page">
-    <table class="company">
-        <tr>
-            <td>
-                <span class="brand">{logo_html}</span><br>
-                <span style="font-weight:bold;">{self._esc(nama_perusahaan)}</span>
-            </td>
-            <td class="address">{alamat_lengkap}</td>
-        </tr>
-    </table>
-
-    <div class="invoice-title">
-        <div class="title">INVOICE</div>
-        <div class="number">No. {self._esc(invoice_number)}</div>
-    </div>
-
-    {party_header}
-
-    <table class="items">
-        <thead><tr>{headers_html}</tr></thead>
-        <tbody>{''.join(body_lines)}</tbody>
-    </table>
-
-    <table class="bottom">
-        <tr>
-            <td class="payment">
-                <b>PAYMENT INFO</b><br>{payment_html}
-                {notes_html}
-            </td>
-            <td>
-                <table class="totals">
-                    <tr><td class="label">SUB TOTAL</td><td class="value">Rp {format_ke_rupiah(subtotal)}</td></tr>
-                    <tr><td class="label">{self._esc(tax_name)}</td><td class="value">Rp {format_ke_rupiah(tax_value)}</td></tr>
-                    <tr><td class="label grand">TOTAL</td><td class="value grand">Rp {format_ke_rupiah(self.total_invoice_aktif)}</td></tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-
-    <div class="signature">
-        {tempat_tanggal}
-        <div class="space"></div>
-        <div class="name">{self._esc(signer)}</div>
-    </div>
-</div>
-</body>
-</html>
-        """
+        party_header = self._party_header_html_invoice(
+            context["layout_type"],
+            context["client"],
+            context["ship_to"],
+        )
+        return self._render_invoice_html(
+            context,
+            headers_html,
+            body_html,
+            party_header,
+            subtotal,
+            tax_name,
+            tax_value,
+        )
 
     def tampilkan_preview(self):
         html_content = self.build_invoice_html()
@@ -2277,9 +2251,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             "PDF invoice sudah dapat dibuat. Pengiriman WhatsApp dapat disambungkan setelah metode API/WhatsApp Desktop ditentukan.",
         )
 
-    # ------------------------------------------------------
     # TEMA
-    # ------------------------------------------------------
 
     def refresh_session_ui(self):
         self.load_histori_invoice()
@@ -2366,21 +2338,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             self.cmb_pajak,
         )
 
-        # ComboBox tetap native Fusion dan selalu memakai ukuran dasar.
-        for combo in comboboxes:
-            zoom_helper.terapkan_zoom_widget_standar(
-                combo,
-                0,
-                "sz_input",
-            )
-
-        # Samakan tinggi ComboBox dengan QLineEdit Invoice, tanpa dipengaruhi zoom.
-        tinggi_input = self.txt_client.height()
-        if tinggi_input <= 0:
-            tinggi_input = self.txt_client.sizeHint().height()
-
-        for combo in comboboxes:
-            combo.setFixedHeight(tinggi_input)
+        atur_tinggi_input(comboboxes)
 
         terapkan_popup_bawah_combobox(comboboxes)
 
@@ -2413,19 +2371,110 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 if cell_widget is not None:
                     cell_widget.setFont(font_item)
 
-    def _terapkan_zoom_tabel_invoice(
-            self,
-            *,
-            is_dark,
-            z,
-            tabel_sasaran=None,
-    ):
-        """Terapkan zoom hanya pada tabel histori dan tabel editor invoice.
+    def _konfigurasi_zoom_tabel_invoice(self):
+        konfigurasi = []
+        tabel_histori = getattr(self, "tabel_histori_invoice", None)
+        if tabel_histori is not None:
+            konfigurasi.append((tabel_histori, "tabel_histori", 28))
+        tabel_editor = getattr(self, "tabel_item_invoice", None)
+        if tabel_editor is not None:
+            konfigurasi.append((tabel_editor, "tabel_editor", 32))
+        return konfigurasi
 
-        Tema/warna tabel tetap berasal dari modul invoice. Ukuran font memakai
-        point, sedangkan tinggi baris, tinggi header, ikon, dan lebar kolom
-        memakai logical pixel. Elemen non-tabel tidak disentuh.
-        """
+    def _terapkan_visual_zoom_tabel_invoice(self, tabel, style_key, styles, metrics):
+        style_visual = self._style_tanpa_font_size(styles[style_key])
+        style_font_zoom = zoom_helper.generate_font_zoom_tabel_qss(metrics.level)
+        tabel.setStyleSheet(f"{style_visual}\n{style_font_zoom}")
+
+        font_tabel = tabel.font()
+        app = QApplication.instance()
+        if app is not None:
+            font_tabel.setFamily(app.font().family())
+        font_tabel.setPointSizeF(metrics.font_base_pt)
+        tabel.setFont(font_tabel)
+        tabel.setIconSize(QSize(metrics.icon_size, metrics.icon_size))
+
+        header = tabel.horizontalHeader()
+        font_header = header.font()
+        font_header.setPointSizeF(metrics.font_base_pt)
+        font_header.setBold(True)
+        header.setFont(font_header)
+        tabel.verticalHeader().setFont(font_header)
+
+        self._sinkronkan_font_item_tabel(tabel)
+        style_engine = tabel.style()
+        style_engine.unpolish(tabel)
+        style_engine.polish(tabel)
+        tabel.ensurePolished()
+        return header
+
+    @staticmethod
+    def _hitung_geometri_zoom_invoice(tabel, header, tinggi_dasar, metrics):
+        tinggi_teks = max(1, int(tabel.fontMetrics().height()))
+        padding_item = skalakan_px(metrics.item_padding, minimum=1)
+        ekstra_item = skalakan_px(8, minimum=4)
+        tinggi_baris = max(
+            skalakan_px(24, minimum=18),
+            round(tinggi_dasar * metrics.factor),
+            tinggi_teks + (padding_item * 2) + ekstra_item,
+        )
+        tabel.verticalHeader().setMinimumSectionSize(tinggi_baris)
+        tabel.verticalHeader().setDefaultSectionSize(tinggi_baris)
+
+        tinggi_teks_header = max(1, int(header.fontMetrics().height()))
+        padding_header = skalakan_px(metrics.header_padding_v, minimum=1)
+        ekstra_header = skalakan_px(8, minimum=4)
+        tinggi_header = max(
+            metrics.header_height,
+            tinggi_teks_header + (padding_header * 2) + ekstra_header,
+        )
+        header.setMinimumHeight(tinggi_header)
+        return tinggi_baris
+
+    def _terapkan_zoom_satu_tabel_invoice(
+        self,
+        tabel,
+        style_key,
+        tinggi_dasar,
+        styles,
+        metrics,
+    ):
+        tabel.setUpdatesEnabled(False)
+        try:
+            header = self._terapkan_visual_zoom_tabel_invoice(
+                tabel,
+                style_key,
+                styles,
+                metrics,
+            )
+            tinggi_baris = self._hitung_geometri_zoom_invoice(
+                tabel,
+                header,
+                tinggi_dasar,
+                metrics,
+            )
+            with blokir_signal_sementara(header):
+                zoom_helper.skalakan_kolom_tableview(tabel, metrics.level)
+
+            model = tabel.model()
+            if model is not None:
+                for row in range(model.rowCount()):
+                    tabel.setRowHeight(row, tinggi_baris)
+        finally:
+            tabel.setUpdatesEnabled(True)
+            tabel.updateGeometries()
+            tabel.viewport().update()
+            tabel.viewport().repaint()
+            tabel.update()
+
+    def _terapkan_zoom_tabel_invoice(
+        self,
+        *,
+        is_dark,
+        z,
+        tabel_sasaran=None,
+    ):
+        """Terapkan zoom hanya pada tabel histori dan tabel editor invoice."""
         styles = self._dapatkan_style_invoice_statis(is_dark)
         metrics = zoom_helper.dapatkan_metrik_zoom(z)
         target_ids = (
@@ -2434,101 +2483,17 @@ class TabInvoice(ZoomTableMixin, QWidget):
             else None
         )
 
-        konfigurasi = []
-        tabel_histori = getattr(self, "tabel_histori_invoice", None)
-        if tabel_histori is not None:
-            konfigurasi.append((tabel_histori, "tabel_histori", 28))
-
-        tabel_editor = getattr(self, "tabel_item_invoice", None)
-        if tabel_editor is not None:
-            konfigurasi.append((tabel_editor, "tabel_editor", 32))
-
         self._sedang_menerapkan_zoom = True
         try:
-            for tabel, style_key, tinggi_dasar in konfigurasi:
-                if target_ids is not None and id(tabel) not in target_ids:
-                    continue
-
-                tabel.setUpdatesEnabled(False)
-                try:
-                    # QSS hanya mengatur warna, border, dan padding. Font
-                    # dikelola melalui QFont agar tidak memiliki dua sumber.
-                    style_visual = self._style_tanpa_font_size(
-                        styles[style_key]
+            for tabel, style_key, tinggi_dasar in self._konfigurasi_zoom_tabel_invoice():
+                if target_ids is None or id(tabel) in target_ids:
+                    self._terapkan_zoom_satu_tabel_invoice(
+                        tabel,
+                        style_key,
+                        tinggi_dasar,
+                        styles,
+                        metrics,
                     )
-                    style_font_zoom = zoom_helper.generate_font_zoom_tabel_qss(
-                        metrics.level
-                    )
-                    tabel.setStyleSheet(
-                        f"{style_visual}\n{style_font_zoom}"
-                    )
-
-                    font_tabel = tabel.font()
-                    app = QApplication.instance()
-                    if app is not None:
-                        font_tabel.setFamily(app.font().family())
-                    font_tabel.setPointSizeF(metrics.font_base_pt)
-                    tabel.setFont(font_tabel)
-                    tabel.setIconSize(QSize(metrics.icon_size, metrics.icon_size))
-
-                    header = tabel.horizontalHeader()
-                    font_header = header.font()
-                    font_header.setPointSizeF(metrics.font_base_pt)
-                    font_header.setBold(True)
-                    header.setFont(font_header)
-                    tabel.verticalHeader().setFont(font_header)
-
-                    # Item tabel dapat membawa font eksplisit dari
-                    # buat_tabel_item(); sinkronkan agar teks sel benar-benar
-                    # mengikuti level zoom aktif.
-                    self._sinkronkan_font_item_tabel(tabel)
-
-                    # Paksa Qt menghitung ulang style setelah QSS, QFont, dan
-                    # FontRole item sudah memakai ukuran zoom yang sama.
-                    style_engine = tabel.style()
-                    style_engine.unpolish(tabel)
-                    style_engine.polish(tabel)
-                    tabel.ensurePolished()
-
-                    tinggi_teks = max(1, int(tabel.fontMetrics().height()))
-                    tinggi_baris = max(
-                        24,
-                        round(tinggi_dasar * metrics.factor),
-                        tinggi_teks + (metrics.item_padding * 2) + 8,
-                    )
-                    tabel.verticalHeader().setMinimumSectionSize(tinggi_baris)
-                    tabel.verticalHeader().setDefaultSectionSize(tinggi_baris)
-
-                    tinggi_teks_header = max(
-                        1,
-                        int(header.fontMetrics().height()),
-                    )
-                    tinggi_header = max(
-                        metrics.header_height,
-                        tinggi_teks_header
-                        + (metrics.header_padding_v * 2)
-                        + 8,
-                    )
-                    header.setMinimumHeight(tinggi_header)
-
-                    # Header blocker mencegah resize akibat zoom tersimpan
-                    # sebagai preferensi lebar manual pengguna.
-                    with blokir_signal_sementara(header):
-                        zoom_helper.skalakan_kolom_tableview(
-                            tabel,
-                            metrics.level,
-                        )
-
-                    model = tabel.model()
-                    if model is not None:
-                        for row in range(model.rowCount()):
-                            tabel.setRowHeight(row, tinggi_baris)
-                finally:
-                    tabel.setUpdatesEnabled(True)
-                    tabel.updateGeometries()
-                    tabel.viewport().update()
-                    tabel.viewport().repaint()
-                    tabel.update()
         finally:
             self._sedang_menerapkan_zoom = False
 
@@ -2538,10 +2503,8 @@ class TabInvoice(ZoomTableMixin, QWidget):
         styles = self._dapatkan_style_invoice_statis(is_dark)
         self._terapkan_tema_statis_invoice(is_dark, styles)
 
-        # Elemen non-tabel selalu memakai ukuran dasar.
         self._terapkan_combobox_statis_invoice()
 
-        # Level zoom hanya diterapkan pada tabel histori dan tabel editor.
         z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
         self._terapkan_zoom_tabel_invoice(
             is_dark=is_dark,

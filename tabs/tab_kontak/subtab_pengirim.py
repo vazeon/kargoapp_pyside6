@@ -3,10 +3,15 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QPushButton,
     QSizePolicy,
     QTableWidget,
     QVBoxLayout,
@@ -17,12 +22,31 @@ from config import CURRENT_SESSION
 import services.database_service as db_service
 from themes.modules.kontak_armada import get_kontak_riwayat_styles
 from utils.typography import get_global_font_sizes_pt, get_master_font
-from utils.widget_helpers import paksa_kapital_lineedit as helper_paksa_kapital_lineedit
+from utils.widget_helpers import atur_tinggi_input, paksa_kapital_lineedit as helper_paksa_kapital_lineedit
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 from utils.date_ind_format import format_tanggal_ke_ui
 from utils.splitter_helper import buat_splitter, perbarui_semua_style_splitter
+from utils.modules.kontak_metrics import (
+    KONTAK_ADD_BUTTON_HEIGHT,
+    KONTAK_ADD_DIALOG_MARGINS,
+    KONTAK_ADD_DIALOG_MIN_WIDTH,
+    KONTAK_ADD_DIALOG_SPACING,
+    KONTAK_ADD_FIELD_MIN_WIDTH,
+    KONTAK_ADD_FORM_HORIZONTAL_SPACING,
+    KONTAK_ADD_FORM_VERTICAL_SPACING,
+    KONTAK_HISTORY_COLUMN_WIDTHS,
+    KONTAK_HISTORY_SEARCH_WIDTH,
+    KONTAK_PANEL_MARGINS,
+    KONTAK_PANEL_MAX_WIDTH,
+    KONTAK_PANEL_MIN_WIDTH,
+    KONTAK_PENGIRIM_COLUMN_WIDTHS,
+    KONTAK_SEARCH_WIDTH,
+    KONTAK_SPACING,
+    KONTAK_SPLITTER_INITIAL_SIZES,
+    KONTAK_SUBTAB_MARGINS,
+)
 
 
 def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
@@ -38,17 +62,17 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     KOL_ID = 1
     KOL_NAMA_PENGIRIM = 2
     KOL_TELEPON = 3
-    KOL_KOTA = 4
-    KOL_ALAMAT = 5
+    KOL_ALAMAT = 4
+    KOL_KOTA = 5
 
     SETTINGS_ORGANIZATION = "EkspedisiApp"
     SETTINGS_APPLICATION = "SubTabMasterPengirim"
 
-    KOLOM_PENCARIAN = (KOL_NAMA_PENGIRIM, KOL_TELEPON, KOL_KOTA, KOL_ALAMAT)
-    HEADER_PENGIRIM = ("NO.", "ID SHIPPER", "NAMA PENGIRIM", "NO. HP", "KOTA", "ALAMAT")
+    KOLOM_PENCARIAN = (KOL_NAMA_PENGIRIM, KOL_TELEPON, KOL_ALAMAT, KOL_KOTA)
+    HEADER_PENGIRIM = ("NO.", "ID SHIPPER", "NAMA PENGIRIM", "NO. HP", "ALAMAT", "KOTA")
     HEADER_HISTORI = ("TANGGAL", "NO. RESI", "PENERIMA", "KOLI", "BERAT", "CBM", "ONGKIR")
-    LEBAR_PENGIRIM = (50, 90, 180, 130, 120)
-    LEBAR_HISTORI = (95, 100, 140, 50, 60, 60, 90)
+    LEBAR_PENGIRIM = KONTAK_PENGIRIM_COLUMN_WIDTHS
+    LEBAR_HISTORI = KONTAK_HISTORY_COLUMN_WIDTHS
 
     def __init__(self):
         super().__init__()
@@ -58,8 +82,8 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     def init_ui(self):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout_utama = QVBoxLayout(self)
-        layout_utama.setContentsMargins(0, 0, 0, 0)
-        layout_utama.setSpacing(8)
+        layout_utama.setContentsMargins(*KONTAK_SUBTAB_MARGINS)
+        layout_utama.setSpacing(KONTAK_SPACING)
 
         self.panel_kiri = self._bangun_panel_pengirim()
         self.panel_kanan = self._bangun_panel_histori()
@@ -67,7 +91,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         self.splitter = buat_splitter(
             self.panel_kiri,
             self.panel_kanan,
-            ukuran_awal=(650, 450),
+            ukuran_awal=KONTAK_SPLITTER_INITIAL_SIZES,
             parent=self,
         )
         self.splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -78,20 +102,26 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def _bangun_panel_pengirim(self):
         panel = QWidget()
-        panel.setMinimumWidth(400)
-        panel.setMaximumWidth(1400)
+        panel.setMinimumWidth(KONTAK_PANEL_MIN_WIDTH)
+        panel.setMaximumWidth(KONTAK_PANEL_MAX_WIDTH)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*KONTAK_PANEL_MARGINS)
+        layout.setSpacing(KONTAK_SPACING)
 
         self.lbl_judul = QLabel("List Pengirim")
         self.lbl_judul.setFont(
             _buat_font_pt(get_global_font_sizes_pt(0)["sz_title"], tebal=True)
         )
         self.txt_cari = self._buat_input_cari(
-            "Cari pengirim...", 230, self.filter_pencarian_tabel
+            "Cari pengirim...", KONTAK_SEARCH_WIDTH, self.filter_pencarian_tabel
         )
-        layout.addLayout(self._buat_header(self.lbl_judul, self.txt_cari))
+        self.btn_tambah_pengirim = QPushButton("+ Tambah Pengirim")
+        self.btn_tambah_pengirim.setFixedHeight(KONTAK_ADD_BUTTON_HEIGHT)
+        self.btn_tambah_pengirim.clicked.connect(self.tampilkan_dialog_tambah_pengirim)
+
+        header = self._buat_header(self.lbl_judul, self.txt_cari)
+        header.insertWidget(2, self.btn_tambah_pengirim)
+        layout.addLayout(header)
 
         self.tabel_pengirim = QTableWidget()
         self._konfigurasi_tabel(
@@ -111,19 +141,19 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def _bangun_panel_histori(self):
         panel = QWidget()
-        panel.setMinimumWidth(400)
-        panel.setMaximumWidth(1400)
+        panel.setMinimumWidth(KONTAK_PANEL_MIN_WIDTH)
+        panel.setMaximumWidth(KONTAK_PANEL_MAX_WIDTH)
         panel.setObjectName("panelHistori")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*KONTAK_PANEL_MARGINS)
+        layout.setSpacing(KONTAK_SPACING)
 
         self.lbl_judul_histori = QLabel("📦 Riwayat Pengiriman")
         self.lbl_judul_histori.setFont(
             _buat_font_pt(get_global_font_sizes_pt(0)["sz_total"], tebal=True)
         )
         self.txt_cari_histori = self._buat_input_cari(
-            "Cari di histori ini...", 180, self.filter_pencarian_histori
+            "Cari di histori ini...", KONTAK_HISTORY_SEARCH_WIDTH, self.filter_pencarian_histori
         )
         layout.addLayout(self._buat_header(self.lbl_judul_histori, self.txt_cari_histori))
 
@@ -148,7 +178,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         widget = QLineEdit()
         widget.setPlaceholderText(placeholder)
         widget.setFixedWidth(lebar)
-        widget.setFixedHeight(30)
+        atur_tinggi_input(widget)
         widget.textChanged.connect(
             lambda _text, w=widget: helper_paksa_kapital_lineedit(w)
         )
@@ -173,6 +203,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = tabel.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
         header.setSectionsClickable(True)
         header.setSectionsMovable(False)
 
@@ -224,13 +255,13 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             ),
             (self.KOL_TELEPON, data[3], True, Qt.AlignmentFlag.AlignCenter),
-            (self.KOL_KOTA, data[5], True, Qt.AlignmentFlag.AlignLeft),
             (
                 self.KOL_ALAMAT,
                 data[4],
                 True,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             ),
+            (self.KOL_KOTA, data[5], True, Qt.AlignmentFlag.AlignLeft),
         )
         for kolom, teks, editable, alignment in nilai:
             self.tabel_pengirim.setItem(
@@ -238,6 +269,78 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
                 kolom,
                 buat_tabel_item(teks, editable=editable, alignment=alignment),
             )
+
+    def _buat_form_tambah_pengirim(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Tambah Pengirim")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(KONTAK_ADD_DIALOG_MIN_WIDTH)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(*KONTAK_ADD_DIALOG_MARGINS)
+        layout.setSpacing(KONTAK_ADD_DIALOG_SPACING)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(KONTAK_ADD_FORM_HORIZONTAL_SPACING)
+        form.setVerticalSpacing(KONTAK_ADD_FORM_VERTICAL_SPACING)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        fields = {key: QLineEdit() for key in ("nama", "no_hp", "alamat", "kota")}
+        for key, placeholder in (
+            ("nama", "Nama pengirim"), ("no_hp", "No. HP"),
+            ("alamat", "Alamat"), ("kota", "Kota"),
+        ):
+            fields[key].setPlaceholderText(placeholder)
+            fields[key].setMinimumWidth(KONTAK_ADD_FIELD_MIN_WIDTH)
+        atur_tinggi_input(tuple(fields.values()))
+        for key in ("nama", "alamat", "kota"):
+            fields[key].textChanged.connect(
+                lambda _text, w=fields[key]: helper_paksa_kapital_lineedit(w)
+            )
+        for label, key in (
+            ("Nama Pengirim *", "nama"), ("No. HP", "no_hp"),
+            ("Alamat", "alamat"), ("Kota", "kota"),
+        ):
+            form.addRow(label, fields[key])
+        layout.addLayout(form)
+
+        tombol = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        tombol.rejected.connect(dialog.reject)
+        layout.addWidget(tombol)
+        return dialog, fields, tombol
+
+    def _simpan_pengirim_baru_dari_form(self, dialog, fields):
+        nama = fields["nama"].text().strip().upper()
+        no_hp = fields["no_hp"].text().strip()
+        alamat = fields["alamat"].text().strip().upper()
+        kota = fields["kota"].text().strip().upper()
+        if not nama:
+            QMessageBox.warning(dialog, "Data Belum Lengkap", "Nama pengirim wajib diisi.")
+            fields["nama"].setFocus()
+            return
+
+        sukses, pesan = db_service.tambah_master_pengirim(
+            CURRENT_SESSION.get("kode_cabang", "PUSAT"), nama, no_hp, kota, alamat,
+        )
+        if not sukses:
+            QMessageBox.warning(
+                dialog, "Gagal Menambah Pengirim",
+                pesan or "Data pengirim tidak dapat disimpan.",
+            )
+            return
+        dialog.accept()
+        self.refresh_session_ui()
+
+    def tampilkan_dialog_tambah_pengirim(self):
+        dialog, fields, tombol = self._buat_form_tambah_pengirim()
+
+        def simpan_pengirim_baru():
+            self._simpan_pengirim_baru_dari_form(dialog, fields)
+
+        tombol.accepted.connect(simpan_pengirim_baru)
+        fields["nama"].setFocus()
+        dialog.adjustSize()
+        dialog.exec()
 
     def load_data_pengirim(self):
         self.tabel_pengirim.blockSignals(True)
@@ -255,40 +358,42 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         finally:
             self.tabel_pengirim.blockSignals(False)
 
+    def _ambil_data_edit_pengirim(self, row):
+        tabel = self.tabel_pengirim
+        return (
+            tabel.item(row, self.KOL_ID).text().strip(),
+            tabel.item(row, self.KOL_NAMA_PENGIRIM).text().strip().upper(),
+            tabel.item(row, self.KOL_TELEPON).text().strip(),
+            tabel.item(row, self.KOL_ALAMAT).text().strip().upper(),
+            tabel.item(row, self.KOL_KOTA).text().strip().upper(),
+        )
+
+    def _terapkan_data_edit_pengirim(self, row, nama, alamat, kota):
+        self.tabel_pengirim.blockSignals(True)
+        try:
+            for kolom, nilai in (
+                (self.KOL_NAMA_PENGIRIM, nama),
+                (self.KOL_ALAMAT, alamat),
+                (self.KOL_KOTA, kota),
+            ):
+                self.tabel_pengirim.item(row, kolom).setText(nilai)
+        finally:
+            self.tabel_pengirim.blockSignals(False)
+
     def simpan_edit_pengirim_dari_tabel(self, item):
         if not item or item.column() in [self.KOL_NO, self.KOL_ID]:
             return
-
         row = item.row()
         try:
-            id_pengirim = self.tabel_pengirim.item(row, self.KOL_ID).text().strip()
-            nama = self.tabel_pengirim.item(row, self.KOL_NAMA_PENGIRIM).text().strip().upper()
-            no_hp = self.tabel_pengirim.item(row, self.KOL_TELEPON).text().strip()
-            kota = self.tabel_pengirim.item(row, self.KOL_KOTA).text().strip().upper()
-            alamat = self.tabel_pengirim.item(row, self.KOL_ALAMAT).text().strip().upper()
-
+            id_pengirim, nama, no_hp, alamat, kota = self._ambil_data_edit_pengirim(row)
             sukses, _pesan = db_service.update_master_pengirim_dari_tabel(
-                id_pengirim,
-                CURRENT_SESSION.get("kode_cabang", "PUSAT"),
-                nama,
-                no_hp,
-                kota,
-                alamat,
+                id_pengirim, CURRENT_SESSION.get("kode_cabang", "PUSAT"),
+                nama, no_hp, kota, alamat,
             )
             if not sukses:
                 self.refresh_session_ui()
                 return
-
-            self.tabel_pengirim.blockSignals(True)
-            try:
-                for kolom, nilai in (
-                    (self.KOL_NAMA_PENGIRIM, nama),
-                    (self.KOL_KOTA, kota),
-                    (self.KOL_ALAMAT, alamat),
-                ):
-                    self.tabel_pengirim.item(row, kolom).setText(nilai)
-            finally:
-                self.tabel_pengirim.blockSignals(False)
+            self._terapkan_data_edit_pengirim(row, nama, alamat, kota)
         except Exception as e:
             print(f"Error simpan edit pengirim: {e}")
             self.refresh_session_ui()
@@ -361,10 +466,6 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def load_lebar_kolom(self, t):
         self._muat_lebar(t, "lebar_kolom_pengirim", self.LEBAR_PENGIRIM)
-        t.horizontalHeader().setSectionResizeMode(
-            self.KOL_ALAMAT,
-            QHeaderView.ResizeMode.Stretch,
-        )
         self._perbarui_cache_lebar_zoom(
             t,
             [t.columnWidth(i) for i in range(t.columnCount())],
@@ -383,10 +484,10 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             (self.lbl_judul_histori, "sz_total", True),
             (self.txt_cari, "sz_input", False),
             (self.txt_cari_histori, "sz_input", False),
+            (self.btn_tambah_pengirim, "sz_input", False),
         ):
             widget.setFont(_buat_font_pt(ukuran[token], tebal=tebal))
-        self.txt_cari.setFixedHeight(30)
-        self.txt_cari_histori.setFixedHeight(30)
+        atur_tinggi_input((self.txt_cari, self.txt_cari_histori))
 
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()

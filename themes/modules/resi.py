@@ -1,8 +1,15 @@
 # themes/modules/resi.py
-from PySide6.QtGui import QPalette
+from themes.colors import get_theme_colors
+from utils.typography import get_master_font
 
-from themes.palette import get_theme_palette
-from utils.typography import get_master_font, get_global_font_sizes
+
+# Caller ukuran font khusus Tab Resi.
+# Ubah nilai di sini untuk menyesuaikan tipografi tanpa menyentuh kode widget.
+UKURAN_FONT_LABEL = 13
+UKURAN_FONT_INPUT = 13
+UKURAN_FONT_TOTAL_ONGKIR = 16
+UKURAN_FONT_CARD_REKENING_BANK = 13
+UKURAN_FONT_HISTORI_RESI = 13
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
@@ -10,14 +17,9 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     return gelap if is_dark else terang
 
 
-def _warna_placeholder(is_dark: bool) -> str:
-    """Ambil warna placeholder langsung dari themes/palette.py."""
-    palette = get_theme_palette(is_dark)
-    return palette.color(QPalette.ColorRole.PlaceholderText).name()
-
-
 def get_resi_static_styles(is_dark: bool) -> dict:
     """Style awal yang dapat dipakai sebelum proses refresh tema lengkap."""
+    ui = get_theme_colors(is_dark)["ui"]
     return {
         "scroll_kiri": f"""
             QScrollArea {{
@@ -35,16 +37,13 @@ def get_resi_static_styles(is_dark: bool) -> dict:
 
 def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
     """Style dinamis kartu dan kelompok rekening pada TabResi."""
-    sizes = get_global_font_sizes(z)
-    sz_sm = sizes["sz_sm"]
-    sz_card_title = max(11, 13 + z)
-    sz_card_desc = max(10, 12 + z)
+    ui = get_theme_colors(is_dark)["ui"]
 
     return {
         "group_box": f"""
             QGroupBox {{
-                font-weight: bold;
-                font-size: {sz_sm}px;
+                font-weight: 500;
+                font-size: {UKURAN_FONT_LABEL}px;
                 font-family: '{get_master_font()}';
                 color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
                 border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
@@ -54,6 +53,8 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
                 background-color: {_warna_tema(is_dark, "#181a1e", "#ffffff")};
             }}
             QGroupBox::title {{
+                font-size: {UKURAN_FONT_LABEL}px;
+                font-weight: 500;
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
                 left: 10px;
@@ -63,14 +64,14 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
         """,
         "label_top": f"""
             color: {_warna_tema(is_dark, "#e2e8f0", "#334155")};
-            font-size: {sz_card_title}px;
+            font-size: {UKURAN_FONT_CARD_REKENING_BANK}px;
             border: none;
             background: transparent;
             font-family: '{get_master_font()}';
         """,
         "label_bottom": f"""
             color: {_warna_tema(is_dark, "#a8b3c5", "#64748b")};
-            font-size: {sz_card_desc}px;
+            font-size: {UKURAN_FONT_CARD_REKENING_BANK}px;
             font-weight: normal;
             border: none;
             background: transparent;
@@ -89,23 +90,24 @@ def get_resi_detail_barang_theme(
     sz_base: int,
 ) -> dict:
     """Warna dan style khusus tabel Detail Barang tanpa mengubah scrollbar."""
-    placeholder = _warna_placeholder(is_dark)
+    ui = get_theme_colors(is_dark)["ui"]
+    placeholder = ui["placeholder_text"]
 
     return {
-        "background": _warna_tema(is_dark, "#1d2024", "#ffffff"),
+        "background": ui["field_background"],
         "alternate_background": _warna_tema(is_dark, "#25282e", "#f8fafc"),
-        "text": _warna_tema(is_dark, "#ffffff", "#0f172a"),
+        "text": ui["text_primary"],
         "grid": _warna_tema(is_dark, "#2d3139", "#e2e8f0"),
-        "selection_background": _warna_tema(is_dark, "#3b82f6", "#2563eb"),
+        "selection_background": ui["selection_background"],
         "selection_text": "#ffffff",
 
         "header": f"""
             QHeaderView::section {{
-                font-size: {sz_base}px;
+                font-size: {UKURAN_FONT_INPUT}px;
                 font-family: '{get_master_font()}';
                 background-color: {_warna_tema(is_dark, "#31353d", "#243752")};
                 color: #ffffff;
-                font-weight: bold;
+                font-weight: 500;
                 padding: 6px;
                 border: none;
                 border-right: 2px solid {_warna_tema(is_dark, "#64748b", "#a8b7c8")};
@@ -115,17 +117,17 @@ def get_resi_detail_barang_theme(
 
         "cell_input": f"""
             QLineEdit {{
-                font-size: {sz_base}px;
+                font-size: {UKURAN_FONT_INPUT}px;
                 font-family: '{get_master_font()}';
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+                background-color: {ui["field_background"]};
+                color: {ui["text_primary"]};
                 placeholder-text-color: {placeholder};
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 0px;
                 padding: 4px;
             }}
             QLineEdit:focus {{
-                border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
+                border: 1px solid {ui["selection_background"]};
             }}
         """,
     }
@@ -137,7 +139,7 @@ def get_btn_simpan_cetak_style() -> str:
         QPushButton {{
             background-color: #22c55e;
             color: white;
-            font-weight: bold;
+            font-weight: 500;
             font-size: 14px;
             padding: 10px 40px;
             border-radius: 6px;
@@ -167,13 +169,14 @@ def get_resi_styles(
     z: int = 0,
 ) -> dict:
     """Menghasilkan seluruh style UI untuk TabResi."""
-    placeholder = _warna_placeholder(is_dark)
+    ui = get_theme_colors(is_dark)["ui"]
+    placeholder = ui["placeholder_text"]
     input_style = f"""
         QLineEdit, QTextEdit, QDateEdit {{
-            font-size: {sz_input}px;
-            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
-            border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+            font-size: {UKURAN_FONT_INPUT}px;
+            background-color: {ui["field_background"]};
+            color: {ui["text_primary"]};
+            border: 1px solid {ui["field_border"]};
             border-radius: 4px;
             padding: 6px;
             font-family: '{get_master_font()}';
@@ -182,30 +185,30 @@ def get_resi_styles(
             placeholder-text-color: {placeholder};
         }}
         QLineEdit:focus, QTextEdit:focus, QDateEdit:focus {{
-            border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
-            background-color: {_warna_tema(is_dark, "#20242b", "#ffffff")};
+            border: 1px solid {ui["selection_background"]};
+            background-color: {ui["field_focus_background"]};
         }}
     """
 
     qss_group_umum = f"""
         QGroupBox {{
-            font-weight: bold;
+            font-weight: 500;
             font-size: {sz_base}px;
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color: {ui["text_primary"]};
             background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
             border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
             border-radius: 8px;
             margin-top: 2px;
-            padding: 8px 12px;
+            padding: 0px;
             font-family: '{get_master_font()}';
         }}
         QGroupBox::title {{
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color: {ui["text_primary"]};
         }}
         QLabel {{
             color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
-            font-size: {sz_sm}px;
-            font-weight: bold;
+            font-size: {UKURAN_FONT_LABEL}px;
+            font-weight: 500;
             background-color: transparent;
             font-family: '{get_master_font()}';
         }}
@@ -214,22 +217,22 @@ def get_resi_styles(
 
     qss_group_tabel = f"""
         QGroupBox {{
-            font-weight: bold;
+            font-weight: 500;
             font-size: {sz_base}px;
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color: {ui["text_primary"]};
             background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
             border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
             border-radius: 8px;
             margin-top: 2px;
-            padding: 6px 12px;
+            padding: 0px;
             font-family: '{get_master_font()}';
         }}
         QGroupBox::title {{
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color: {ui["text_primary"]};
         }}
         QLabel {{
             color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
-            font-size: {sz_sm}px;
+            font-size: {UKURAN_FONT_LABEL}px;
             font-family: '{get_master_font()}';
         }}
     """
@@ -239,73 +242,73 @@ def get_resi_styles(
 
     return {
         "lbl_main_title": f"""
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color: {ui["text_primary"]};
             font-size: {sz_title}px;
-            font-weight: bold;
+            font-weight: 500;
             margin-bottom: 1px;
             font-family: '{get_master_font()}';
         """,
         "lbl_tgl_tag": f"""
             color: {_warna_tema(is_dark, "#9ca3af", "#64748b")};
-            font-weight: bold;
+            font-weight: 500;
             font-family: '{get_master_font()}';
-            font-size: {sz_base}px;
+            font-size: {UKURAN_FONT_LABEL}px;
         """,
         "lbl_resi_tag": f"""
             color: {_warna_tema(is_dark, "#9ca3af", "#64748b")};
-            font-size: {sz_base}px;
-            font-weight: bold;
+            font-size: {UKURAN_FONT_LABEL}px;
+            font-weight: 500;
             font-family: '{get_master_font()}';
         """,
         "lbl_histori_title": f"""
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
-            font-size: {sz_base}px;
-            font-weight: bold;
+            color: {ui["text_primary"]};
+            font-size: {UKURAN_FONT_HISTORI_RESI}px;
+            font-weight: 500;
             font-family: '{get_master_font()}';
         """,
         "txt_resi_display": f"""
-            background-color: {_warna_tema(is_dark, "#1d2024", "#fef2f2")};
-            border: 2px solid {_warna_tema(is_dark, "#3b82f6", "#ef4444")};
+            background-color: {_warna_tema(is_dark, "#1d2024", "#F2FCFF")};
+            border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#3b82f6")};
             border-radius: 6px;
             padding: 6px 12px;
-            color: {_warna_tema(is_dark, "#fbbf24", "#b91c1c")};
-            font-weight: bold;
+            color: {_warna_tema(is_dark, "#fbbf24", "#3b82f6")};
+            font-weight: 500;
             font-size: {sz_total}px;
             letter-spacing: 1px;
             font-family: '{get_master_font()}';
         """,
         "date_input": f"""
             QDateEdit {{
-                font-size: {sz_input}px;
+                font-size: {UKURAN_FONT_INPUT}px;
                 font-family: '{get_master_font()}';
                 padding: 2px 10px;
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 4px;
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+                background-color: {ui["field_background"]};
+                color: {ui["text_primary"]};
             }}
         """,
         "list_histori": f"""
             QListWidget {{
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+                background-color: {ui["field_background"]};
                 color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 6px;
                 padding: 5px;
-                font-size: {sz_base}px;
+                font-size: {UKURAN_FONT_HISTORI_RESI}px;
                 font-family: '{get_master_font()}';
             }}
             QListWidget::item {{
-                padding: {6 + (z // 2)}px;
+                padding: 6px;
             }}
         """,
         "txt_search": f"""
             QLineEdit {{
-                font-size: {sz_input}px;
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+                font-size: {UKURAN_FONT_INPUT}px;
+                background-color: {ui["field_background"]};
+                color: {ui["text_primary"]};
                 placeholder-text-color: {placeholder};
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 4px;
                 padding: 6px;
                 font-family: '{get_master_font()}';
@@ -315,7 +318,7 @@ def get_resi_styles(
             QPushButton {{
                 background-color: #ef4444;
                 color: white;
-                font-weight: bold;
+                font-weight: 500;
                 border-radius: 4px;
                 padding: 4px;
                 font-size: {sz_sm}px;
@@ -338,11 +341,11 @@ def get_resi_styles(
             QPushButton {{
                 font-size: {sz_base}px;
                 background-color: {_warna_tema(is_dark, "#31353d", "#ffffff")};
-                color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
-                border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
+                color: {ui["selection_background"]};
+                border: 1px solid {ui["selection_background"]};
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: 500;
                 font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
@@ -360,7 +363,7 @@ def get_resi_styles(
                 border: 1px solid {_warna_tema(is_dark, "#4c525e", "#fca5a5")};
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: 500;
                 font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
@@ -374,12 +377,12 @@ def get_resi_styles(
         """,
         "txt_total_ongkir": f"""
             QLineEdit {{
-                font-size: {sz_total}px;
-                font-weight: bold;
-                color: {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
+                font-size: {UKURAN_FONT_TOTAL_ONGKIR}px;
+                font-weight: 500;
+                color: {ui["selection_background"]};
                 placeholder-text-color: {placeholder};
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                background-color: {ui["field_background"]};
+                border: 1px solid {ui["field_border"]};
                 padding: 6px;
                 font-family: '{get_master_font()}';
             }}
@@ -413,6 +416,7 @@ def get_resi_styles(
 
 def get_btn_clear_container_style(is_dark: bool = False) -> str:
     """Style QToolButton reset/clear container khusus untuk Tab Resi."""
+    ui = get_theme_colors(is_dark)["ui"]
     return f"""
         QToolButton {{
             color: {_warna_tema(is_dark, "#d1d5db", "#808d8b")};
@@ -435,7 +439,7 @@ def get_btn_clear_container_style(is_dark: bool = False) -> str:
             padding-top: 2px;
         }}
         QToolTip {{
-            background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
+            background-color: {ui["field_background"]};
             color: {_warna_tema(is_dark, "#ffffff", "#000000")};
             border: 1px solid {_warna_tema(is_dark, "#4c525e", "#d1d5db")};
             padding: 2px 5px;

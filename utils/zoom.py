@@ -1,8 +1,16 @@
 # utils/zoom.py
-"""Helper zoom UI global untuk aplikasi PySide6.
+"""Helper zoom khusus tabel untuk aplikasi PySide6.
 
-Menyimpan level zoom, menskalakan font/geometri/icon/layout/item-view, dan
-menjaga nilai dasar agar perubahan zoom tidak menumpuk.
+Arsitektur saat ini:
+- level zoom tetap disimpan per tab melalui QSettings;
+- zoom TIDAK mengubah QWidget umum, input, QComboBox, tombol, ikon toolbar,
+  layout, margin, spacing, atau padding form;
+- helper ini hanya menangani elemen QTableView/QTableWidget seperti font tabel,
+  tinggi baris/header, lebar kolom, dan sinkronisasi frozen table;
+- geometry tabel menggabungkan responsive screen scale dengan zoom manual user,
+  sedangkan font tabel tetap mengikuti level zoom manual.
+
+Style warna/tema tetap menjadi tanggung jawab themes/modules masing-masing tab.
 """
 
 from dataclasses import dataclass
@@ -10,43 +18,57 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QSettings, QSignalBlocker, QSize, QTimer
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QApplication, QComboBox, QDateEdit,
-    QDateTimeEdit, QDoubleSpinBox, QGridLayout, QGroupBox, QHeaderView, QLayout,
-    QLineEdit, QListView, QListWidget, QMenu, QMenuBar, QPlainTextEdit,
-    QProgressBar, QPushButton, QSpinBox, QTableView, QTableWidget, QTabWidget,
-    QTextEdit, QTimeEdit, QToolBar, QToolButton, QTreeView, QTreeWidget, QWidget,
+    QApplication,
+    QAbstractItemView,
+    QHeaderView,
+    QTableView,
+    QWidget,
 )
 
 from utils import typography
+from utils.ui_metrics import dapatkan_ui_scale, skalakan_px
 
-ORGANIZATION_NAME = "AplikasiEkspedisi"
-APPLICATION_NAME = "PengaturanUI"
-MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL = -4, 10
-DEFAULT_ICON_SIZE = 18
+
+# Gunakan identitas QSettings yang sama dengan aplikasi utama.
+ORGANIZATION_NAME = str(
+    getattr(typography, "ORGANIZATION_NAME", "AplikasiEkspedisi")
+    or "AplikasiEkspedisi"
+)
+APPLICATION_NAME = str(
+    getattr(typography, "APPLICATION_NAME", "PengaturanUI")
+    or "PengaturanUI"
+)
+
+MIN_ZOOM_LEVEL = -4
+MAX_ZOOM_LEVEL = 10
+
 DEFAULT_TABLE_ROW_HEIGHT = 32
 DEFAULT_TABLE_HEADER_HEIGHT = 36
+DEFAULT_TABLE_ICON_SIZE = 18
 
 QT_GEOMETRY_MAX = 16_777_215
 MAX_COLUMN_WIDTH = 100_000
 MAX_FONT_SIZE = 96
-MAX_ICON_BASE_SIZE = 256
 MAX_ICON_RENDER_SIZE = 512
 
-_INPUT_WIDGETS = (QLineEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QDateTimeEdit, QTimeEdit)
-_ZOOM_INPUT_WIDGETS = _INPUT_WIDGETS + (QTextEdit, QPlainTextEdit, QComboBox)
-_SINGLE_LINE_WIDGETS = (QAbstractButton, QComboBox, QProgressBar) + _INPUT_WIDGETS
-_ITEM_VIEW_WIDGETS = (QTableWidget, QTableView, QTreeWidget, QTreeView, QListWidget, QListView)
+# QTableWidget adalah subclass QTableView, jadi otomatis tercakup.
+_TABLE_VIEW_TYPES = (QTableView,)
 
 settings_ui = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
 
 
-def _int_aman(value: Any, default: int = 0, minimum: Optional[int] = None,
-              maximum: Optional[int] = None) -> int:
+def _int_aman(
+    value: Any,
+    default: int = 0,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
     """Konversi int defensif sebelum nilai diteruskan ke Qt/C++."""
     try:
         hasil = int(value)
     except (TypeError, ValueError, OverflowError):
         hasil = int(default)
+
     if minimum is not None:
         hasil = max(int(minimum), hasil)
     if maximum is not None:
@@ -54,13 +76,18 @@ def _int_aman(value: Any, default: int = 0, minimum: Optional[int] = None,
     return hasil
 
 
-def _float_aman(value: Any, default: float = 0.0, minimum: Optional[float] = None,
-                maximum: Optional[float] = None) -> float:
-    """Konversi float defensif untuk ukuran font dan metrik UI."""
+def _float_aman(
+    value: Any,
+    default: float = 0.0,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    """Konversi float defensif untuk ukuran font dan faktor zoom."""
     try:
         hasil = float(value)
     except (TypeError, ValueError, OverflowError):
         hasil = float(default)
+
     if minimum is not None:
         hasil = max(float(minimum), hasil)
     if maximum is not None:
@@ -69,7 +96,12 @@ def _float_aman(value: Any, default: float = 0.0, minimum: Optional[float] = Non
 
 
 def batasi_ukuran_font(value: Any, default: float = 9.0) -> float:
-    minimum = _float_aman(getattr(typography, "MIN_FONT_SIZE_PT", 6.0), 6.0, 1.0, 32.0)
+    minimum = _float_aman(
+        getattr(typography, "MIN_FONT_SIZE_PT", 6.0),
+        6.0,
+        1.0,
+        32.0,
+    )
     return _float_aman(value, default, minimum, float(MAX_FONT_SIZE))
 
 
@@ -78,11 +110,41 @@ def _batasi_zoom(z: Any) -> int:
 
 
 def _faktor_zoom(z: Any) -> float:
+    """Faktor historis aplikasi: +8% per level, dibatasi 0.68..1.80."""
     return max(0.68, min(1.0 + (_batasi_zoom(z) * 0.08), 1.80))
 
 
-def _skalakan(nilai: Any, z: Any, minimum: int = 0,
-              maximum: int = QT_GEOMETRY_MAX) -> int:
+def dapatkan_faktor_zoom(z: Any) -> float:
+    """Faktor zoom manual tabel, tanpa responsive screen scale."""
+    return _faktor_zoom(z)
+
+
+def dapatkan_faktor_geometri(z: Any) -> float:
+    """Faktor geometry tabel = responsive screen scale × zoom manual."""
+    return dapatkan_ui_scale() * _faktor_zoom(z)
+
+
+def _skalakan(
+    nilai: Any,
+    z: Any,
+    minimum: int = 0,
+    maximum: int = QT_GEOMETRY_MAX,
+) -> int:
+    angka = _int_aman(nilai, minimum, minimum, maximum)
+    try:
+        hasil = round(angka * dapatkan_faktor_geometri(z))
+    except (TypeError, ValueError, OverflowError):
+        hasil = minimum
+    return _int_aman(hasil, minimum, minimum, maximum)
+
+
+def _skalakan_zoom_manual(
+    nilai: Any,
+    z: Any,
+    minimum: int = 0,
+    maximum: int = QT_GEOMETRY_MAX,
+) -> int:
+    """Scale untuk token QSS; responsive screen diterapkan ui_scaler."""
     angka = _int_aman(nilai, minimum, minimum, maximum)
     try:
         hasil = round(angka * _faktor_zoom(z))
@@ -93,6 +155,8 @@ def _skalakan(nilai: Any, z: Any, minimum: int = 0,
 
 @dataclass(frozen=True)
 class ZoomMetrics:
+    """Metrik zoom yang hanya relevan untuk tabel."""
+
     level: int
     factor: float
     font_base_pt: float
@@ -106,54 +170,42 @@ class ZoomMetrics:
 def dapatkan_metrik_zoom(z: Any) -> ZoomMetrics:
     level = _batasi_zoom(z)
     sizes = typography.get_global_font_sizes_pt(level)
+
     return ZoomMetrics(
         level=level,
-        factor=_faktor_zoom(level),
+        factor=dapatkan_faktor_geometri(level),
         font_base_pt=batasi_ukuran_font(sizes.get("sz_base", 9.0), 9.0),
         row_height=_skalakan(DEFAULT_TABLE_ROW_HEIGHT, level, 24, 10_000),
         header_height=_skalakan(DEFAULT_TABLE_HEADER_HEIGHT, level, 26, 10_000),
-        icon_size=_skalakan(DEFAULT_ICON_SIZE, level, 12, MAX_ICON_RENDER_SIZE),
+        icon_size=_skalakan(
+            DEFAULT_TABLE_ICON_SIZE,
+            level,
+            12,
+            MAX_ICON_RENDER_SIZE,
+        ),
         item_padding=max(2, 4 + level),
         header_padding_v=max(4, 6 + level),
     )
 
 
-def _ambil_atau_simpan_dasar(objek: Any, nama: str, nilai: Any) -> Any:
-    atribut = f"_zoom_base_{nama}"
-    if not hasattr(objek, atribut):
-        setattr(objek, atribut, nilai)
-    return getattr(objek, atribut)
+def dapatkan_zoom_level(class_name: str) -> int:
+    """Ambil level zoom yang tersimpan untuk satu tab/class."""
+    nama = str(class_name or "").strip()
+    if not nama:
+        return 0
+    return _batasi_zoom(settings_ui.value(f"zoom_{nama}", 0))
 
 
-def _qsize_icon_aman(objek: Any, nama_cache: str, ukuran_saat_ini: Any,
-                     default_size: int = DEFAULT_ICON_SIZE) -> QSize:
-    """Ambil ukuran dasar ikon dan normalisasi cache yang abnormal."""
-    atribut = f"_zoom_base_{nama_cache}"
-    kandidat = getattr(objek, atribut, ukuran_saat_ini)
-    try:
-        width, height = kandidat.width(), kandidat.height()
-    except (AttributeError, TypeError, RuntimeError):
-        width = height = default_size
+def simpan_zoom_level(class_name: str, zoom_level: int) -> int:
+    """Simpan level zoom untuk satu tab/class."""
+    nama = str(class_name or "").strip()
+    zoom = _batasi_zoom(zoom_level)
 
-    ukuran = QSize(
-        _int_aman(width, default_size, 1, MAX_ICON_BASE_SIZE),
-        _int_aman(height, default_size, 1, MAX_ICON_BASE_SIZE),
-    )
-    setattr(objek, atribut, ukuran)
-    return ukuran
+    if nama:
+        settings_ui.setValue(f"zoom_{nama}", zoom)
+        settings_ui.sync()
 
-
-def _ukuran_icon_terzoom(ukuran_dasar: QSize, faktor: float,
-                         minimum: int = 12) -> QSize:
-    try:
-        width = round(ukuran_dasar.width() * faktor)
-        height = round(ukuran_dasar.height() * faktor)
-    except (AttributeError, TypeError, ValueError, OverflowError):
-        width = height = DEFAULT_ICON_SIZE
-    return QSize(
-        _int_aman(width, DEFAULT_ICON_SIZE, minimum, MAX_ICON_RENDER_SIZE),
-        _int_aman(height, DEFAULT_ICON_SIZE, minimum, MAX_ICON_RENDER_SIZE),
-    )
+    return zoom
 
 
 def _master_font() -> str:
@@ -162,11 +214,13 @@ def _master_font() -> str:
         family = str(app.font().family() or "").strip()
         if family:
             return family
+
     getter = getattr(typography, "get_master_font", None)
     if callable(getter):
         family = str(getter() or "").strip()
         if family:
             return family
+
     return str(getattr(typography, "DEFAULT_FONT", "Roboto") or "Roboto")
 
 
@@ -174,47 +228,39 @@ def _font_family_qss() -> str:
     return _master_font().replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _ukuran_font_minimum() -> int:
-    return _int_aman(getattr(typography, "MIN_FONT_SIZE", 8), 8, 1, 32)
-
-
-def dapatkan_zoom_level(class_name: str) -> int:
-    nama = str(class_name or "").strip()
-    return _batasi_zoom(settings_ui.value(f"zoom_{nama}", 0))
-
-
-def simpan_zoom_level(class_name: str, zoom_level: int) -> int:
-    nama = str(class_name or "").strip()
-    zoom = _batasi_zoom(zoom_level)
-    settings_ui.setValue(f"zoom_{nama}", zoom)
-    settings_ui.sync()
-    return zoom
-
-
 def generate_font_zoom_tabel_qss(z: int = 0) -> str:
+    """QSS opsional khusus tipografi tabel; tidak mengubah warna tema."""
     metrics = dapatkan_metrik_zoom(z)
-    family, size_pt = _font_family_qss(), f"{metrics.font_base_pt:g}"
+    family = _font_family_qss()
+    size_pt = f"{metrics.font_base_pt:g}"
+
     return f"""
-QTableWidget, QTableView, QTreeWidget, QTreeView, QListWidget, QListView {{
-    font-family: '{family}'; font-size: {size_pt}pt;
+QTableWidget, QTableView {{
+    font-family: '{family}';
+    font-size: {size_pt}pt;
 }}
-QTableWidget::item, QTableView::item, QTreeWidget::item, QTreeView::item,
-QListWidget::item, QListView::item {{
-    font-family: '{family}'; font-size: {size_pt}pt;
+QTableWidget::item, QTableView::item {{
+    font-family: '{family}';
+    font-size: {size_pt}pt;
 }}
 QHeaderView, QHeaderView::section {{
-    font-family: '{family}'; font-size: {size_pt}pt;
+    font-family: '{family}';
+    font-size: {size_pt}pt;
 }}
-QHeaderView::section {{ font-weight: bold; }}
 """
 
 
 def generate_style_tabel(is_dark: bool, z: int = 0) -> str:
+    """Style visual tabel lama + tipografi zoom manual.
+
+    Geometry QSS tabel digabungkan langsung dengan responsive screen scale dan
+    zoom manual karena ``ui_scaler`` sengaja tidak memodifikasi item-view.
+    """
     zoom = _batasi_zoom(z)
-    item_pad = max(2, 4 + zoom)
-    header_v = max(4, 6 + zoom)
-    header_h = max(6, 8 + (zoom * 2))
-    indicator = _skalakan(16, zoom, minimum=12)
+    item_pad = skalakan_px(max(2, 4 + zoom), minimum=2)
+    header_v = skalakan_px(max(4, 6 + zoom), minimum=3)
+    header_h = skalakan_px(max(6, 8 + (zoom * 2)), minimum=5)
+    indicator = _skalakan(16, zoom, minimum=10)
 
     if is_dark:
         bg, alt_bg, text, grid = "#1a1d24", "#20242b", "#f8fafc", "#334155"
@@ -224,19 +270,16 @@ def generate_style_tabel(is_dark: bool, z: int = 0) -> str:
         header_bg, header_text, selected_bg = "#243752", "#ffffff", "#2563eb"
 
     visual = f"""
-QTableWidget, QTableView, QTreeWidget, QTreeView, QListWidget, QListView {{
+QTableWidget, QTableView {{
     background-color: {bg}; alternate-background-color: {alt_bg}; color: {text};
     gridline-color: {grid}; border: 1px solid {grid};
 }}
-QTableWidget::item, QTableView::item, QTreeWidget::item, QTreeView::item,
-QListWidget::item, QListView::item {{ padding: {item_pad}px; }}
+QTableWidget::item, QTableView::item {{ padding: {item_pad}px; }}
 QHeaderView::section {{
     background-color: {header_bg}; color: {header_text}; border: 1px solid {grid};
     padding: {header_v}px {header_h}px;
 }}
-QTableWidget::item:selected, QTableView::item:selected,
-QTreeWidget::item:selected, QTreeView::item:selected,
-QListWidget::item:selected, QListView::item:selected {{
+QTableWidget::item:selected, QTableView::item:selected {{
     background-color: {selected_bg}; color: #ffffff;
 }}
 QCheckBox::indicator, QRadioButton::indicator {{
@@ -246,136 +289,66 @@ QCheckBox::indicator, QRadioButton::indicator {{
     return f"{visual}\n{generate_font_zoom_tabel_qss(zoom)}"
 
 
-def _pasang_stylesheet_zoom(widget: QWidget, qss_zoom: str) -> None:
-    if not hasattr(widget, "_zoom_base_stylesheet"):
-        widget._zoom_base_stylesheet = widget.styleSheet()
-    dasar = getattr(widget, "_zoom_base_stylesheet", "")
-    widget.setStyleSheet(f"{dasar}\n/* ZOOM OTOMATIS */\n{qss_zoom}" if dasar else qss_zoom)
-
-
-def _terapkan_font(widget: QWidget, z: int, key_ukuran: str) -> None:
-    sizes = typography.get_global_font_sizes_pt(z)
-    key_ukuran = str(widget.property("zoom_font_key") or key_ukuran)
-    ukuran = batasi_ukuran_font(sizes.get(key_ukuran, 9.0), 9.0)
-
-    font = widget.font()
-    font.setFamily(_master_font())
-    font.setPointSizeF(ukuran)
-    widget.setFont(font)
-
-    if isinstance(widget, QComboBox):
-        view = widget.view()
-        if view is not None:
-            view.setFont(font)
-
-
-def _terapkan_icon(widget: QWidget, z: int) -> None:
-    faktor = _faktor_zoom(z)
-    if isinstance(widget, (QAbstractButton, QComboBox)):
-        dasar = _qsize_icon_aman(widget, "icon_size", widget.iconSize(), DEFAULT_ICON_SIZE)
-        widget.setIconSize(_ukuran_icon_terzoom(dasar, faktor, 12))
-    elif isinstance(widget, QToolBar):
-        dasar = _qsize_icon_aman(widget, "toolbar_icon_size", widget.iconSize(), 24)
-        widget.setIconSize(_ukuran_icon_terzoom(dasar, faktor, 14))
-    elif isinstance(widget, QTabWidget):
-        bar = widget.tabBar()
-        dasar = _qsize_icon_aman(bar, "icon_size", bar.iconSize(), DEFAULT_ICON_SIZE)
-        bar.setIconSize(_ukuran_icon_terzoom(dasar, faktor, 12))
-
-
-def _terapkan_tinggi_widget(widget: QWidget, z: int) -> None:
-    if not isinstance(widget, _SINGLE_LINE_WIDGETS):
-        return
-
-    min_lama, max_lama = widget.minimumHeight(), widget.maximumHeight()
-    if isinstance(widget, QComboBox):
-        tinggi_default = 30
-    elif isinstance(widget, _INPUT_WIDGETS):
-        tinggi_default = 42
-    else:
-        tinggi_default = max(min_lama, widget.sizeHint().height(), 24)
-
-    dasar = _ambil_atau_simpan_dasar(widget, "minimum_height", tinggi_default)
-    fixed = _ambil_atau_simpan_dasar(
-        widget, "fixed_height", max_lama < QT_GEOMETRY_MAX and max_lama == min_lama
-    )
-    tinggi = _skalakan(dasar, z, minimum=20)
-    widget.setMinimumHeight(tinggi)
-    if fixed:
-        widget.setMaximumHeight(tinggi)
-
-
-def _terapkan_padding(widget: QWidget, z: int) -> None:
-    zoom = _batasi_zoom(z)
-    kecil = max(2, 4 + zoom)
-    vertikal = max(3, 5 + zoom)
-    horizontal = max(5, 8 + (zoom * 2))
-    radius = max(2, 4 + (zoom // 2))
-
-    if isinstance(widget, (QPushButton, QToolButton)):
-        qss = f"QPushButton, QToolButton {{ padding:{vertikal}px {horizontal}px; border-radius:{radius}px; }}"
-    elif isinstance(widget, _INPUT_WIDGETS):
-        qss = ("QLineEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QDateTimeEdit, QTimeEdit "
-               f"{{ padding:{kecil}px {horizontal}px; }}")
-    elif isinstance(widget, (QTextEdit, QPlainTextEdit)):
-        qss = f"QTextEdit, QPlainTextEdit {{ padding:{kecil}px; }}"
-    elif isinstance(widget, QTabWidget):
-        qss = f"QTabBar::tab {{ padding:{vertikal}px {horizontal}px; }}"
-    elif isinstance(widget, QMenuBar):
-        qss = f"QMenuBar::item {{ padding:{vertikal}px {horizontal}px; }}"
-    elif isinstance(widget, QMenu):
-        qss = f"QMenu::item {{ padding:{vertikal}px {horizontal * 2}px; }}"
-    elif isinstance(widget, QGroupBox):
-        margin_top = max(8, 12 + (zoom * 2))
-        qss = (f"QGroupBox {{ margin-top:{margin_top}px; }} "
-               f"QGroupBox::title {{ padding:0 {kecil}px; }}")
-    else:
-        return
-    _pasang_stylesheet_zoom(widget, qss)
-
-
-def terapkan_zoom_widget_standar(widget: QWidget, z: int,
-                                  key_ukuran: str = "sz_base") -> None:
-    if widget is None:
-        return
-    zoom = _batasi_zoom(z)
-    _terapkan_font(widget, zoom, key_ukuran)
-    _terapkan_icon(widget, zoom)
-    _terapkan_tinggi_widget(widget, zoom)
-    _terapkan_padding(widget, zoom)
-
-    lebar_dasar = widget.property("base_width")
-    if lebar_dasar is not None:
-        lebar_dasar = _int_aman(lebar_dasar, 140, 100, MAX_COLUMN_WIDTH)
-        widget.setFixedWidth(_skalakan(lebar_dasar, zoom, 140, MAX_COLUMN_WIDTH))
+def _ambil_atau_simpan_dasar(objek: Any, nama: str, nilai: Any) -> Any:
+    atribut = f"_zoom_base_{nama}"
+    if not hasattr(objek, atribut):
+        setattr(objek, atribut, nilai)
+    return getattr(objek, atribut)
 
 
 def _skalakan_kolom(view: Any, header: QHeaderView, z: int) -> None:
-    """Implementasi bersama untuk kolom QTableView/QTreeView."""
+    """Menskalakan lebar kolom dari cache lebar dasar, bukan hasil zoom terakhir."""
+    if view is None or header is None:
+        return
+
     model = view.model()
     if model is None:
         return
 
     cache = getattr(view, "_zoom_base_column_widths", None)
-    if cache is None:
-        cache = view._zoom_base_column_widths = {}
+    if not isinstance(cache, dict):
+        cache = {}
+        view._zoom_base_column_widths = cache
 
     for kolom in range(model.columnCount()):
-        cache.setdefault(kolom, view.columnWidth(kolom))
-        dasar = _int_aman(cache[kolom], max(20, view.columnWidth(kolom)), 20, MAX_COLUMN_WIDTH)
+        lebar_saat_ini = max(20, int(view.columnWidth(kolom)))
+
+        if kolom not in cache:
+            cache[kolom] = lebar_saat_ini
+
+        dasar = _int_aman(
+            cache.get(kolom),
+            lebar_saat_ini,
+            20,
+            MAX_COLUMN_WIDTH,
+        )
         cache[kolom] = dasar
-        if header.sectionResizeMode(kolom) != QHeaderView.ResizeMode.Stretch:
-            view.setColumnWidth(kolom, _skalakan(dasar, z, 20, MAX_COLUMN_WIDTH))
 
+        if header.sectionResizeMode(kolom) == QHeaderView.ResizeMode.Stretch:
+            continue
 
-def _skalakan_kolom_tableview(table: QTableView, z: int) -> None:
-    if table.property("zoom_scale_columns") is False:
-        return
-    _skalakan_kolom(table, table.horizontalHeader(), z)
+        view.setColumnWidth(
+            kolom,
+            _skalakan(dasar, z, 20, MAX_COLUMN_WIDTH),
+        )
 
 
 def skalakan_kolom_tableview(table: QTableView, z: int) -> None:
-    _skalakan_kolom_tableview(table, z)
+    """API publik untuk menskalakan kolom QTableView/QTableWidget saja."""
+    if table is None or not isinstance(table, QTableView):
+        return
+    if table.property("zoom_scale_columns") is False:
+        return
+
+    _skalakan_kolom(table, table.horizontalHeader(), _batasi_zoom(z))
+
+
+def reset_cache_lebar_kolom(table: QTableView) -> None:
+    """Hapus cache lebar dasar bila struktur/lebar dasar tabel diinisialisasi ulang."""
+    if table is None:
+        return
+    if hasattr(table, "_zoom_base_column_widths"):
+        delattr(table, "_zoom_base_column_widths")
 
 
 def _panggil_metode_jika_tersedia(objek: Any, *nama_metode: str) -> bool:
@@ -388,52 +361,78 @@ def _panggil_metode_jika_tersedia(objek: Any, *nama_metode: str) -> bool:
 
 
 def _sinkronkan_frozen_sekarang(table: QTableView) -> None:
+    if table is None:
+        return
+
     try:
         frozen = getattr(table, "frozen_table", None)
+
         _panggil_metode_jika_tersedia(
-            table, "updateFrozenTableGeometry", "update_frozen_table_geometry",
-            "_update_frozen_table_geometry", "perbarui_geometri_frozen",
+            table,
+            "updateFrozenTableGeometry",
+            "update_frozen_table_geometry",
+            "_update_frozen_table_geometry",
+            "perbarui_geometri_frozen",
         )
+
         table.doItemsLayout()
         table.updateGeometries()
+
         if frozen is not None:
             frozen.doItemsLayout()
             frozen.updateGeometries()
-            frozen.verticalScrollBar().setValue(table.verticalScrollBar().value())
+            frozen.verticalScrollBar().setValue(
+                table.verticalScrollBar().value()
+            )
             frozen.raise_()
+
         table.viewport().update()
         table.update()
+
         if frozen is not None:
             frozen.viewport().update()
             frozen.update()
+
     except RuntimeError:
+        # Widget mungkin sudah dihancurkan ketika aplikasi ditutup.
         return
 
 
-def sinkronkan_frozen_table(table: QTableView, *, tertunda: bool = True) -> None:
+def sinkronkan_frozen_table(
+    table: QTableView,
+    *,
+    tertunda: bool = True,
+) -> None:
+    """Sinkronkan geometri frozen table tanpa menyentuh widget di luar tabel."""
     if table is None:
         return
+
     _sinkronkan_frozen_sekarang(table)
+
     if tertunda:
-        QTimer.singleShot(0, lambda table=table: _sinkronkan_frozen_sekarang(table))
+        QTimer.singleShot(
+            0,
+            lambda table=table: _sinkronkan_frozen_sekarang(table),
+        )
 
 
-def _skalakan_kolom_treeview(tree: QTreeView, z: int) -> None:
-    if tree.model() is None:
-        return
-    _skalakan_kolom(tree, tree.header(), z)
-    dasar = _ambil_atau_simpan_dasar(tree, "indentation", max(10, tree.indentation()))
-    tree.setIndentation(_skalakan(dasar, z, minimum=8))
-
-
-def skalakan_kolom_treeview(tree: QTreeView, z: int) -> None:
-    _skalakan_kolom_treeview(tree, z)
-
-
-def _tinggi_view(font_height: Any, dasar: int, padding: int, minimum: int) -> int:
+def _tinggi_view(
+    font_height: Any,
+    dasar: int,
+    padding: int,
+    minimum: int,
+) -> int:
+    padding_responsive = skalakan_px(padding, minimum=1)
+    ekstra_responsive = skalakan_px(8, minimum=4)
+    minimum_responsive = skalakan_px(minimum, minimum=18)
     return _int_aman(
-        max(dasar, max(1, int(font_height)) + (padding * 2) + 8),
-        dasar, minimum, 10_000,
+        max(
+            dasar,
+            max(1, int(font_height)) + (padding_responsive * 2) + ekstra_responsive,
+        ),
+        dasar,
+        minimum_responsive,
+        10_000,
     )
 
 
@@ -445,42 +444,66 @@ def _header_font(header: QHeaderView, metrics: ZoomMetrics):
     return font
 
 
-def terapkan_zoom_tabel(table: QAbstractItemView, is_dark: bool, z: int = 0) -> None:
-    if table is None:
+def _terapkan_font_item_view(view: QAbstractItemView, metrics: ZoomMetrics) -> None:
+    font = view.font()
+    font.setFamily(_master_font())
+    font.setPointSizeF(metrics.font_base_pt)
+    view.setFont(font)
+    view.setIconSize(QSize(metrics.icon_size, metrics.icon_size))
+
+
+def terapkan_zoom_tabel(
+    table: QAbstractItemView,
+    is_dark: bool = False,
+    z: int = 0,
+) -> None:
+    """Terapkan zoom hanya pada QTableView/QTableWidget yang diberikan.
+
+    Fungsi ini TIDAK mengubah stylesheet warna/theme. ``is_dark`` hanya
+    dipertahankan demi kompatibilitas signature lama.
+    """
+    if table is None or not isinstance(table, _TABLE_VIEW_TYPES):
         return
 
     metrics = dapatkan_metrik_zoom(z)
     frozen = getattr(table, "frozen_table", None)
+
     table.setUpdatesEnabled(False)
     if frozen is not None:
         frozen.setUpdatesEnabled(False)
 
     try:
         table.setStyleSheet(generate_style_tabel(is_dark, metrics.level))
-        font = table.font()
-        font.setFamily(_master_font())
-        font.setPointSizeF(metrics.font_base_pt)
-        table.setFont(font)
-        table.setIconSize(QSize(metrics.icon_size, metrics.icon_size))
+        _terapkan_font_item_view(table, metrics)
 
         if isinstance(table, QTableView):
-            h_header, v_header = table.horizontalHeader(), table.verticalHeader()
+            h_header = table.horizontalHeader()
+            v_header = table.verticalHeader()
             header_font = _header_font(h_header, metrics)
+
             h_header.setFont(header_font)
             v_header.setFont(header_font)
 
             row_height = _tinggi_view(
-                table.fontMetrics().height(), metrics.row_height, metrics.item_padding, 24
+                table.fontMetrics().height(),
+                metrics.row_height,
+                metrics.item_padding,
+                24,
             )
             header_height = _tinggi_view(
-                h_header.fontMetrics().height(), metrics.header_height,
-                metrics.header_padding_v, 26,
+                h_header.fontMetrics().height(),
+                metrics.header_height,
+                metrics.header_padding_v,
+                26,
             )
+
             if h_header.maximumHeight() < header_height:
                 h_header.setMaximumHeight(QT_GEOMETRY_MAX)
+
             h_header.setMinimumHeight(header_height)
             v_header.setMinimumSectionSize(row_height)
             v_header.setDefaultSectionSize(row_height)
+
             table._zoom_current_row_height = row_height
             table._zoom_current_header_height = header_height
 
@@ -496,99 +519,53 @@ def terapkan_zoom_tabel(table: QAbstractItemView, is_dark: bool, z: int = 0) -> 
                     table.setRowHeight(row, row_height)
 
             if frozen is not None:
-                frozen.setFont(font)
+                _terapkan_font_item_view(frozen, metrics)
                 frozen.horizontalHeader().setFont(header_font)
                 frozen.verticalHeader().setFont(header_font)
                 frozen.verticalHeader().setMinimumSectionSize(row_height)
                 frozen.verticalHeader().setDefaultSectionSize(row_height)
+
                 if model is not None:
                     for row in range(model.rowCount()):
                         frozen.setRowHeight(row, row_height)
 
-        elif isinstance(table, QTreeView):
-            header = table.header()
-            header.setFont(_header_font(header, metrics))
-            header.setMinimumHeight(_tinggi_view(
-                header.fontMetrics().height(), metrics.header_height,
-                metrics.header_padding_v, 26,
-            ))
-            skalakan_kolom_treeview(table, metrics.level)
 
-        elif isinstance(table, QListView):
-            grid = table.gridSize()
-            if grid.isValid():
-                dasar = _ambil_atau_simpan_dasar(table, "grid_size", grid)
-                table.setGridSize(QSize(
-                    _skalakan(dasar.width(), metrics.level, minimum=20),
-                    _skalakan(dasar.height(), metrics.level, minimum=20),
-                ))
     finally:
         if frozen is not None:
             frozen.setUpdatesEnabled(True)
         table.setUpdatesEnabled(True)
+
         if isinstance(table, QTableView):
             sinkronkan_frozen_table(table, tertunda=True)
 
 
-def _terapkan_zoom_layout(layout: Optional[QLayout], z: int) -> None:
-    if layout is None:
-        return
-
-    margins = layout.contentsMargins()
-    dasar_margin = _ambil_atau_simpan_dasar(
-        layout, "layout_margins",
-        (margins.left(), margins.top(), margins.right(), margins.bottom()),
-    )
-    layout.setContentsMargins(*[_skalakan(v, z, minimum=0) for v in dasar_margin])
-
-    spacing = layout.spacing()
-    dasar_spacing = _ambil_atau_simpan_dasar(layout, "layout_spacing", spacing)
-    if dasar_spacing >= 0:
-        layout.setSpacing(_skalakan(dasar_spacing, z, minimum=0))
-
-    if isinstance(layout, QGridLayout):
-        h_spacing = _ambil_atau_simpan_dasar(layout, "horizontal_spacing", layout.horizontalSpacing())
-        v_spacing = _ambil_atau_simpan_dasar(layout, "vertical_spacing", layout.verticalSpacing())
-        if h_spacing >= 0:
-            layout.setHorizontalSpacing(_skalakan(h_spacing, z, minimum=0))
-        if v_spacing >= 0:
-            layout.setVerticalSpacing(_skalakan(v_spacing, z, minimum=0))
-
-    for index in range(layout.count()):
-        child = layout.itemAt(index).layout()
-        if child is not None:
-            _terapkan_zoom_layout(child, z)
-
-
-def terapkan_zoom_semua_elemen(container_widget: QWidget, z: int,
-                                is_dark: bool = False) -> None:
+def _tabel_utama_dalam_container(container_widget: QWidget) -> list[QTableView]:
+    """Ambil QTableView utama dan abaikan frozen child agar tidak di-zoom dua kali."""
     if container_widget is None:
-        return
+        return []
 
-    zoom = _batasi_zoom(z)
-    _terapkan_zoom_layout(container_widget.layout(), zoom)
-    semua_widget = [container_widget, *container_widget.findChildren(QWidget)]
+    kandidat: list[QTableView] = []
 
-    for widget in semua_widget:
-        if hasattr(widget, "_zoom_base_stylesheet"):
-            try:
-                widget.setStyleSheet(widget._zoom_base_stylesheet)
-            except Exception:
-                pass
+    if isinstance(container_widget, QTableView):
+        kandidat.append(container_widget)
 
-        if isinstance(widget, _ITEM_VIEW_WIDGETS):
-            if hasattr(widget, "_zoom_base_stylesheet"):
-                delattr(widget, "_zoom_base_stylesheet")
-            terapkan_zoom_tabel(widget, is_dark, zoom)
+    kandidat.extend(container_widget.findChildren(QTableView))
+
+    frozen_ids = {
+        id(frozen)
+        for tabel in kandidat
+        for frozen in (getattr(tabel, "frozen_table", None),)
+        if frozen is not None
+    }
+
+    hasil: list[QTableView] = []
+    sudah = set()
+
+    for tabel in kandidat:
+        identitas = id(tabel)
+        if identitas in sudah or identitas in frozen_ids:
             continue
+        sudah.add(identitas)
+        hasil.append(tabel)
 
-        key = "sz_input" if isinstance(widget, _ZOOM_INPUT_WIDGETS) else "sz_base"
-        terapkan_zoom_widget_standar(widget, zoom, key)
-
-    if hasattr(container_widget, "updateGeometry"):
-        container_widget.updateGeometry()
-
-
-def terapkan_zoom_ke_seluruh_ui(container_widget: QWidget, z: int,
-                                 is_dark: bool = False) -> None:
-    terapkan_zoom_semua_elemen(container_widget, z, is_dark)
+    return hasil

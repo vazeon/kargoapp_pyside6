@@ -3,21 +3,13 @@ from __future__ import annotations
 
 from typing import Dict
 
-from PySide6.QtGui import QPalette
-
-from themes.palette import get_theme_palette
+from themes.colors import get_theme_colors
 from utils.typography import get_master_font
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
-    """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
+    """Pilih warna khusus modul yang memang berbeda antara tema gelap/terang."""
     return gelap if is_dark else terang
-
-
-def _warna_placeholder(is_dark: bool) -> str:
-    """Ambil warna placeholder langsung dari themes/palette.py."""
-    palette = get_theme_palette(is_dark)
-    return palette.color(QPalette.ColorRole.PlaceholderText).name()
 
 
 def get_invoice_dialog_styles(size_total: int) -> Dict[str, str]:
@@ -39,93 +31,51 @@ def get_invoice_styles(
     size_total: int,
 ) -> Dict[str, str]:
     """Menghasilkan seluruh style UI Invoice berdasarkan tema dan zoom."""
-    placeholder = _warna_placeholder(is_dark)
-    if is_dark:
-        history_qss = f"""
-            QTableWidget {{
-                background:#1a1d24;
-                alternate-background:#20242b;
-                color:#f8fafc;
-                gridline-color:#334155;
-                font-size:{size_base}px;
-                font-family:'{get_master_font()}';
-            }}
-            QHeaderView::section {{
-                background:#1e293b;
-                color:#f8fafc;
-                border:1px solid #334155;
-                font-weight:bold;
-                padding:7px;
-            }}
-            QTableWidget::item:selected {{
-                background:#3b82f6;
-                color:white;
-            }}
-        """
-        editor_qss = f"""
-            QTableWidget {{
-                background:#1d2024;
-                alternate-background:#25282e;
-                color:#f8fafc;
-                gridline-color:#4c525e;
-                font-size:{size_base}px;
-                font-family:'{get_master_font()}';
-            }}
-            QHeaderView::section {{
-                background:#2563eb;
-                color:white;
-                border:1px solid #1d4ed8;
-                font-weight:bold;
-                padding:7px;
-            }}
-            QTableWidget::item:selected {{
-                background:#0ea5e9;
-                color:white;
-            }}
-        """
-    else:
-        history_qss = f"""
-            QTableWidget {{
-                background:white;
-                alternate-background:#f1f5f9;
-                color:#0f172a;
-                gridline-color:#e2e8f0;
-                font-size:{size_base}px;
-                font-family:'{get_master_font()}';
-            }}
-            QHeaderView::section {{
-                background:#243752;
-                color:white;
-                border:1px solid #cbd5e1;
-                font-weight:bold;
-                padding:7px;
-            }}
-            QTableWidget::item:selected {{
-                background:#2563eb;
-                color:white;
-            }}
-        """
-        editor_qss = f"""
-            QTableWidget {{
-                background:white;
-                alternate-background:#f8fafc;
-                color:#0f172a;
-                gridline-color:#cbd5e1;
-                font-size:{size_base}px;
-                font-family:'{get_master_font()}';
-            }}
-            QHeaderView::section {{
-                background:#2563eb;
-                color:white;
-                border:1px solid #1d4ed8;
-                font-weight:bold;
-                padding:7px;
-            }}
-            QTableWidget::item:selected {{
-                background:#bfdbfe;
-                color:#0f172a;
-            }}
-        """
+    ui = get_theme_colors(is_dark)["ui"]
+
+    history_qss = f"""
+        QTableWidget {{
+            background:{ui["table_background"]};
+            alternate-background:{ui["table_alternate_background"]};
+            color:{ui["table_text"]};
+            gridline-color:{ui["table_grid"]};
+            font-size:{size_base}px;
+            font-family:'{get_master_font()}';
+        }}
+        QHeaderView::section {{
+            background:{ui["table_header_background"]};
+            color:{_warna_tema(is_dark, "#f8fafc", "#ffffff")};
+            border:1px solid {_warna_tema(is_dark, "#334155", "#cbd5e1")};
+            font-weight:bold;
+            padding:7px;
+        }}
+        QTableWidget::item:selected {{
+            background:{ui["selection_background"]};
+            color:{ui["selection_text"]};
+        }}
+    """
+
+    editor_qss = f"""
+        QTableWidget {{
+            background:{ui["field_background"]};
+            alternate-background:{_warna_tema(is_dark, "#25282e", "#f8fafc")};
+            color:{ui["table_text"]};
+            gridline-color:{ui["field_border"]};
+            font-size:{size_base}px;
+            font-family:'{get_master_font()}';
+        }}
+        QHeaderView::section {{
+            background:#2563eb;
+            color:white;
+            border:1px solid #1d4ed8;
+            font-weight:bold;
+            padding:7px;
+        }}
+        QTableWidget::item:selected {{
+            background:{_warna_tema(is_dark, "#0ea5e9", "#bfdbfe")};
+            color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
+        }}
+    """
 
     button_qss = f"""
         QPushButton {{
@@ -155,13 +105,13 @@ def get_invoice_styles(
             font-size:{size_title}px;
             font-weight:bold;
             font-family:'{get_master_font()}';
-            color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color:{ui["text_primary"]};
         """,
         "lbl_title_editor": f"""
             font-size:{size_title + 1}px;
             font-weight:bold;
             font-family:'{get_master_font()}';
-            color:{_warna_tema(is_dark, "#60a5fa", "#2563eb")};
+            color:{ui["accent"]};
         """,
         "lbl_subtotal": f"""
             font-size:{size_base}px;
@@ -180,10 +130,10 @@ def get_invoice_styles(
             font-size:{size_input}px;
             font-family:'{get_master_font()}';
             padding:6px;
-            background:{_warna_tema(is_dark, "#1d2024", "#ffffff")};
-            color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
-            placeholder-text-color:{placeholder};
-            border:1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+            background:{ui["field_background"]};
+            color:{ui["text_primary"]};
+            placeholder-text-color:{ui["placeholder_text"]};
+            border:1px solid {ui["field_border"]};
             border-radius:4px;
         """,
         "tabel_histori": history_qss,
@@ -269,17 +219,15 @@ def get_invoice_styles(
                 }}
             """
         ),
-
         "menu_cetak": f"""
             QMenu {{
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                background-color: {ui["field_background"]};
+                color: {ui["text_primary"]};
+                border: 1px solid {ui["field_border"]};
             }}
             QMenu::item:selected {{
                 background-color: #2563eb;
                 color: white;
             }}
         """,
-
     }

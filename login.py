@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from config import DATA_CLIENT, CURRENT_SESSION
 from database_manager import init_db
 from utils.typography import get_global_font_sizes_pt
+from utils.ui_scaler import ResponsiveUIScaler
 
 
 class LoginWindow(QWidget):
@@ -27,6 +28,8 @@ class LoginWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.init_ui()
+        self._ui_scaler = ResponsiveUIScaler(self)
+        self._ui_scaler.apply_now()
         self.center_window()
 
     @staticmethod
@@ -90,10 +93,10 @@ class LoginWindow(QWidget):
     def _buat_card_login(self):
         card_widget = QWidget()
         card_widget.setObjectName("LoginCard")
-        card_widget.setFixedSize(360, 370)
+        card_widget.setFixedSize(360, 360)
         card_layout = QVBoxLayout(card_widget)
-        card_layout.setContentsMargins(25, 15, 25, 30)
-        card_layout.setSpacing(14)
+        card_layout.setContentsMargins(16, 16, 16, 24)
+        card_layout.setSpacing(16)
 
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(25)
@@ -104,7 +107,7 @@ class LoginWindow(QWidget):
         top_bar_layout = QHBoxLayout()
         top_bar_layout.setContentsMargins(0, 0, 0, 0)
         top_bar_layout.addStretch()
-        btn_close = QPushButton("×", card_widget)
+        btn_close = QPushButton("🞩", card_widget)
         btn_close.setObjectName("BtnCloseTop")
         btn_close.setFixedSize(28, 28)
         btn_close.clicked.connect(QApplication.instance().quit)

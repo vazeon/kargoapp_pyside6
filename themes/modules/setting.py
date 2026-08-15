@@ -1,7 +1,5 @@
 # themes/modules/setting.py
-from PySide6.QtGui import QPalette
-
-from themes.palette import get_theme_palette
+from themes.colors import get_theme_colors
 from utils.typography import get_master_font
 
 
@@ -10,19 +8,14 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     return gelap if is_dark else terang
 
 
-def _warna_placeholder(is_dark: bool) -> str:
-    """Ambil warna placeholder langsung dari themes/palette.py."""
-    palette = get_theme_palette(is_dark)
-    return palette.color(QPalette.ColorRole.PlaceholderText).name()
-
-
 def get_setting_styles(
     is_dark: bool,
     sz_base: int,
     sz_input: int,
     sz_title: int,
 ) -> dict:
-    placeholder = _warna_placeholder(is_dark)
+    ui = get_theme_colors(is_dark)["ui"]
+    placeholder = ui["placeholder_text"]
     return {
         'scroll_area': f"""
             QScrollArea {{
@@ -37,7 +30,7 @@ def get_setting_styles(
                 font-family: '{get_master_font()}';
                 color: {_warna_tema(is_dark, "#cbd5e1", "#0f172a")};
                 background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 10px;
                 margin-top: 22px;
                 padding-top: 22px;
@@ -65,10 +58,10 @@ def get_setting_styles(
                 padding: 8px 12px;
                 font-size: {sz_base}px;
                 font-family: '{get_master_font()}';
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 6px;
                 background-color: {_warna_tema(is_dark, "#20242b", "#f8fafc")};
-                color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
+                color: {ui["text_muted"]};
                 placeholder-text-color: {placeholder};
                 letter-spacing: 0.2px;
             }}
@@ -78,19 +71,19 @@ def get_setting_styles(
                 padding: 8px 12px;
                 font-size: {sz_input}px;
                 font-family: '{get_master_font()}';
-                border: 1px solid {_warna_tema(is_dark, "#4c525e", "#cbd5e1")};
+                border: 1px solid {ui["field_border"]};
                 border-radius: 6px;
-                background-color: {_warna_tema(is_dark, "#1d2024", "#ffffff")};
-                color: {_warna_tema(is_dark, "#f8fafc", "#0f172a")};
+                background-color: {ui["field_background"]};
+                color: {ui["table_text"]};
                 placeholder-text-color: {placeholder};
                 selection-background-color: #3b82f6;
             }}
             QLineEdit:focus, QTextEdit:focus {{
                 border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
-                background-color: {_warna_tema(is_dark, "#20242b", "#ffffff")};
+                background-color: {ui["field_focus_background"]};
             }}
             QLineEdit:disabled, QTextEdit:disabled {{
-                color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
+                color: {ui["text_muted"]};
                 background-color: {_warna_tema(is_dark, "#20242b", "#f8fafc")};
             }}
             QTextEdit {{
@@ -170,7 +163,7 @@ def get_setting_styles(
                 font-weight: bold;
                 font-size: {sz_title}px;
                 font-family: '{get_master_font()}';
-                color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+                color: {ui["text_primary"]};
                 background-color: transparent;
                 border: none;
                 margin-top: 10px;
@@ -185,10 +178,10 @@ def get_setting_styles(
             font-weight: bold;
             font-family: '{get_master_font()}';
             margin-bottom: 20px;
-            color: {_warna_tema(is_dark, "#ffffff", "#0f172a")};
+            color: {ui["text_primary"]};
         """,
         'lbl_hint': f"""
-            color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
+            color: {ui["text_muted"]};
             font-size: {sz_base - 1}px;
         """,
         'lbl_info_italic': """

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
     QDateEdit,
+    QDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -42,6 +44,8 @@ from themes.components.notification import FADE_NOTIFICATION_STYLE
 from themes.components.combobox import terapkan_popup_bawah_combobox
 from themes.components.calendar import terapkan_style_kalender
 from themes.modules.resi import (
+    UKURAN_FONT_HISTORI_RESI,
+    UKURAN_FONT_INPUT,
     get_btn_simpan_cetak_style,
     get_resi_detail_barang_theme,
     get_resi_rekening_styles,
@@ -52,10 +56,8 @@ from themes.modules.resi import (
 
 from utils.splitter_helper import buat_splitter
 from utils.printer.print_resi import cetak_resi_ke_printer
-from utils import zoom as zoom_helper
 from utils.date_ind_format import format_tanggal_ke_db, format_tanggal_ke_ui
 from utils.reset_form_helper import reset_form_input_global
-from utils.mixins import ZoomTableMixin
 from utils.number_formatters import (
     angka_indonesia_to_decimal,
     format_input_ribuan_gaya_indonesia,
@@ -63,6 +65,44 @@ from utils.number_formatters import (
     rupiah_to_int,
 )
 from utils.table_helper import buat_tabel_item
+from utils.ui_metrics import dapatkan_ui_scale, skalakan_px
+from utils.modules.resi_metrics import (
+    RESI_ACCOUNT_CARD_MARGINS,
+    RESI_ACCOUNT_CARD_SPACING,
+    RESI_ACCOUNT_CONTENT_MARGINS,
+    RESI_ACCOUNT_PANEL_MARGINS,
+    RESI_ACTION_RIGHT_LEFT_MARGIN,
+    RESI_ACTION_TOP_GAP,
+    RESI_AUDIT_DIALOG_SIZE,
+    RESI_AUDIT_HISTORY_SPACING,
+    RESI_AUTOCOMPLETE_MAX_VISIBLE_ITEMS,
+    RESI_CLEAR_BUTTON_SIZE,
+    RESI_DATE_INPUT_WIDTH,
+    RESI_DESTINATION_STRETCH,
+    RESI_DETAIL_CONTAINER_MIN_HEIGHT,
+    RESI_FINANCE_COLUMN_STRETCH,
+    RESI_FORM_CONTAINER_MARGINS,
+    RESI_HISTORY_DATE_WIDTH,
+    RESI_HISTORY_MARGINS,
+    RESI_HISTORY_MAX_WIDTH,
+    RESI_HISTORY_MIN_WIDTH,
+    RESI_HISTORY_RESET_WIDTH,
+    RESI_IDENTITY_COLUMN_STRETCH,
+    RESI_INPUT_HEIGHT,
+    RESI_ITEMS_COLUMN_MIN_WIDTH,
+    RESI_ITEMS_COLUMN_WIDTHS,
+    RESI_ITEMS_TABLE_MIN_HEIGHT,
+    RESI_NUMBER_DISPLAY_WIDTH,
+    RESI_PAGE_MARGINS,
+    RESI_PAYMENT_AREA_STRETCH,
+    RESI_SCROLL_LEFT_MAX_WIDTH,
+    RESI_SCROLL_LEFT_MIN_WIDTH,
+    RESI_SPACING,
+    RESI_SPLITTER_INITIAL_SIZES,
+    RESI_TABLE_CONTAINER_MARGINS,
+    RESI_TABLE_ROW_HEIGHT,
+    RESI_TOTAL_ONGKIR_HEIGHT,
+)
 from utils.typography import (
     APPLICATION_NAME,
     ORGANIZATION_NAME,
@@ -74,6 +114,7 @@ from utils.typography import (
 from utils.validators import UppercaseValidator, get_decimal_validator
 from utils.widget_helpers import (
     _blokir_signal_sementara,
+    atur_tinggi_input,
     paksa_kapital_lineedit,
 )
 
@@ -128,57 +169,16 @@ class FadeNotification(QWidget):
         self.anim.start()
 
 
-class _ResetButtonResizeWatcher(QWidget):
-    """Menjaga tombol reset tetap di kanan atas saat container berubah ukuran."""
 
-    def __init__(self, container, tombol):
-        super().__init__(container)
-        self._container = container
-        self._tombol = tombol
-        self.hide()
-
-    def eventFilter(self, watched, event):
-        if watched is self._container and event.type() in (
-            QEvent.Type.Resize,
-            QEvent.Type.Show,
-        ):
-            self._perbarui_posisi()
-
-        return False
-
-    def _perbarui_posisi(self):
-        if self._container is None or self._tombol is None:
-            return
-
-        self._tombol.move(
-            max(2, self._container.width() - self._tombol.width() - 4),
-            3,
-        )
-        self._tombol.raise_()
-
-
-class TabResi(ZoomTableMixin, QWidget):
+class TabResi(QWidget):
     KOL_NO = 0
     KOL_NAMA_BARANG = 1
     KOL_KOLI = 2
     KOL_BERAT = 3
     KOL_CBM = 4
 
-    LEBAR_KOLOM_DASAR = {
-        KOL_NO: 42,
-        KOL_NAMA_BARANG: 400,
-        KOL_KOLI: 100,
-        KOL_BERAT: 100,
-        KOL_CBM: 100,
-    }
+    LEBAR_KOLOM_DASAR = dict(RESI_ITEMS_COLUMN_WIDTHS)
     KOLOM_INPUT_BARANG = (KOL_NAMA_BARANG, KOL_KOLI, KOL_BERAT, KOL_CBM)
-    ZOOM_KOLOM = {
-        KOL_NO: (30, 2),
-        KOL_NAMA_BARANG: (150, 10),
-        KOL_KOLI: (70, 4),
-        KOL_BERAT: (70, 4),
-        KOL_CBM: (70, 4),
-    }
 
     def __init__(self):
         super().__init__()
@@ -189,6 +189,9 @@ class TabResi(ZoomTableMixin, QWidget):
         )
         self.current_theme = self.settings.value("theme", "light")
         self.current_resi_data = None
+        self._mode_edit = False
+        self._resi_sedang_diedit = None
+        self._revision_sedang_diedit = None
 
         # Menyimpan subtotal sebelum PPN agar pergantian PAJAK/NONPAJAK
         # tidak menyebabkan pajak dihitung berulang kali.
@@ -210,16 +213,16 @@ class TabResi(ZoomTableMixin, QWidget):
         )
 
         self.scroll_kiri = QScrollArea()
-        self.scroll_kiri.setMinimumWidth(700)
-        self.scroll_kiri.setMaximumWidth(1800)
+        self.scroll_kiri.setMinimumWidth(RESI_SCROLL_LEFT_MIN_WIDTH)
+        self.scroll_kiri.setMaximumWidth(RESI_SCROLL_LEFT_MAX_WIDTH)
         self.scroll_kiri.setWidgetResizable(True)
         self.scroll_kiri.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_kiri.setStyleSheet(styles_awal["scroll_kiri"])
 
         self.widget_kiri = QWidget()
         layout_kiri = QVBoxLayout(self.widget_kiri)
-        layout_kiri.setContentsMargins(8, 8, 8, 8)
-        layout_kiri.setSpacing(8)
+        layout_kiri.setContentsMargins(*RESI_PAGE_MARGINS)
+        layout_kiri.setSpacing(RESI_SPACING)
 
         self._bangun_top_bar(layout_kiri)
         self._bangun_form_pihak(layout_kiri)
@@ -233,7 +236,7 @@ class TabResi(ZoomTableMixin, QWidget):
             self.scroll_kiri,
             self.widget_kanan,
             orientation=Qt.Orientation.Horizontal,
-            ukuran_awal=(856, 256),
+            ukuran_awal=RESI_SPLITTER_INITIAL_SIZES,
             bisa_diciutkan=False,
             parent=self,
         )
@@ -245,23 +248,35 @@ class TabResi(ZoomTableMixin, QWidget):
         self.otomatisasi_nomor_resi()
         self.sesuaikan_tema_lokal()
         self.load_data_resi()
-        QTimer.singleShot(0, self._posisikan_tombol_clear_container)
 
     @staticmethod
-    def _lineedit(placeholder):
+    def _lineedit(placeholder, pakai_tinggi_lokal=True):
         widget = QLineEdit()
         widget.setPlaceholderText(placeholder)
+        if pakai_tinggi_lokal:
+            atur_tinggi_input(widget, tinggi=RESI_INPUT_HEIGHT)
+        else:
+            # Khusus input seperti pencarian: ikuti default widget_helpers.py.
+            atur_tinggi_input(widget)
         return widget
 
     @staticmethod
+    def _tinggi_input_detail_barang():
+        return RESI_INPUT_HEIGHT
+
+    @staticmethod
+    def _tinggi_input_total_ongkir():
+        return RESI_TOTAL_ONGKIR_HEIGHT
+
+    @staticmethod
     def _atur_grid_identitas(grid):
-        grid.setVerticalSpacing(8)
-        grid.setHorizontalSpacing(8)
-        grid.setContentsMargins(12, 12, 12, 12)
+        grid.setVerticalSpacing(RESI_SPACING)
+        grid.setHorizontalSpacing(RESI_SPACING)
+        grid.setContentsMargins(*RESI_FORM_CONTAINER_MARGINS)
         for row in range(3):
             grid.setRowStretch(row, 1)
-        grid.setColumnStretch(1, 6)
-        grid.setColumnStretch(3, 4)
+        grid.setColumnStretch(1, RESI_IDENTITY_COLUMN_STRETCH[0])
+        grid.setColumnStretch(3, RESI_IDENTITY_COLUMN_STRETCH[1])
 
     @staticmethod
     def _nilai_setting_list(key, default=None):
@@ -279,14 +294,14 @@ class TabResi(ZoomTableMixin, QWidget):
         top_bar.addStretch(1)
 
         area_tanggal = QHBoxLayout()
-        area_tanggal.setSpacing(8)
+        area_tanggal.setSpacing(RESI_SPACING)
         self.lbl_tgl_tag = QLabel("Tanggal:")
         self.date_input = QDateEdit(self)
         self.date_input.setDate(QDate.currentDate())
         self.date_input.setReadOnly(True)
         self.date_input.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.date_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.date_input.setFixedWidth(160)
+        self.date_input.setFixedWidth(RESI_DATE_INPUT_WIDTH)
         self.date_input.setDisplayFormat("dddd, dd/MM/yyyy")
         self.date_input.dateChanged.connect(self.otomatisasi_nomor_resi)
         area_tanggal.addWidget(self.lbl_tgl_tag)
@@ -295,16 +310,24 @@ class TabResi(ZoomTableMixin, QWidget):
         top_bar.addStretch(1)
 
         area_resi = QHBoxLayout()
-        area_resi.setSpacing(8)
+        area_resi.setSpacing(RESI_SPACING)
+        self.lbl_edit_mode = QLabel("Edit")
+        self.lbl_edit_mode.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        font_edit = self.lbl_edit_mode.font()
+        font_edit.setBold(True)
+        self.lbl_edit_mode.setFont(font_edit)
+        self.lbl_edit_mode.hide()
+
         self.lbl_resi_tag = QLabel("No. Resi:")
         self.lbl_resi_tag.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.txt_resi_display = QLabel("GEN-RESI-CODE")
         self.txt_resi_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_resi_display.setFixedWidth(200)
+        self.txt_resi_display.setFixedWidth(RESI_NUMBER_DISPLAY_WIDTH)
         self.txt_resi_display.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
+        area_resi.addWidget(self.lbl_edit_mode)
         area_resi.addWidget(self.lbl_resi_tag)
         area_resi.addWidget(self.txt_resi_display)
         top_bar.addLayout(area_resi)
@@ -312,33 +335,43 @@ class TabResi(ZoomTableMixin, QWidget):
 
     def _bangun_form_pihak(self, layout_kiri):
         cards = QHBoxLayout()
-        cards.setSpacing(8)
+        cards.setSpacing(RESI_SPACING)
 
         self.group_pengirim = QGroupBox("")
         grid = QGridLayout(self.group_pengirim)
         self._atur_grid_identitas(grid)
-        self.btn_clear_pengirim = self._buat_tombol_clear_container(
-            self.group_pengirim, "Reset pengirim", self.bersihkan_data_pengirim
-        )
+
         self.txt_pengirim = self._lineedit("Nama pengirim/perusahaan/toko ...")
         self.txt_hp_pengirim = self._lineedit("08xx xxxx ...")
         self.txt_alamat_pengirim = self._lineedit("Masukkan alamat lengkap ...")
         self.txt_kota_pengirim = self._lineedit("Kota asal ...")
+        self.btn_clear_pengirim = self._buat_tombol_clear_container(
+            self.group_pengirim,
+            "Reset pengirim",
+            self.bersihkan_data_pengirim,
+        )
+
         for label, widget, row, label_col, widget_col, span in (
             ("Pengirim:", self.txt_pengirim, 0, 0, 1, 1),
             ("No. HP:", self.txt_hp_pengirim, 0, 2, 3, 1),
             ("Alamat:", self.txt_alamat_pengirim, 1, 0, 1, 3),
-            ("Kota Asal:", self.txt_kota_pengirim, 2, 0, 1, 1),
+            ("Asal:", self.txt_kota_pengirim, 2, 0, 1, 1),
         ):
             grid.addWidget(QLabel(label), row, label_col)
             grid.addWidget(widget, row, widget_col, 1, span)
 
+        # Ruang kanan pada baris Kota Asal dipakai sebagai area reset.
+        grid.addWidget(
+            self.btn_clear_pengirim,
+            2,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+
         self.group_penerima = QGroupBox("")
         grid = QGridLayout(self.group_penerima)
         self._atur_grid_identitas(grid)
-        self.btn_clear_penerima = self._buat_tombol_clear_container(
-            self.group_penerima, "Reset penerima", self.bersihkan_data_penerima
-        )
+
         self.txt_penerima = self._lineedit("Nama penerima/perusahaan/toko...")
         self.txt_hp_penerima = self._lineedit("08xx xxxx ...")
         self.txt_alamat_penerima = self._lineedit("Masukkan alamat lengkap ...")
@@ -352,12 +385,23 @@ class TabResi(ZoomTableMixin, QWidget):
             )
         )
         self.cb_provinsi.currentTextChanged.connect(self.otomatisasi_nomor_resi)
+        self.btn_clear_penerima = self._buat_tombol_clear_container(
+            self.group_penerima,
+            "Reset penerima",
+            self.bersihkan_data_penerima,
+        )
 
         tujuan = QHBoxLayout()
-        tujuan.setSpacing(8)
+        tujuan.setSpacing(RESI_SPACING)
         tujuan.setContentsMargins(0, 0, 0, 0)
-        tujuan.addWidget(self.txt_kota_penerima, stretch=6)
-        tujuan.addWidget(self.cb_provinsi, stretch=4)
+        tujuan.addWidget(self.txt_kota_penerima, stretch=RESI_DESTINATION_STRETCH[0])
+        tujuan.addWidget(self.cb_provinsi, stretch=RESI_DESTINATION_STRETCH[1])
+        tujuan.addStretch(RESI_DESTINATION_STRETCH[2])
+        tujuan.addWidget(
+            self.btn_clear_penerima,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
 
         grid.addWidget(QLabel("Penerima:"), 0, 0)
         grid.addWidget(self.txt_penerima, 0, 1)
@@ -365,7 +409,7 @@ class TabResi(ZoomTableMixin, QWidget):
         grid.addWidget(self.txt_hp_penerima, 0, 3)
         grid.addWidget(QLabel("Alamat:"), 1, 0)
         grid.addWidget(self.txt_alamat_penerima, 1, 1, 1, 3)
-        grid.addWidget(QLabel("Kota:"), 2, 0)
+        grid.addWidget(QLabel("Tujuan:"), 2, 0)
         grid.addLayout(tujuan, 2, 1, 1, 3)
 
         cards.addWidget(self.group_pengirim, stretch=1)
@@ -374,15 +418,10 @@ class TabResi(ZoomTableMixin, QWidget):
 
     def _bangun_detail_barang(self, layout_kiri):
         self.group_tabel_container = QGroupBox("")
-        self.group_tabel_container.setMinimumHeight(250)
+        self.group_tabel_container.setMinimumHeight(RESI_DETAIL_CONTAINER_MIN_HEIGHT)
         layout = QVBoxLayout(self.group_tabel_container)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-        self.btn_clear_barang = self._buat_tombol_clear_container(
-            self.group_tabel_container,
-            "Reset detail barang",
-            self.bersihkan_detail_barang,
-        )
+        layout.setContentsMargins(*RESI_TABLE_CONTAINER_MARGINS)
+        layout.setSpacing(RESI_SPACING)
 
         self.table_items = QTableWidget()
         self.table_items.setColumnCount(5)
@@ -400,30 +439,41 @@ class TabResi(ZoomTableMixin, QWidget):
             self.table_items.setColumnWidth(kolom, self.LEBAR_KOLOM_DASAR[kolom])
         header.setStretchLastSection(True)
         header.sectionResized.connect(self.auto_save_ukuran_kolom)
-        self.table_items.setMinimumHeight(150)
+        self.table_items.setMinimumHeight(RESI_ITEMS_TABLE_MIN_HEIGHT)
         self.table_items.verticalHeader().setVisible(False)
         layout.addWidget(self.table_items)
 
         actions = QHBoxLayout()
-        actions.setSpacing(8)
+        actions.setSpacing(RESI_SPACING)
         self.btn_tambah_baris = QPushButton("➕ Tambah Baris")
         self.btn_tambah_baris.clicked.connect(self.tambah_baris_barang)
         self.btn_hapus_baris = QPushButton("🗑️ Hapus Baris")
         self.btn_hapus_baris.clicked.connect(self.hapus_baris_terpilih)
+        self.btn_clear_barang = self._buat_tombol_clear_container(
+            self.group_tabel_container,
+            "Reset detail barang",
+            self.bersihkan_detail_barang,
+        )
+
         actions.addWidget(self.btn_tambah_baris)
         actions.addWidget(self.btn_hapus_baris)
-        actions.addStretch()
+        actions.addStretch(1)
+        actions.addWidget(
+            self.btn_clear_barang,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         layout.addLayout(actions)
         layout_kiri.addWidget(self.group_tabel_container)
 
     def _bangun_area_pembayaran(self, layout_kiri, styles_awal):
         area = QHBoxLayout()
-        area.setSpacing(8)
+        area.setSpacing(RESI_SPACING)
         self._bangun_form_finance(area)
 
         self.layout_pay_method = QHBoxLayout()
         self.layout_pay_method.setContentsMargins(0, 0, 0, 0)
-        self.layout_pay_method.setSpacing(8)
+        self.layout_pay_method.setSpacing(RESI_SPACING)
         self.rek_cards_labels = []
         style_card = styles_awal["rekening_card"]
         self.box_np = self._buat_panel_rekening(
@@ -434,19 +484,14 @@ class TabResi(ZoomTableMixin, QWidget):
         )
         self.layout_pay_method.addWidget(self.box_np, stretch=1)
         self.layout_pay_method.addWidget(self.box_p, stretch=1)
-        area.addLayout(self.layout_pay_method, stretch=55)
+        area.addLayout(self.layout_pay_method, stretch=RESI_PAYMENT_AREA_STRETCH[1])
         layout_kiri.addLayout(area)
 
     def _bangun_form_finance(self, area):
         self.group_finance = QGroupBox("")
         grid = QGridLayout(self.group_finance)
-        grid.setSpacing(8)
-        grid.setContentsMargins(12, 12, 12, 12)
-        self.btn_clear_finance = self._buat_tombol_clear_container(
-            self.group_finance,
-            "Reset detail ongkir",
-            self.bersihkan_detail_pembayaran,
-        )
+        grid.setSpacing(RESI_SPACING)
+        grid.setContentsMargins(*RESI_FORM_CONTAINER_MARGINS)
 
         self.txt_ongkir_kg = self._lineedit("Ongkir /kg")
         self.txt_ongkir_kg.installEventFilter(self)
@@ -467,6 +512,11 @@ class TabResi(ZoomTableMixin, QWidget):
         )
         self.cb_payment = QComboBox()
         self.cb_payment.addItems(["TF / INVOICE", "CASH"])
+        self.btn_clear_finance = self._buat_tombol_clear_container(
+            self.group_finance,
+            "Reset detail ongkir",
+            self.bersihkan_detail_pembayaran,
+        )
 
         for widget in (self.txt_ongkir_kg, self.txt_ongkir_m3):
             widget.textChanged.connect(self.kalkulator_finansial_otomatis)
@@ -477,30 +527,45 @@ class TabResi(ZoomTableMixin, QWidget):
             lambda _text=None: format_input_ribuan_gaya_indonesia(self.txt_total_ongkir)
         )
 
-        for row, (label, widget) in enumerate((
+        fields = (
             ("Ongkir per kg (Rp):", self.txt_ongkir_kg),
-            ("Ongkir per m3 (Rp):", self.txt_ongkir_m3),
+            ("Ongkir per m³ (Rp):", self.txt_ongkir_m3),
             ("Total Ongkir (Rp):", self.txt_total_ongkir),
             ("Jenis Transaksi:", self.cb_pajak),
             ("Metode Payment:", self.cb_payment),
-        )):
+        )
+        for row, (label, widget) in enumerate(fields):
             grid.addWidget(QLabel(label), row, 0)
-            grid.addWidget(widget, row, 1)
+            if widget in (self.cb_pajak, self.cb_payment):
+                grid.addWidget(widget, row, 1)
+            else:
+                # Field numerik tetap memakai lebar penuh seperti desain lama.
+                grid.addWidget(widget, row, 1, 1, 2)
+
+        # Kolom kanan hanya dipakai untuk ruang napas + reset pada baris terakhir.
+        grid.setColumnStretch(1, RESI_FINANCE_COLUMN_STRETCH[0])
+        grid.setColumnStretch(2, RESI_FINANCE_COLUMN_STRETCH[1])
+        grid.addWidget(
+            self.btn_clear_finance,
+            4,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         grid.setRowStretch(5, 1)
-        area.addWidget(self.group_finance, stretch=45)
+        area.addWidget(self.group_finance, stretch=RESI_PAYMENT_AREA_STRETCH[0])
 
     def _buat_panel_rekening(self, judul, setting_key, style_card):
         box = QGroupBox(judul)
         outer = QVBoxLayout(box)
-        outer.setContentsMargins(4, 10, 4, 4)
+        outer.setContentsMargins(*RESI_ACCOUNT_PANEL_MARGINS)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*RESI_ACCOUNT_CONTENT_MARGINS)
+        layout.setSpacing(RESI_SPACING)
         self._bangun_kartu_rekening(
             self._nilai_setting_list(setting_key),
             layout,
@@ -534,7 +599,7 @@ class TabResi(ZoomTableMixin, QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         right = QHBoxLayout(self.widget_action_kanan)
-        right.setContentsMargins(12, 0, 0, 0)
+        right.setContentsMargins(RESI_ACTION_RIGHT_LEFT_MARGIN, 0, 0, 0)
         right.setSpacing(0)
         self.lbl_reset_form = QPushButton("Reset Form")
         self.lbl_reset_form.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -550,19 +615,22 @@ class TabResi(ZoomTableMixin, QWidget):
         actions.addWidget(self.widget_action_kiri, stretch=1)
         actions.addWidget(self.btn_generate_simpan, 0, Qt.AlignmentFlag.AlignCenter)
         actions.addWidget(self.widget_action_kanan, stretch=1)
-        layout_kiri.addSpacing(15)
+        layout_kiri.addSpacing(RESI_ACTION_TOP_GAP)
         layout_kiri.addLayout(actions)
         layout_kiri.addStretch(1)
 
     def _bangun_histori(self):
         self.widget_kanan = QWidget()
-        self.widget_kanan.setMinimumWidth(256)
-        self.widget_kanan.setMaximumWidth(520)
+        self.widget_kanan.setMinimumWidth(RESI_HISTORY_MIN_WIDTH)
+        self.widget_kanan.setMaximumWidth(RESI_HISTORY_MAX_WIDTH)
         layout = QVBoxLayout(self.widget_kanan)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*RESI_HISTORY_MARGINS)
+        layout.setSpacing(RESI_SPACING)
 
-        self.txt_search = self._lineedit("Cari resi, pengirim, penerima...")
+        self.txt_search = self._lineedit(
+            "Cari resi, pengirim, penerima...",
+            pakai_tinggi_lokal=False,
+        )
         self.txt_search.textChanged.connect(self.filter_data_resi)
         layout.addWidget(self.txt_search)
 
@@ -571,11 +639,11 @@ class TabResi(ZoomTableMixin, QWidget):
         self.date_histori = QDateEdit(self)
         self.date_histori.setCalendarPopup(True)
         self.date_histori.setDate(QDate.currentDate())
-        self.date_histori.setFixedWidth(112)
+        self.date_histori.setFixedWidth(RESI_HISTORY_DATE_WIDTH)
         self.date_histori.setDisplayFormat("dd/MM/yyyy")
         self.date_histori.dateChanged.connect(self.load_data_resi)
         self.btn_reset_tgl = QPushButton("RESET")
-        self.btn_reset_tgl.setFixedWidth(56)
+        self.btn_reset_tgl.setFixedWidth(RESI_HISTORY_RESET_WIDTH)
         self.btn_reset_tgl.clicked.connect(self.reset_tanggal)
         header.addWidget(self.lbl_histori_title)
         header.addWidget(self.date_histori)
@@ -584,9 +652,12 @@ class TabResi(ZoomTableMixin, QWidget):
 
         self.list_histori = QListWidget()
         self.list_histori.itemDoubleClicked.connect(self.munculkan_preview)
+        self.list_histori.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_histori.customContextMenuRequested.connect(
+            self._tampilkan_context_menu_histori
+        )
         layout.addLayout(header)
         layout.addWidget(self.list_histori)
-
 
     def reset_form_input_manual(self, _link=None):
         jawaban = QMessageBox.question(
@@ -600,6 +671,10 @@ class TabResi(ZoomTableMixin, QWidget):
 
         if jawaban != QMessageBox.StandardButton.Yes:
             return
+
+        self._keluar_mode_edit()
+        with _blokir_signal_sementara(self.date_input):
+            self.date_input.setDate(QDate.currentDate())
 
         reset_form_input_global(
             self.group_pengirim,
@@ -627,10 +702,15 @@ class TabResi(ZoomTableMixin, QWidget):
         QTimer.singleShot(0, self.txt_pengirim.setFocus)
 
     def _buat_tombol_clear_container(self, parent, tooltip, callback):
+        """Membuat tombol reset kecil yang ditempatkan oleh layout pemanggil."""
         tombol = QToolButton(parent)
         tombol.setText("⟳")
         tombol.setToolTip(tooltip)
-        tombol.setFixedSize(20, 20)
+        tombol.setFixedSize(RESI_CLEAR_BUTTON_SIZE, RESI_CLEAR_BUTTON_SIZE)
+        # Glyph reset 16pt membutuhkan floor geometry agar tidak terpotong
+        # ketika global responsive scale masuk mode compact (mis. 1366x768).
+        tombol.setProperty("_ui_scaler_min_width", RESI_CLEAR_BUTTON_SIZE)
+        tombol.setProperty("_ui_scaler_min_height", RESI_CLEAR_BUTTON_SIZE)
         tombol.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         win = self.window()
@@ -642,27 +722,11 @@ class TabResi(ZoomTableMixin, QWidget):
             konversi_font_qss_ke_point(get_btn_clear_container_style(is_dark))
         )
         tombol.clicked.connect(callback)
-        tombol.raise_()
 
         if not hasattr(self, "_tombol_clear_list"):
             self._tombol_clear_list = []
         self._tombol_clear_list.append(tombol)
-        tombol._resize_watcher = _ResetButtonResizeWatcher(parent, tombol)
-        parent.installEventFilter(tombol._resize_watcher)
         return tombol
-
-
-    def _posisikan_tombol_clear_container(self):
-        """Menjaga seluruh tombol reset tetap di pojok kanan atas container."""
-        for tombol in getattr(self, "_tombol_clear_list", ()):
-            watcher = getattr(tombol, "_resize_watcher", None)
-            if watcher is not None:
-                watcher._perbarui_posisi()
-
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._posisikan_tombol_clear_container()
 
     def bersihkan_data_pengirim(self):
         """Membersihkan hanya input di container Pengirim."""
@@ -697,21 +761,26 @@ class TabResi(ZoomTableMixin, QWidget):
             QTimer.singleShot(0, widget_nama.setFocus)
 
     def bersihkan_detail_pembayaran(self):
-        """Membersihkan ongkir dan mengembalikan ComboBox ke pilihan awal."""
+        """Bersihkan ongkir; jenis pajak resi lama tetap terkunci saat Edit."""
+        indeks_pajak_edit = self.cb_pajak.currentIndex() if self._mode_edit else None
         self._reset_status_kalkulator_ongkir()
         reset_form_input_global(
             self.group_finance,
             indeks_combo_default=0,
             fokus_ke=self.txt_ongkir_kg,
         )
+        if indeks_pajak_edit is not None and self.cb_pajak.count() > 0:
+            with _blokir_signal_sementara(self.cb_pajak):
+                self.cb_pajak.setCurrentIndex(
+                    max(0, min(indeks_pajak_edit, self.cb_pajak.count() - 1))
+                )
         self.kalkulator_finansial_otomatis()
         self.otomatisasi_nomor_resi()
 
     def showEvent(self, event):
         super().showEvent(event)
         self.kode_cabang = self._kode_cabang_aktif()
-        QTimer.singleShot(0, self._posisikan_tombol_clear_container)
-
+        self.load_data_resi()
 
     def _terapkan_tema_detail_barang(
         self,
@@ -748,46 +817,39 @@ class TabResi(ZoomTableMixin, QWidget):
                 editor = table.cellWidget(row, column)
                 if editor is not None:
                     editor.setStyleSheet(theme["cell_input"])
+                    atur_tinggi_input(
+                        editor,
+                        tinggi=self._tinggi_input_detail_barang(),
+                    )
 
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
         self.current_theme = "dark" if is_dark else "light"
-        z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
-
-        zoom_berubah = getattr(self, "_zoom_terakhir_tema", None) != z
-        self._zoom_terakhir_tema = z
-        fs_statis, styles_statis = self._buat_resi_styles(is_dark, 0)
-        fs_zoom, styles_zoom = self._buat_resi_styles(is_dark, z)
+        fs, styles = self._buat_resi_styles(is_dark)
 
         self._pasang_stylesheet_nama(
             (
-                "lbl_main_title", "lbl_tgl_tag", "lbl_resi_tag", "txt_resi_display",
+                "lbl_main_title", "lbl_tgl_tag", "lbl_edit_mode", "lbl_resi_tag", "txt_resi_display",
                 "date_input", "txt_search", "lbl_histori_title", "btn_reset_tgl",
                 "list_histori", "btn_generate_simpan", "lbl_reset_form", "scroll_kiri",
-            ),
-            styles_statis,
-        )
-        self._terapkan_tema_histori_statis(fs_statis)
-        self._pasang_stylesheet_nama(
-            (
                 "group_pengirim", "group_penerima", "group_tabel_container",
                 "group_finance", "btn_tambah_baris", "btn_hapus_baris",
                 "box_np", "box_p",
             ),
-            styles_zoom,
+            styles,
         )
-        self._terapkan_tema_input_zoom(styles_zoom, z)
-        self._terapkan_tema_detail_barang(is_dark=is_dark, sz_base=fs_zoom["sz_base"])
-
-        if zoom_berubah:
-            self._pulihkan_ukuran_tabel_resi(z)
-
-        self.handle_rekening_zoom(z, is_dark)
+        self._terapkan_tema_histori_statis(fs)
+        self._terapkan_tema_input(styles)
+        self._terapkan_tema_detail_barang(
+            is_dark=is_dark,
+            sz_base=UKURAN_FONT_INPUT,
+        )
+        self._pulihkan_ukuran_tabel_resi()
+        self._terapkan_style_rekening(is_dark)
         self.date_input.update()
         self.date_histori.update()
         terapkan_style_kalender(self.date_histori, is_dark=is_dark)
         self._perbarui_style_tombol_clear(is_dark)
-        QTimer.singleShot(0, self._posisikan_tombol_clear_container)
 
     def _tema_gelap_aktif(self):
         win = self.window()
@@ -796,8 +858,8 @@ class TabResi(ZoomTableMixin, QWidget):
         return self.settings.value("theme", "light") == "dark"
 
     @staticmethod
-    def _buat_resi_styles(is_dark, z):
-        fs = get_global_font_sizes(z)
+    def _buat_resi_styles(is_dark):
+        fs = get_global_font_sizes(0)
         styles = get_resi_styles(
             is_dark,
             fs["sz_title"],
@@ -806,7 +868,7 @@ class TabResi(ZoomTableMixin, QWidget):
             fs["sz_base"],
             fs["sz_input"],
             fs["sz_total"],
-            z=z,
+            z=0,
         )
         return fs, konversi_style_font_ke_point(styles)
 
@@ -818,14 +880,17 @@ class TabResi(ZoomTableMixin, QWidget):
                 widget.setStyleSheet(qss)
 
     def _terapkan_tema_histori_statis(self, fs_statis):
-        # Date histori sengaja tetap native Fusion dan tidak mengikuti zoom tabel.
         self.date_histori.setStyleSheet("")
         font = self.date_histori.font()
-        font.setPointSizeF(ukuran_font_px_ke_pt(fs_statis["sz_input"]))
+        font.setPointSizeF(ukuran_font_px_ke_pt(UKURAN_FONT_HISTORI_RESI))
         self.date_histori.setFont(font)
-        self.date_histori.setFixedHeight(self.txt_search.sizeHint().height())
+        atur_tinggi_input(
+            (self.date_input, self.date_histori),
+            tinggi=RESI_INPUT_HEIGHT,
+        )
+        atur_tinggi_input(self.txt_search)
 
-    def _terapkan_tema_input_zoom(self, styles_zoom, z):
+    def _terapkan_tema_input(self, styles):
         for widget in (
             self.txt_pengirim, self.txt_hp_pengirim, self.txt_alamat_pengirim,
             self.txt_kota_pengirim, self.txt_penerima, self.txt_hp_penerima,
@@ -833,44 +898,72 @@ class TabResi(ZoomTableMixin, QWidget):
             self.txt_ongkir_kg, self.txt_ongkir_m3,
         ):
             if widget is not None:
-                widget.setStyleSheet(styles_zoom["input_utama"])
+                widget.setStyleSheet(styles["input_utama"])
 
         comboboxes = (self.cb_provinsi, self.cb_pajak, self.cb_payment)
-        for combo in comboboxes:
-            zoom_helper.terapkan_zoom_widget_standar(combo, z, "sz_input")
-        tinggi_input = self.txt_kota_penerima.sizeHint().height()
-        for combo in comboboxes:
-            combo.setFixedHeight(tinggi_input)
         terapkan_popup_bawah_combobox(comboboxes)
 
         if self.txt_total_ongkir is not None:
-            self.txt_total_ongkir.setStyleSheet(styles_zoom["txt_total_ongkir"])
+            self.txt_total_ongkir.setStyleSheet(styles["txt_total_ongkir"])
 
-    def _pulihkan_ukuran_tabel_resi(self, z):
-        self.table_items.verticalHeader().setDefaultSectionSize(34 + z)
+        atur_tinggi_input(
+            (
+                self.txt_pengirim,
+                self.txt_hp_pengirim,
+                self.txt_alamat_pengirim,
+                self.txt_kota_pengirim,
+                self.txt_penerima,
+                self.txt_hp_penerima,
+                self.txt_alamat_penerima,
+                self.txt_kota_penerima,
+                self.txt_ongkir_kg,
+                self.txt_ongkir_m3,
+                *comboboxes,
+            ),
+            tinggi=RESI_INPUT_HEIGHT,
+        )
+        atur_tinggi_input(
+            self.txt_total_ongkir,
+            tinggi=self._tinggi_input_total_ongkir(),
+        )
+
+    def _pulihkan_ukuran_tabel_resi(self):
+        self.table_items.verticalHeader().setDefaultSectionSize(
+            skalakan_px(RESI_TABLE_ROW_HEIGHT)
+        )
+        header = self.table_items.horizontalHeader()
+        status_signal = header.blockSignals(True)
         try:
             saved_state = self.settings.value("ukuran_tabel_resi")
+            current_scale = dapatkan_ui_scale()
             if saved_state:
-                self.table_items.horizontalHeader().restoreState(saved_state)
+                header.restoreState(saved_state)
+                try:
+                    saved_scale = float(
+                        self.settings.value("ukuran_tabel_resi_scale", 1.0)
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    saved_scale = 1.0
+                saved_scale = max(0.01, saved_scale)
+                ratio = current_scale / saved_scale
+                for kolom in range(self.table_items.columnCount()):
+                    lebar = max(RESI_ITEMS_COLUMN_MIN_WIDTH, round(self.table_items.columnWidth(kolom) * ratio))
+                    self.table_items.setColumnWidth(kolom, lebar)
             else:
-                for kolom, (minimum, langkah) in self.ZOOM_KOLOM.items():
+                for kolom, lebar in self.LEBAR_KOLOM_DASAR.items():
                     self.table_items.setColumnWidth(
                         kolom,
-                        max(minimum, self.LEBAR_KOLOM_DASAR[kolom] + z * langkah),
+                        skalakan_px(lebar),
                     )
         except Exception:
             logger.exception("Gagal memulihkan ukuran kolom tabel resi")
-
-        self._perbarui_cache_lebar_zoom(
-            self.table_items,
-            self._lebar_dasar_tabel(self.table_items),
-        )
+        finally:
+            header.blockSignals(status_signal)
 
     def _perbarui_style_tombol_clear(self, is_dark):
         style = konversi_font_qss_ke_point(get_btn_clear_container_style(is_dark))
         for btn in getattr(self, "_tombol_clear_list", ()):
             btn.setStyleSheet(style)
-
 
     def _bangun_kartu_rekening(self, daftar_rekening, layout_target, style_card):
         """Bangun kartu rekening dari daftar string 'bank, no_rek, a.n' ke layout_target.
@@ -883,8 +976,8 @@ class TabResi(ZoomTableMixin, QWidget):
             card = QWidget()
             card.setStyleSheet(style_card)
             l_card = QVBoxLayout(card)
-            l_card.setContentsMargins(10, 8, 10, 8)
-            l_card.setSpacing(2)
+            l_card.setContentsMargins(*RESI_ACCOUNT_CARD_MARGINS)
+            l_card.setSpacing(RESI_ACCOUNT_CARD_SPACING)
 
             if len(parts) >= 3:
                 lbl_top = QLabel(f"{parts[0]}")
@@ -903,9 +996,9 @@ class TabResi(ZoomTableMixin, QWidget):
             l_card.addWidget(lbl_bottom)
             layout_target.addWidget(card)
 
-    def handle_rekening_zoom(self, z, is_dark):
+    def _terapkan_style_rekening(self, is_dark):
         rekening_styles = konversi_style_font_ke_point(
-            get_resi_rekening_styles(is_dark, z)
+            get_resi_rekening_styles(is_dark, 0)
         )
 
         self.setUpdatesEnabled(False)
@@ -928,15 +1021,16 @@ class TabResi(ZoomTableMixin, QWidget):
 
     def setup_uppercase_hooks(self):
         self.upper_validator = UppercaseValidator(self)
-        self.txt_pengirim.setValidator(self.upper_validator)
-        self.txt_alamat_pengirim.setValidator(self.upper_validator)
-        self.txt_kota_pengirim.setValidator(self.upper_validator)
-
-        self.txt_penerima.setValidator(self.upper_validator)
-        self.txt_alamat_penerima.setValidator(self.upper_validator)
-        self.txt_kota_penerima.setValidator(self.upper_validator)
-
-        self.txt_search.setValidator(self.upper_validator)
+        for widget in (
+            self.txt_pengirim,
+            self.txt_alamat_pengirim,
+            self.txt_kota_pengirim,
+            self.txt_penerima,
+            self.txt_alamat_penerima,
+            self.txt_kota_penerima,
+            self.txt_search,
+        ):
+            widget.setValidator(self.upper_validator)
 
     def setup_autocomplete(self):
         try:
@@ -987,7 +1081,7 @@ class TabResi(ZoomTableMixin, QWidget):
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        completer.setMaxVisibleItems(12)
+        completer.setMaxVisibleItems(RESI_AUTOCOMPLETE_MAX_VISIBLE_ITEMS)
         completer.activated[str].connect(callback)
         lineedit.setCompleter(completer)
         return completer
@@ -1003,22 +1097,22 @@ class TabResi(ZoomTableMixin, QWidget):
         lineedit.editingFinished.connect(autofill)
         lineedit.setProperty("_autocomplete_connected", "true")
 
+    def _pilih_autocomplete(self, nilai, lineedit, callback):
+        nilai = str(nilai or "").strip().upper()
+        if not nilai:
+            return
+        lineedit.setText(nilai)
+        QTimer.singleShot(0, lambda: callback(nilai))
 
     def pilih_autocomplete_pengirim(self, nama_pengirim):
-        nama_pengirim = str(nama_pengirim or "").strip().upper()
-        if not nama_pengirim:
-            return
-
-        self.txt_pengirim.setText(nama_pengirim)
-        QTimer.singleShot(0, lambda: self.eksekusi_autofill_pengirim(nama_pengirim))
+        self._pilih_autocomplete(
+            nama_pengirim, self.txt_pengirim, self.eksekusi_autofill_pengirim
+        )
 
     def pilih_autocomplete_penerima(self, nama_penerima):
-        nama_penerima = str(nama_penerima or "").strip().upper()
-        if not nama_penerima:
-            return
-
-        self.txt_penerima.setText(nama_penerima)
-        QTimer.singleShot(0, lambda: self.eksekusi_autofill_penerima(nama_penerima))
+        self._pilih_autocomplete(
+            nama_penerima, self.txt_penerima, self.eksekusi_autofill_penerima
+        )
 
     def eksekusi_autofill_penerima(self, nama_penerima):
         nama_penerima = str(nama_penerima or "").strip().upper()
@@ -1065,6 +1159,10 @@ class TabResi(ZoomTableMixin, QWidget):
         self.date_histori.blockSignals(False)
         self.load_data_resi()
 
+    def _isi_list_histori(self, rows):
+        for row in rows:
+            self.list_histori.addItem(f"{row[0]} - {row[1]}")
+
     def filter_data_resi(self):
         keyword = self.txt_search.text().strip().lower()
         if not keyword:
@@ -1073,11 +1171,10 @@ class TabResi(ZoomTableMixin, QWidget):
 
         self.list_histori.clear()
         kode_cabang = self._kode_cabang_aktif()
-
         try:
-            hasil = db_service.cari_histori_resi(keyword, kode_cabang)
-            for row in hasil:
-                self.list_histori.addItem(f"{row[0]} - {row[1]}")
+            self._isi_list_histori(
+                db_service.cari_histori_resi(keyword, kode_cabang)
+            )
         except Exception:
             logger.exception("Gagal memuat pencarian histori resi")
 
@@ -1140,25 +1237,23 @@ class TabResi(ZoomTableMixin, QWidget):
 
     def kalkulator_finansial_otomatis(self):
         try:
-            total_berat_kargo = 0.0
-            total_volume_kargo = 0.0
+            # Gunakan Decimal selama perhitungan agar berat/CBM x tarif tidak
+            # melewati floating-point sebelum pembulatan total rupiah.
+            total_berat_kargo = Decimal("0")
+            total_volume_kargo = Decimal("0")
 
             for row in range(self.table_items.rowCount()):
                 w_b = self.table_items.cellWidget(row, self.KOL_BERAT)
                 w_v = self.table_items.cellWidget(row, self.KOL_CBM)
 
                 if w_b and w_b.text().strip() not in {"", "-"}:
-                    total_berat_kargo += float(
-                        angka_indonesia_to_decimal(w_b.text())
-                    )
+                    total_berat_kargo += angka_indonesia_to_decimal(w_b.text())
 
                 if w_v and w_v.text().strip() not in {"", "-"}:
-                    total_volume_kargo += float(
-                        angka_indonesia_to_decimal(w_v.text())
-                    )
+                    total_volume_kargo += angka_indonesia_to_decimal(w_v.text())
 
-            kg_rate = float(rupiah_to_int(self.txt_ongkir_kg.text()))
-            m3_rate = float(rupiah_to_int(self.txt_ongkir_m3.text()))
+            kg_rate = Decimal(rupiah_to_int(self.txt_ongkir_kg.text()))
+            m3_rate = Decimal(rupiah_to_int(self.txt_ongkir_m3.text()))
 
             subtotal_ongkir = None
             if kg_rate > 0 and total_berat_kargo > 0:
@@ -1308,7 +1403,6 @@ class TabResi(ZoomTableMixin, QWidget):
     def _jadwalkan_fokus_widget(target, reason):
         QTimer.singleShot(0, lambda w=target, r=reason: w.setFocus(r))
 
-
     def tambah_baris_barang(self):
         row = self.table_items.rowCount()
         self.table_items.insertRow(row)
@@ -1348,9 +1442,13 @@ class TabResi(ZoomTableMixin, QWidget):
         input_qss = getattr(self, "_detail_barang_input_qss", "")
         if input_qss:
             widget.setStyleSheet(input_qss)
+
+        atur_tinggi_input(
+            widget,
+            tinggi=self._tinggi_input_detail_barang(),
+        )
         widget.installEventFilter(self)
         return widget
-
 
     def hapus_baris_terpilih(self):
         current_row = self.table_items.currentRow()
@@ -1358,21 +1456,18 @@ class TabResi(ZoomTableMixin, QWidget):
             self.table_items.removeRow(current_row)
         else:
             row_count = self.table_items.rowCount()
-            if row_count > 0: self.table_items.removeRow(row_count - 1)
+            if row_count > 0:
+                self.table_items.removeRow(row_count - 1)
 
         for row in range(self.table_items.rowCount()):
             self.table_items.item(row, self.KOL_NO).setText(str(row + 1))
-
         self.kalkulator_finansial_otomatis()
 
     def auto_save_ukuran_kolom(self, logicalIndex, oldSize, newSize):
         state_sekarang = self.table_items.horizontalHeader().saveState()
         self.settings.setValue("ukuran_tabel_resi", state_sekarang)
+        self.settings.setValue("ukuran_tabel_resi_scale", dapatkan_ui_scale())
 
-        self._perbarui_cache_lebar_zoom(
-            self.table_items,
-            self._lebar_dasar_tabel(self.table_items),
-        )
 
     def eksekusi_autofill_pengirim(self, name_val):
         name_clean = str(name_val or "").strip().upper()
@@ -1395,6 +1490,16 @@ class TabResi(ZoomTableMixin, QWidget):
             logger.exception("Gagal autofill pengirim")
 
     def otomatisasi_nomor_resi(self):
+        # Saat Edit, prefix/counter lama dipertahankan; hanya suffix pajak yang
+        # mengikuti pilihan PAJAK/NONPAJAK.
+        if self._mode_edit and self._resi_sedang_diedit:
+            jenis_pajak = "PAJAK" if self._transaksi_kena_ppn() else "NONPAJAK"
+            no_resi_edit = db_service.sesuaikan_nomor_resi_dengan_pajak(
+                self._resi_sedang_diedit, jenis_pajak
+            )
+            self.txt_resi_display.setText(no_resi_edit or self._resi_sedang_diedit)
+            return
+
         cp = self.cb_provinsi.currentText().upper()
         kode_cabang = self._kode_cabang_aktif()
 
@@ -1429,16 +1534,135 @@ class TabResi(ZoomTableMixin, QWidget):
         )
         self.txt_resi_display.setText(hasil_resi)
 
+    def _peringatkan_validasi(self, pesan, widget=None):
+        """Tampilkan satu warning validasi dan arahkan fokus ke input terkait."""
+        QMessageBox.warning(self, "Data Resi Belum Lengkap", pesan)
+        if widget is not None:
+            QTimer.singleShot(0, lambda w=widget: self._fokuskan_widget_input(w))
+        return False
+
+    def _validasi_form_sebelum_simpan(self):
+        """Izinkan penyimpanan dengan kombinasi field apa pun.
+
+        Nomor Resi dan tanggal transaksi tetap dikelola sistem. Seluruh input
+        operasional lain bersifat opsional agar admin dapat menyimpan draft/
+        data parsial tanpa dipaksa melengkapi field yang tidak tersedia saat itu.
+        """
+        return True
+
+    def _cetak_setelah_database_tersimpan(self, ctx, *, perubahan=False):
+        """Cetak setelah commit; kegagalan printer tidak mengubah status simpan DB."""
+        no_resi = str(ctx.get("payload", {}).get("no_resi") or "").strip()
+        try:
+            cetak_resi_ke_printer(self._buat_data_cetak_dari_context(ctx), self)
+            return True
+        except Exception as exc:
+            logger.exception("Resi %s tersimpan tetapi gagal membuka preview/cetak", no_resi)
+            jenis = "Perubahan resi" if perubahan else "Resi"
+            QMessageBox.warning(
+                self,
+                "Tersimpan - Cetak Gagal",
+                f"{jenis} {no_resi or ''} sudah berhasil disimpan ke database, "
+                "tetapi preview/cetak gagal dibuka.\n\n"
+                f"Detail: {exc}\n\n"
+                "Data tidak perlu disimpan ulang. Gunakan Histori Resi untuk mencetak kembali.",
+            )
+            return False
+
     def simpan_ke_database(self):
+        if not self._validasi_form_sebelum_simpan():
+            return
+
+        if self._mode_edit and self._resi_sedang_diedit:
+            self._simpan_perubahan_resi()
+            return
+
+        # Resi baru selalu memakai tanggal hari ini. Sumber tanggal yang sama
+        # diteruskan ke database dan data cetak agar keduanya tidak berbeda.
+        tanggal_transaksi = QDate.currentDate()
+        with _blokir_signal_sementara(self.date_input):
+            self.date_input.setDate(tanggal_transaksi)
+
         self.otomatisasi_nomor_resi()
-        no_resi = self.txt_resi_display.text()
+        ctx = self._siapkan_transaksi_form(
+            self.txt_resi_display.text(),
+            format_tanggal_ke_db(tanggal_transaksi),
+        )
+        try:
+            sukses, pesan_error = db_service.simpan_transaksi_resi(ctx["payload"])
+        except Exception as exc:
+            logger.exception("Gagal menyimpan resi %s", self.txt_resi_display.text())
+            QMessageBox.critical(self, "Error Database", f"Gagal menyimpan resi: {exc}")
+            return
+
+        if not sukses:
+            self._tampilkan_error_simpan(pesan_error)
+            return
+
+        self._cetak_setelah_database_tersimpan(ctx)
+        self._selesaikan_simpan_sukses()
+
+    def _ambil_ringkasan_barang(self):
+        """Ambil semua baris detail yang benar-benar diisi, termasuk parsial.
+
+        Nama barang tidak lagi menjadi syarat. Baris seperti hanya KOLI, hanya
+        BERAT, hanya KUBIK, atau kombinasi apa pun tetap masuk ke rincian. Baris
+        default yang seluruh isinya kosong/"-" tetap diabaikan.
+        """
+        nama_barang = []
+        rincian = []
+        total_koli, total_berat, total_cbm = 0, 0.0, 0.0
+
+        for row in range(self.table_items.rowCount()):
+            widgets = [
+                self.table_items.cellWidget(row, kolom)
+                for kolom in self.KOLOM_INPUT_BARANG
+            ]
+            w_nama, w_qty, w_berat, w_cbm = widgets
+
+            nama = w_nama.text().strip() if w_nama else ""
+            qty_raw = w_qty.text().strip() if w_qty else ""
+            berat_raw = w_berat.text().strip() if w_berat else ""
+            cbm_raw = w_cbm.text().strip() if w_cbm else ""
+
+            ada_input = bool(nama) or any(
+                nilai not in {"", "-"}
+                for nilai in (qty_raw, berat_raw, cbm_raw)
+            )
+            if not ada_input:
+                continue
+
+            koli = max(0, rupiah_to_int(qty_raw))
+            berat = max(0.0, float(angka_indonesia_to_decimal(berat_raw or "0")))
+            cbm = max(0.0, float(angka_indonesia_to_decimal(cbm_raw or "0")))
+
+            total_koli += koli
+            total_berat += berat
+            total_cbm += cbm
+            if nama:
+                nama_barang.append(nama)
+
+            rincian.append({
+                "nama": nama,
+                "qty": str(koli) if koli > 0 else "",
+                "berat": str(berat) if berat > 0 else "",
+                "cbm": str(cbm) if cbm > 0 else "",
+            })
+
+        return {
+            "nama_barang": nama_barang,
+            "rincian": rincian,
+            "koli": total_koli,
+            "berat": total_berat,
+            "cbm": total_cbm,
+        }
+
+    def _siapkan_transaksi_form(self, no_resi, tanggal):
         kode_cabang = self._kode_cabang_aktif()
-        tanggal = format_tanggal_ke_db(QDate.currentDate())
         provinsi = self.cb_provinsi.currentText()
         kota_tujuan = self.txt_kota_penerima.text().strip()
         tujuan = f"{provinsi} - {kota_tujuan}" if kota_tujuan else provinsi
         kota_asal = self.txt_kota_pengirim.text().strip().upper()
-
         ringkasan = self._ambil_ringkasan_barang()
         total_ongkir = rupiah_to_int(self.txt_total_ongkir.text())
         ongkir_kg = str(rupiah_to_int(self.txt_ongkir_kg.text()))
@@ -1447,56 +1671,66 @@ class TabResi(ZoomTableMixin, QWidget):
             no_resi, kode_cabang, tanggal, provinsi, kota_tujuan, tujuan, kota_asal,
             ringkasan, total_ongkir, ongkir_kg, ongkir_m3,
         )
-        sukses, pesan_error = db_service.simpan_transaksi_resi(payload)
-        if not sukses:
-            self._tampilkan_error_simpan(pesan_error)
-            return
-
-        data_cetak = self._buat_data_cetak(
-            no_resi, kota_tujuan, ringkasan, total_ongkir, ongkir_kg, ongkir_m3
-        )
-        cetak_resi_ke_printer(data_cetak, self)
-        self._selesaikan_simpan_sukses()
-
-    def _ambil_ringkasan_barang(self):
-        nama_barang = []
-        rincian = []
-        total_koli, total_berat, total_cbm = 0, 0.0, 0.0
-        for row in range(self.table_items.rowCount()):
-            widgets = [
-                self.table_items.cellWidget(row, kolom)
-                for kolom in self.KOLOM_INPUT_BARANG
-            ]
-            w_nama, w_qty, w_berat, w_cbm = widgets
-            if not (w_nama and w_qty):
-                continue
-            nama = w_nama.text().strip()
-            if not nama:
-                continue
-
-            koli = max(0, rupiah_to_int(w_qty.text()))
-            berat = float(
-                angka_indonesia_to_decimal(w_berat.text() if w_berat else "0")
-            )
-            cbm = float(
-                angka_indonesia_to_decimal(w_cbm.text() if w_cbm else "0")
-            )
-            total_koli += koli
-            total_berat += berat
-            total_cbm += cbm
-            nama_barang.append(nama)
-            rincian.append({
-                "nama": nama,
-                "qty": str(koli) if koli > 0 else "",
-                "berat": str(berat) if berat > 0 else "",
-                "cbm": str(cbm) if cbm > 0 else "",
-            })
         return {
-            "nama_barang": nama_barang,
-            "rincian": rincian,
-            "koli": total_koli,
-            "berat": total_berat,
-            "cbm": total_cbm,
+            "payload": payload,
+            "ringkasan": ringkasan,
+            "kota_tujuan": kota_tujuan,
+            "total_ongkir": total_ongkir,
+            "ongkir_kg": ongkir_kg,
+            "ongkir_m3": ongkir_m3,
+        }
+
+    def _buat_data_cetak_dari_context(self, ctx):
+        data_cetak = self._buat_data_cetak(
+            ctx["payload"]["no_resi"],
+            ctx["kota_tujuan"],
+            ctx["ringkasan"],
+            ctx["total_ongkir"],
+            ctx["ongkir_kg"],
+            ctx["ongkir_m3"],
+        )
+        # Tanggal cetak mengikuti payload transaksi, bukan state widget yang
+        # mungkin berubah setelah masuk/keluar mode Edit.
+        data_cetak["tanggal"] = format_tanggal_ke_ui(
+            ctx["payload"].get("tanggal_masuk")
+        )
+        return data_cetak
+
+    def _subtotal_ongkir_untuk_simpan(self, total_ongkir):
+        """Ambil subtotal dasar yang aman untuk PAJAK/NONPAJAK."""
+        if self._mode_total_ongkir == "manual":
+            return max(0, int(self._subtotal_manual_ongkir or 0))
+
+        total_ongkir = max(0, int(total_ongkir or 0))
+        if total_ongkir <= 0:
+            return 0
+        if self._transaksi_kena_ppn():
+            return int(
+                (Decimal(str(total_ongkir)) / Decimal("1.011")).quantize(
+                    Decimal("1"), rounding=ROUND_HALF_UP
+                )
+            )
+        return total_ongkir
+
+    def _buat_konteks_atomic_resi(self):
+        """Konteks opsional agar database menentukan counter final saat write-lock."""
+        provinsi = self.cb_provinsi.currentText().strip().upper()
+        aturan_prefix = CURRENT_SESSION.get("aturan_prefix", {})
+        prefix_default = (
+            str(CURRENT_SESSION.get("resi_prefix", "SYS")).strip().upper()
+            or "SYS"
+        )
+        prefix = aturan_prefix.get(
+            provinsi,
+            aturan_prefix.get("DEFAULT", prefix_default),
+        )
+        template = db_service.get_setting("template_no_resi") or "[PREFIX][COUNTER][SUFFIX]"
+        suffix_setting = db_service.get_setting("kode_akhiran_pajak") or "-P"
+        suffix = suffix_setting if self._transaksi_kena_ppn() else ""
+        return {
+            "prefix": str(prefix or prefix_default).strip().upper(),
+            "template": str(template or "[PREFIX][COUNTER][SUFFIX]"),
+            "suffix": str(suffix or "").strip().upper(),
         }
 
     def _buat_payload_transaksi(
@@ -1507,6 +1741,7 @@ class TabResi(ZoomTableMixin, QWidget):
             "no_resi": no_resi,
             "kode_cabang": kode_cabang,
             "tanggal_masuk": tanggal,
+            "_atomic_resi": self._buat_konteks_atomic_resi(),
             "pengirim": self.txt_pengirim.text().strip(),
             "hp_pengirim": self.txt_hp_pengirim.text().strip(),
             "alamat_pengirim": self.txt_alamat_pengirim.text().strip(),
@@ -1522,8 +1757,11 @@ class TabResi(ZoomTableMixin, QWidget):
             "cbm": data["cbm"],
             "ongkir_per_kg": ongkir_kg if int(ongkir_kg) > 0 else "",
             "ongkir_per_cbm": ongkir_m3 if int(ongkir_m3) > 0 else "",
+            "subtotal_ongkir": self._subtotal_ongkir_untuk_simpan(total_ongkir),
+            "jenis_pajak": "PAJAK" if self._transaksi_kena_ppn() else "NONPAJAK",
             "total_ongkir": total_ongkir,
             "pembayaran": self.cb_payment.currentText(),
+            "rincian": data["rincian"],
             "rincian_json": json.dumps(data["rincian"]),
         }
 
@@ -1533,7 +1771,7 @@ class TabResi(ZoomTableMixin, QWidget):
         fmt_kg = _format_ongkir_aman(ongkir_kg)
         fmt_m3 = _format_ongkir_aman(ongkir_m3)
         return {
-            "tanggal": format_tanggal_ke_ui(QDate.currentDate()),
+            "tanggal": format_tanggal_ke_ui(self.date_input.date()),
             "no_resi": no_resi,
             "pengirim_nama": self.txt_pengirim.text().strip(),
             "pengirim_telp": self.txt_hp_pengirim.text().strip(),
@@ -1570,83 +1808,595 @@ class TabResi(ZoomTableMixin, QWidget):
         kode = getattr(error, "kode", None)
         if kode == db_service.KODE_RESI_DUPLIKAT:
             QMessageBox.critical(self, "Gagal", str(error))
+        elif kode == getattr(db_service, "KODE_RESI_KONFLIK", None):
+            QMessageBox.warning(self, "Data Resi Berubah", str(error))
         elif kode == db_service.KODE_DB_ERROR:
             QMessageBox.critical(self, "Error Database", str(error))
         else:
             QMessageBox.critical(self, "Error SQL", f"Gagal simpan: {error}")
 
+    def _tampilkan_context_menu_histori(self, pos):
+        """Tampilkan aksi histori hanya ketika klik kanan tepat pada item."""
+        item = self.list_histori.itemAt(pos)
+        if item is None:
+            return
 
-    def load_data_resi(self):
-        tgl_pilih = format_tanggal_ke_db(
-            self.date_histori.date()
-        )
-        kode_cabang = self._kode_cabang_aktif()
-        self.list_histori.clear()
+        self.list_histori.setCurrentItem(item)
+        menu = QMenu(self.list_histori)
+        aksi_view = menu.addAction("View")
+        aksi_edit = menu.addAction("Edit")
+        menu.addSeparator()
+        aksi_audit = menu.addAction("Riwayat Perubahan")
+        aksi = menu.exec(self.list_histori.viewport().mapToGlobal(pos))
+
+        if aksi is aksi_view:
+            self.munculkan_preview(item)
+        elif aksi is aksi_edit:
+            self.mulai_edit_resi(item)
+        elif aksi is aksi_audit:
+            self.tampilkan_riwayat_perubahan(item)
+
+    @staticmethod
+    def _label_field_audit(field):
+        label = {
+            "tanggal_masuk": "Tanggal Masuk",
+            "tanggal_keluar": "Tanggal Keluar",
+            "status_resi": "Status Resi",
+            "truk": "Truk",
+            "pengirim": "Pengirim",
+            "hp_pengirim": "HP Pengirim",
+            "alamat_pengirim": "Alamat Pengirim",
+            "kota_asal": "Kota Asal",
+            "penerima": "Penerima",
+            "hp_penerima": "HP Penerima",
+            "alamat_penerima": "Alamat Penerima",
+            "kota_tujuan": "Kota Tujuan",
+            "ongkir_per_kg": "Ongkir / Kg",
+            "ongkir_per_cbm": "Ongkir / CBM",
+            "subtotal_ongkir": "Subtotal Ongkir",
+            "jenis_pajak": "Jenis Pajak",
+            "total_ongkir": "Total Ongkir",
+            "pembayaran": "Pembayaran",
+            "ket_buku_gudang": "Keterangan Buku Gudang",
+            "no_manifest": "No. Manifest",
+            "ket_manifest": "Keterangan Manifest",
+        }
+        return label.get(str(field), str(field).replace("_", " ").title())
+
+    @staticmethod
+    def _format_nilai_audit(field, nilai):
+        if nilai is None or str(nilai).strip() == "":
+            return "(kosong)"
+        if field in {"ongkir_per_kg", "ongkir_per_cbm", "subtotal_ongkir", "total_ongkir"}:
+            try:
+                angka = int(float(nilai))
+                return f"Rp {format_ke_rupiah(angka)}"
+            except (TypeError, ValueError):
+                pass
+        return str(nilai)
+
+    @classmethod
+    def _format_barang_audit(cls, daftar):
+        if not daftar:
+            return "(kosong)"
+        hasil = []
+        for index, item in enumerate(daftar, start=1):
+            if not isinstance(item, dict):
+                hasil.append(f"{index}. {item}")
+                continue
+            urutan = item.get("urutan") or index
+            nama = str(item.get("nama_barang") or "").strip() or "(tanpa nama)"
+            koli = item.get("koli")
+            berat = item.get("berat")
+            cbm = item.get("cbm")
+            hasil.append(
+                f"{urutan}. {nama} | Koli: {koli or 0} | Berat: {berat or 0} | CBM: {cbm or 0}"
+            )
+        return "\n".join(hasil)
+
+    @classmethod
+    def _ringkasan_perubahan_audit(cls, no_resi_lama, no_resi_baru, perubahan_json):
+        baris = []
+        if str(no_resi_lama or "").strip() != str(no_resi_baru or "").strip():
+            baris.append(f"No. Resi: {no_resi_lama} → {no_resi_baru}")
 
         try:
-            hasil = db_service.ambil_histori_resi_by_tanggal(tgl_pilih, kode_cabang)
-            for row in hasil:
-                self.list_histori.addItem(f"{row[0]} - {row[1]}")
+            perubahan = json.loads(perubahan_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            perubahan = {}
+
+        header = perubahan.get("header", {}) if isinstance(perubahan, dict) else {}
+        if isinstance(header, dict):
+            for field, detail in header.items():
+                if not isinstance(detail, dict):
+                    continue
+                sebelum = cls._format_nilai_audit(field, detail.get("sebelum"))
+                sesudah = cls._format_nilai_audit(field, detail.get("sesudah"))
+                baris.append(f"{cls._label_field_audit(field)}: {sebelum} → {sesudah}")
+
+        barang = perubahan.get("barang") if isinstance(perubahan, dict) else None
+        if isinstance(barang, dict):
+            sebelum = cls._format_barang_audit(barang.get("sebelum", []))
+            sesudah = cls._format_barang_audit(barang.get("sesudah", []))
+            baris.append(f"Detail Barang - Sebelum:\n{sebelum}")
+            baris.append(f"Detail Barang - Sesudah:\n{sesudah}")
+
+        return "\n".join(baris) if baris else "Tidak ada rincian perubahan."
+
+    @staticmethod
+    def _format_waktu_audit(nilai):
+        teks = str(nilai or "").strip()
+        if not teks:
+            return "-"
+        try:
+            tanggal, waktu = teks.split(" ", 1)
+            tahun, bulan, hari = tanggal.split("-", 2)
+            return f"{hari}-{bulan}-{tahun} {waktu}"
+        except ValueError:
+            return teks
+
+    def _buat_card_audit(self, parent, row):
+        if len(row) < 9:
+            return None
+
+        _, no_lama, no_baru, username, sumber, rev_lama, rev_baru, perubahan_json, created_at = row
+        card = QFrame(parent)
+        card.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QVBoxLayout(card)
+
+        sumber_tampil = str(sumber or "SYSTEM").replace("_", " ")
+        info = QLabel(
+            f"{self._format_waktu_audit(created_at)}  |  "
+            f"{username or 'SYSTEM'}  |  {sumber_tampil}"
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        rincian = QLabel(
+            self._ringkasan_perubahan_audit(no_lama, no_baru, perubahan_json)
+        )
+        rincian.setWordWrap(True)
+        rincian.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(rincian)
+
+        if rev_lama is not None or rev_baru is not None:
+            revision = QLabel(
+                f"Revision: {rev_lama if rev_lama is not None else '-'} → "
+                f"{rev_baru if rev_baru is not None else '-'}"
+            )
+            revision.setWordWrap(True)
+            layout.addWidget(revision)
+        return card
+
+    def tampilkan_riwayat_perubahan(self, item):
+        """Tampilkan audit Resi dari context menu histori tanpa mengubah data."""
+        no_resi = self._ambil_no_resi_dari_item(item)
+        if not no_resi:
+            return
+
+        try:
+            histori = db_service.ambil_audit_resi(
+                no_resi, self._kode_cabang_aktif(), limit=200
+            )
+        except Exception as error:
+            logger.exception("Gagal mengambil audit Resi %s", no_resi)
+            QMessageBox.critical(
+                self, "Riwayat Perubahan", f"Gagal memuat riwayat perubahan: {error}"
+            )
+            return
+
+        if not histori:
+            QMessageBox.information(
+                self,
+                "Riwayat Perubahan",
+                f"Belum ada riwayat perubahan untuk Resi {no_resi}.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Riwayat Perubahan - {no_resi}")
+        dialog.setModal(True)
+        dialog.resize(*RESI_AUDIT_DIALOG_SIZE)
+        layout_dialog = QVBoxLayout(dialog)
+
+        judul = QLabel(f"Riwayat Perubahan Resi {no_resi}")
+        judul.setWordWrap(True)
+        layout_dialog.addWidget(judul)
+
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        isi_scroll = QWidget()
+        layout_histori = QVBoxLayout(isi_scroll)
+        layout_histori.setContentsMargins(0, 0, 0, 0)
+        layout_histori.setSpacing(RESI_AUDIT_HISTORY_SPACING)
+        for row in histori:
+            card = self._buat_card_audit(isi_scroll, row)
+            if card is not None:
+                layout_histori.addWidget(card)
+
+        layout_histori.addStretch(1)
+        scroll.setWidget(isi_scroll)
+        layout_dialog.addWidget(scroll, 1)
+
+        tombol_tutup = QPushButton("Tutup", dialog)
+        tombol_tutup.clicked.connect(dialog.accept)
+        layout_tombol = QHBoxLayout()
+        layout_tombol.addStretch(1)
+        layout_tombol.addWidget(tombol_tutup)
+        layout_dialog.addLayout(layout_tombol)
+        dialog.exec()
+
+    @staticmethod
+    def _ambil_no_resi_dari_item(item):
+        if item is None:
+            return ""
+        return item.text().split(" - ", 1)[0].strip()
+
+    def _set_mode_edit(self, no_resi):
+        no_resi = str(no_resi or "").strip()
+        self._mode_edit = bool(no_resi)
+        self._resi_sedang_diedit = no_resi or None
+        self.lbl_edit_mode.setVisible(self._mode_edit)
+        # Nomor resi tetap immutable, tetapi status PAJAK/NONPAJAK disimpan
+        # sebagai data transaksi terpisah dan aman untuk diedit.
+        if hasattr(self, "cb_pajak"):
+            self.cb_pajak.setEnabled(True)
+        if self._mode_edit:
+            self.txt_resi_display.setText(no_resi)
+
+    def _keluar_mode_edit(self):
+        self._mode_edit = False
+        self._resi_sedang_diedit = None
+        self._revision_sedang_diedit = None
+        self.current_resi_data = None
+        if hasattr(self, "cb_pajak"):
+            self.cb_pajak.setEnabled(True)
+        if hasattr(self, "lbl_edit_mode"):
+            self.lbl_edit_mode.hide()
+
+    @staticmethod
+    def _qdate_dari_nilai_db(nilai):
+        if isinstance(nilai, QDate):
+            return nilai
+
+        # Mendukung datetime/date Python tanpa menambah dependency baru.
+        if hasattr(nilai, "year") and hasattr(nilai, "month") and hasattr(nilai, "day"):
+            try:
+                return QDate(int(nilai.year), int(nilai.month), int(nilai.day))
+            except (TypeError, ValueError):
+                pass
+
+        teks = str(nilai or "").strip()
+        for fmt in ("yyyy-MM-dd", "dd/MM/yyyy", "yyyy-MM-dd HH:mm:ss"):
+            qdate = QDate.fromString(teks, fmt)
+            if qdate.isValid():
+                return qdate
+        return QDate.currentDate()
+
+    def _pecah_tujuan_resi(self, tujuan):
+        """Pisahkan string tujuan DB menjadi provinsi dan kota menggunakan isi combo."""
+        teks = str(tujuan or "").strip().upper()
+        if not teks:
+            return "", ""
+
+        daftar_provinsi = sorted(
+            (self.cb_provinsi.itemText(i).strip().upper() for i in range(self.cb_provinsi.count())),
+            key=len,
+            reverse=True,
+        )
+        for provinsi in daftar_provinsi:
+            if teks == provinsi:
+                return provinsi, ""
+            awalan = f"{provinsi} - "
+            if teks.startswith(awalan):
+                return provinsi, teks[len(awalan):].strip()
+
+        if " - " in teks:
+            provinsi, kota = teks.split(" - ", 1)
+            return provinsi.strip(), kota.strip()
+        return teks, ""
+
+    def _pilih_combo_berdasarkan_teks(self, combo, teks):
+        nilai = str(teks or "").strip()
+        if not nilai:
+            return
+        indeks = combo.findText(nilai, Qt.MatchFlag.MatchFixedString)
+        if indeks < 0:
+            indeks = combo.findText(nilai, Qt.MatchFlag.MatchFixedString | Qt.MatchFlag.MatchCaseSensitive)
+        if indeks < 0:
+            combo.addItem(nilai)
+            indeks = combo.count() - 1
+        combo.setCurrentIndex(indeks)
+
+    def _isi_tabel_barang_dari_resi(self, rincian):
+        with _blokir_signal_sementara(self.table_items):
+            self.table_items.setRowCount(0)
+
+        rincian_valid = rincian if isinstance(rincian, list) else []
+        if not rincian_valid:
+            rincian_valid = [{"nama": "", "qty": "", "berat": "", "cbm": ""}]
+
+        for data in rincian_valid:
+            self.tambah_baris_barang()
+            row = self.table_items.rowCount() - 1
+            nilai_per_kolom = {
+                self.KOL_NAMA_BARANG: data.get("nama", ""),
+                self.KOL_KOLI: data.get("qty", data.get("koli", "")),
+                self.KOL_BERAT: data.get("berat", ""),
+                self.KOL_CBM: data.get("cbm", ""),
+            }
+            for kolom, nilai in nilai_per_kolom.items():
+                editor = self.table_items.cellWidget(row, kolom)
+                if editor is not None:
+                    with _blokir_signal_sementara(editor):
+                        editor.setText(str(nilai or ""))
+
+    def _rincian_dari_row_resi(self, row, toleran_json=False, fallback_kosong=True):
+        raw = row[14] if len(row) > 14 else None
+        try:
+            rincian = json.loads(raw) if raw else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            if not toleran_json:
+                raise
+            rincian = []
+        if rincian or (raw and not fallback_kosong):
+            return rincian
+        return [{
+            "nama": str(row[8] or ""),
+            "qty": str(row[10] or ""),
+            "berat": str(row[9] or ""),
+            "cbm": str(row[11] or ""),
+        }]
+
+    def _isi_identitas_edit_dari_row(self, row):
+        with _blokir_signal_sementara(self.date_input):
+            self.date_input.setDate(self._qdate_dari_nilai_db(row[0]))
+
+        self.txt_pengirim.setText(str(row[1] or ""))
+        self.txt_hp_pengirim.setText(str(row[2] or ""))
+        self.txt_alamat_pengirim.setText(str(row[3] or ""))
+        self.txt_kota_pengirim.setText(str(row[17] or "") if len(row) > 17 else "")
+        self.txt_penerima.setText(str(row[4] or ""))
+        self.txt_hp_penerima.setText(str(row[5] or ""))
+        self.txt_alamat_penerima.setText(str(row[6] or ""))
+
+        provinsi, kota = self._pecah_tujuan_resi(row[7])
+        if provinsi:
+            self._pilih_combo_berdasarkan_teks(self.cb_provinsi, provinsi)
+        self.txt_kota_penerima.setText(kota)
+
+        jenis_pajak = str(row[18] or "NONPAJAK").strip().upper() if len(row) > 18 else "NONPAJAK"
+        is_pajak = jenis_pajak.startswith("PAJAK")
+        with _blokir_signal_sementara(self.cb_pajak):
+            self.cb_pajak.setCurrentIndex(1 if is_pajak and self.cb_pajak.count() > 1 else 0)
+        if len(row) > 13 and row[13] is not None:
+            self._pilih_combo_berdasarkan_teks(self.cb_payment, str(row[13]))
+        return is_pajak
+
+    def _isi_ongkir_edit_dari_row(self, row, is_pajak):
+        ongkir_kg = str(row[15] or "") if len(row) > 15 else ""
+        ongkir_m3 = str(row[16] or "") if len(row) > 16 else ""
+        total_ongkir = int(row[12] or 0) if len(row) > 12 else 0
+
+        self._reset_status_kalkulator_ongkir()
+        self.txt_ongkir_kg.setText(_format_ongkir_aman(ongkir_kg))
+        self.txt_ongkir_m3.setText(_format_ongkir_aman(ongkir_m3))
+        self._set_total_ongkir_programatis(total_ongkir)
+
+        subtotal_db = int(row[19] or 0) if len(row) > 19 else 0
+        kg_rate = Decimal(rupiah_to_int(ongkir_kg))
+        m3_rate = Decimal(rupiah_to_int(ongkir_m3))
+        berat_db = angka_indonesia_to_decimal(row[9] if len(row) > 9 else 0)
+        cbm_db = angka_indonesia_to_decimal(row[11] if len(row) > 11 else 0)
+
+        subtotal_auto = None
+        if kg_rate > 0 and berat_db > 0:
+            subtotal_auto = berat_db * kg_rate
+        elif m3_rate > 0 and cbm_db > 0:
+            subtotal_auto = cbm_db * m3_rate
+
+        total_auto = self._total_setelah_ppn(subtotal_auto) if subtotal_auto is not None else None
+        if total_auto is not None and total_auto == total_ongkir:
+            self._mode_total_ongkir = "auto"
+        elif total_ongkir > 0:
+            self._mode_total_ongkir = "manual"
+            if subtotal_db > 0:
+                self._subtotal_manual_ongkir = subtotal_db
+            else:
+                pembagi = Decimal("1.011") if is_pajak else Decimal("1")
+                self._subtotal_manual_ongkir = int(
+                    (Decimal(str(total_ongkir)) / pembagi).quantize(
+                        Decimal("1"), rounding=ROUND_HALF_UP
+                    )
+                )
+
+    def mulai_edit_resi(self, item):
+        """Muat resi histori ke form kiri dan aktifkan mode edit."""
+        no_resi = self._ambil_no_resi_dari_item(item)
+        if not no_resi:
+            return
+
+        try:
+            row = db_service.ambil_detail_resi(no_resi)
+            if not row:
+                QMessageBox.warning(self, "Edit Resi", "Data resi tidak ditemukan.")
+                return
+
+            self.current_resi_data = row
+            self._set_mode_edit(no_resi)
+            self._revision_sedang_diedit = int(row[20] or 0) if len(row) > 20 else 0
+
+            is_pajak = self._isi_identitas_edit_dari_row(row)
+            self._isi_tabel_barang_dari_resi(
+                self._rincian_dari_row_resi(row, toleran_json=True)
+            )
+            self._isi_ongkir_edit_dari_row(row, is_pajak)
+
+            self.txt_resi_display.setText(no_resi)
+            self.scroll_kiri.verticalScrollBar().setValue(0)
+            QTimer.singleShot(0, self.txt_pengirim.setFocus)
+        except Exception as exc:
+            logger.exception("Gagal memuat resi %s ke mode edit", no_resi)
+            self._keluar_mode_edit()
+            QMessageBox.critical(self, "Edit Resi", f"Gagal memuat data resi: {exc}")
+
+    def _konfirmasi_edit_resi_terinvoice(self, no_resi, payload):
+        """Minta konfirmasi jika Resi sudah menjadi snapshot pada Invoice."""
+        try:
+            proteksi = db_service.cek_proteksi_invoice_resi(
+                no_resi, payload, self._kode_cabang_aktif()
+            )
+        except Exception as exc:
+            logger.exception("Gagal memeriksa Invoice terkait Resi %s", no_resi)
+            QMessageBox.critical(
+                self,
+                "Status Invoice Tidak Dapat Diverifikasi",
+                "Perubahan resi dibatalkan karena sistem gagal memeriksa keterkaitan "
+                f"Invoice untuk resi {no_resi}.\n\nDetail: {exc}",
+            )
+            return False
+
+        if not isinstance(proteksi, dict) or "terkait" not in proteksi:
+            logger.error("Respons proteksi Invoice tidak valid untuk Resi %s: %r", no_resi, proteksi)
+            QMessageBox.critical(
+                self,
+                "Status Invoice Tidak Dapat Diverifikasi",
+                f"Perubahan resi {no_resi} dibatalkan karena hasil pemeriksaan Invoice tidak valid.",
+            )
+            return False
+
+        if not proteksi.get("terkait"):
+            return True
+
+        daftar = []
+        for info in proteksi.get("invoices", []):
+            nomor = str(info.get("no_invoice") or "").strip()
+            status = str(info.get("status") or "").strip()
+            daftar.append(f"{nomor} ({status})" if status else nomor)
+        teks_invoice = ", ".join(item for item in daftar if item) or "Invoice terkait"
+
+        if proteksi.get("perubahan_finansial"):
+            pesan = (
+                f"Resi {no_resi} sudah digunakan pada Invoice:\n{teks_invoice}\n\n"
+                "Anda mengubah data finansial (ongkir, PAJAK/NONPAJAK, subtotal, "
+                "atau payment). Perubahan Resi TIDAK otomatis memperbarui Invoice "
+                "yang sudah dibuat.\n\nTetap simpan perubahan Resi?"
+            )
+        else:
+            pesan = (
+                f"Resi {no_resi} sudah digunakan pada Invoice:\n{teks_invoice}\n\n"
+                "Invoice tersebut tetap menjadi snapshot lama dan tidak ikut berubah.\n\n"
+                "Tetap simpan perubahan Resi?"
+            )
+
+        jawaban = QMessageBox.warning(
+            self,
+            "Resi Sudah Masuk Invoice",
+            pesan,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return jawaban == QMessageBox.StandardButton.Yes
+
+    def _simpan_perubahan_resi(self):
+        """Simpan perubahan Resi, termasuk perubahan suffix PAJAK/NONPAJAK."""
+        no_resi_lama = str(self._resi_sedang_diedit or "").strip()
+        if not no_resi_lama:
+            return
+
+        self.otomatisasi_nomor_resi()
+        no_resi_baru = str(self.txt_resi_display.text() or no_resi_lama).strip()
+        tanggal_edit = self.date_input.date()
+        ctx = self._siapkan_transaksi_form(
+            no_resi_baru,
+            format_tanggal_ke_db(tanggal_edit),
+        )
+        payload = ctx["payload"]
+        payload["no_resi_lama"] = no_resi_lama
+        payload["revision"] = self._revision_sedang_diedit
+
+        if not self._konfirmasi_edit_resi_terinvoice(no_resi_lama, payload):
+            return
+
+        try:
+            sukses, pesan_error = db_service.update_transaksi_resi(payload)
+        except Exception as exc:
+            logger.exception("Gagal memperbarui resi %s", no_resi_lama)
+            QMessageBox.critical(self, "Edit Resi", f"Gagal menyimpan perubahan: {exc}")
+            return
+
+        if not sukses:
+            self._tampilkan_error_simpan(pesan_error or "Update resi gagal.")
+            return
+
+        payload["no_resi"] = str(payload.get("no_resi") or no_resi_baru).strip()
+        self._cetak_setelah_database_tersimpan(ctx, perubahan=True)
+
+        self.notif_tengah = FadeNotification("💾 PERUBAHAN TERSIMPAN", self)
+        self.notif_tengah.show()
+        self.date_histori.setDate(tanggal_edit)
+        self._keluar_mode_edit()
+        self.clear_form()
+        self.setup_autocomplete()
+        self.load_data_resi()
+
+    def load_data_resi(self):
+        tgl_pilih = format_tanggal_ke_db(self.date_histori.date())
+        kode_cabang = self._kode_cabang_aktif()
+        self.list_histori.clear()
+        try:
+            self._isi_list_histori(
+                db_service.ambil_histori_resi_by_tanggal(tgl_pilih, kode_cabang)
+            )
         except Exception:
             logger.exception("Gagal memuat histori resi untuk tanggal %s", tgl_pilih)
 
     def munculkan_preview(self, item):
-        teks_item = item.text()
-        no_resi = teks_item.split(" - ")[0]
+        no_resi = self._ambil_no_resi_dari_item(item)
         try:
             row = db_service.ambil_detail_resi(no_resi)
-            if not row: return
+            if not row:
+                return
 
-            tgl_indo = format_tanggal_ke_ui(row[0])
-
-            suffix_pajak = db_service.get_setting('kode_akhiran_pajak') or '-P'
-            tipe_pajak = "PAJAK" if suffix_pajak and no_resi.endswith(
-                suffix_pajak,
-            ) else "NON-PAJAK"
-
-            list_barang_html = json.loads(row[14]) if row[14] else [
-                {
-                    'nama': str(row[8]),
-                    'qty': str(row[10]),
-                    'berat': str(row[9]),
-                    'cbm': str(row[11]),
-                }]
-
-            val_ongkir = int(row[12]) if row[12] else 0
-            formatted_ongkir = f"Rp {format_ke_rupiah(val_ongkir)}" if val_ongkir > 0 else ""
-
+            jenis_pajak_db = (
+                str(row[18] or "NONPAJAK").strip().upper()
+                if len(row) > 18 else "NONPAJAK"
+            )
             ongkir_kg_db = str(row[15]) if row[15] is not None else ""
             ongkir_m3_db = str(row[16]) if row[16] is not None else ""
-
             fmt_ongkir_kg = _format_ongkir_aman(ongkir_kg_db)
             fmt_ongkir_m3 = _format_ongkir_aman(ongkir_m3_db)
+            val_ongkir = int(row[12]) if row[12] else 0
 
             formatted_data = {
-                'tanggal': tgl_indo,
-                'no_resi': no_resi,
-                'pengirim_nama': str(row[1]),
-                'pengirim_telp': str(row[2]),
-                'pengirim_alamat': str(row[3]),
-                'penerima_nama': str(row[4]),
-                'penerima_telp': str(row[5]),
-                'penerima_alamat': str(row[6]),
-                'penerima_kota': str(row[7]),
-                'tipe_pajak': tipe_pajak,
-                'list_barang': list_barang_html,
-                'total_qty': str(row[10]),
-                'total_berat': str(row[9]),
-                'total_cbm': str(row[11]),
-                'total_jumlah_ongkir': formatted_ongkir,
-                'ongkir_kg': fmt_ongkir_kg,
-                'ongkir_m3': fmt_ongkir_m3,
-                'ongkir_per_kg': fmt_ongkir_kg,
-                'ongkir_per_cbm': fmt_ongkir_m3,
-                'ongkir_kg_raw': ongkir_kg_db,
-                'ongkir_m3_raw': ongkir_m3_db,
+                "tanggal": format_tanggal_ke_ui(row[0]),
+                "no_resi": no_resi,
+                "pengirim_nama": str(row[1]),
+                "pengirim_telp": str(row[2]),
+                "pengirim_alamat": str(row[3]),
+                "penerima_nama": str(row[4]),
+                "penerima_telp": str(row[5]),
+                "penerima_alamat": str(row[6]),
+                "penerima_kota": str(row[7]),
+                "tipe_pajak": "PAJAK" if jenis_pajak_db.startswith("PAJAK") else "NONPAJAK",
+                "list_barang": self._rincian_dari_row_resi(row, fallback_kosong=False),
+                "total_qty": str(row[10]),
+                "total_berat": str(row[9]),
+                "total_cbm": str(row[11]),
+                "total_jumlah_ongkir": (
+                    f"Rp {format_ke_rupiah(val_ongkir)}" if val_ongkir > 0 else ""
+                ),
+                "ongkir_kg": fmt_ongkir_kg,
+                "ongkir_m3": fmt_ongkir_m3,
+                "ongkir_per_kg": fmt_ongkir_kg,
+                "ongkir_per_cbm": fmt_ongkir_m3,
+                "ongkir_kg_raw": ongkir_kg_db,
+                "ongkir_m3_raw": ongkir_m3_db,
             }
             cetak_resi_ke_printer(formatted_data, self)
-        except Exception as e:
-            QMessageBox.critical(self, "Error Preview", f"Gagal memuat preview: {e}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Error Preview", f"Gagal memuat preview: {exc}")
 
     def refresh_session_ui(self):
         self.kode_cabang = self._kode_cabang_aktif()
@@ -1661,6 +2411,13 @@ class TabResi(ZoomTableMixin, QWidget):
             logger.exception("Gagal auto-refresh histori dari tab utama")
 
     def clear_form(self):
+        self._keluar_mode_edit()
+        # date_input berada di top bar (di luar container reset). Resi baru harus
+        # selalu kembali ke tanggal hari ini setelah keluar dari mode Edit.
+        if hasattr(self, "date_input"):
+            with _blokir_signal_sementara(self.date_input):
+                self.date_input.setDate(QDate.currentDate())
+
         # Pertahankan pilihan yang pada implementasi lama tidak ikut di-reset.
         status_combo = {
             self.cb_provinsi: self.cb_provinsi.currentIndex(),
@@ -1686,6 +2443,5 @@ class TabResi(ZoomTableMixin, QWidget):
                     combo.setCurrentIndex(-1)
 
         self.tambah_baris_barang()
-
 
         self.otomatisasi_nomor_resi()

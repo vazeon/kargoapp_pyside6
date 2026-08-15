@@ -1,5 +1,5 @@
 # utils/frozen_table_helper.py
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -72,8 +72,8 @@ class FrozenTableWidget(QTableWidget):
         main_header.sectionResized.connect(self.update_section_width)
         frozen_header.sectionResized.connect(self.update_main_section_width)
 
-        main_vheader.sectionResized.connect(frozen_vheader.resizeSection)
-        frozen_vheader.sectionResized.connect(main_vheader.resizeSection)
+        main_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_frozen)
+        frozen_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_main)
         main_scroll.valueChanged.connect(frozen_scroll.setValue)
         frozen_scroll.valueChanged.connect(main_scroll.setValue)
         main_scroll.rangeChanged.connect(frozen_scroll.setRange)
@@ -81,6 +81,18 @@ class FrozenTableWidget(QTableWidget):
 
     def _sinkronkan_tinggi_header(self):
         self.frozen_table.horizontalHeader().setFixedHeight(self.horizontalHeader().height())
+
+    def _sinkronkan_tinggi_baris_ke_frozen(self, logical_index, _old_size, new_size):
+        frozen_vheader = self.frozen_table.verticalHeader()
+        blocker = QSignalBlocker(frozen_vheader)
+        frozen_vheader.resizeSection(logical_index, new_size)
+        del blocker
+
+    def _sinkronkan_tinggi_baris_ke_main(self, logical_index, _old_size, new_size):
+        main_vheader = self.verticalHeader()
+        blocker = QSignalBlocker(main_vheader)
+        main_vheader.resizeSection(logical_index, new_size)
+        del blocker
 
     def update_shadow(self, value):
         self.shadow_effect.setEnabled(value > 0)

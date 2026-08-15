@@ -57,6 +57,8 @@ _SCHEMA_STATEMENTS = (
         cbm REAL,
         ongkir_per_kg INTEGER,
         ongkir_per_cbm INTEGER,
+        subtotal_ongkir INTEGER DEFAULT 0,
+        jenis_pajak TEXT DEFAULT 'NONPAJAK',
         total_ongkir INTEGER,
         pembayaran TEXT,
         status_resi TEXT,
@@ -67,10 +69,51 @@ _SCHEMA_STATEMENTS = (
         ket_manifest TEXT,
         rincian_json TEXT,
         is_synced INTEGER DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (kode_cabang)
             REFERENCES data_cabang (kode_cabang)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS resi_audit (
+        id_audit INTEGER PRIMARY KEY AUTOINCREMENT,
+        kode_cabang TEXT NOT NULL,
+        no_resi_lama TEXT NOT NULL,
+        no_resi_baru TEXT NOT NULL,
+        username TEXT NOT NULL DEFAULT 'SYSTEM',
+        sumber TEXT NOT NULL,
+        revision_sebelum INTEGER,
+        revision_sesudah INTEGER,
+        perubahan_json TEXT NOT NULL DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_resi_audit_nomor_lama
+    ON resi_audit (no_resi_lama, kode_cabang, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_resi_audit_nomor_baru
+    ON resi_audit (no_resi_baru, kode_cabang, created_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS data_resi_detail (
+        id_detail INTEGER PRIMARY KEY AUTOINCREMENT,
+        no_resi TEXT NOT NULL,
+        urutan INTEGER NOT NULL,
+        nama_barang TEXT,
+        koli TEXT,
+        berat REAL DEFAULT 0,
+        cbm REAL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (no_resi, urutan),
+        FOREIGN KEY (no_resi)
+            REFERENCES data_resi (no_resi)
+            ON UPDATE CASCADE
+            ON DELETE CASCADE
     )
     """,
     """
@@ -222,12 +265,48 @@ def _pastikan_migrasi_manifest(cursor) -> None:
         cursor.execute("ALTER TABLE manifest ADD COLUMN note_manifest TEXT")
 
 
+def _pastikan_bootstrap_cabang_minimal(cursor) -> None:
+    """
+    Menjamin foreign key cabang selalu valid walau aplikasi dijalankan tanpa seed.
+
+    PUSAT adalah cabang default white-label yang dipakai CURRENT_SESSION, sedangkan
+    DEV_SYS adalah cabang internal untuk sesi developer. INSERT OR IGNORE sengaja
+    digunakan agar konfigurasi cabang yang sudah ada tidak pernah ditimpa.
+    """
+    cabang_minimal = (
+        (
+            "PUSAT",
+            "KANTOR PUSAT",
+            "INV",
+            json.dumps({"DEFAULT": 1000}, ensure_ascii=False),
+            json.dumps({"DEFAULT": "INV"}, ensure_ascii=False),
+        ),
+        (
+            "DEV_SYS",
+            "DEVELOPER SYSTEM",
+            "SYS",
+            json.dumps({"DEFAULT": 1000}, ensure_ascii=False),
+            json.dumps({"DEFAULT": "SYS"}, ensure_ascii=False),
+        ),
+    )
+    cursor.executemany(
+        """
+        INSERT OR IGNORE INTO data_cabang (
+            kode_cabang, nama_cabang, resi_prefix,
+            start_seq_json, aturan_prefix
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        cabang_minimal,
+    )
+
+
 def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
     """
     Membuat seluruh struktur database aplikasi.
 
-    Fungsi ini hanya membuat tabel dan tidak memasukkan data demo.
-    Data demo dimasukkan melalui seed_demo_db_mahkota.py.
+    Fungsi ini membuat schema dan bootstrap cabang minimum yang netral/white-label.
+    Data customer, akun contoh, dan branding tetap menjadi tanggung jawab seed opsional.
     """
     db_path = _resolve_db_path(db_name)
     try:
@@ -237,6 +316,7 @@ def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
             for statement in _SCHEMA_STATEMENTS:
                 cursor.execute(statement)
             _pastikan_migrasi_manifest(cursor)
+            _pastikan_bootstrap_cabang_minimal(cursor)
             conn.commit()
         print(f"✅ Database berhasil dibuat/diperiksa: {db_path}")
         return db_path
