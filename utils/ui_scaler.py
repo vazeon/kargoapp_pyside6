@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHeaderView,
     QLayout,
+    QMessageBox,
     QSplitter,
     QTabBar,
     QToolBar,
@@ -40,7 +41,6 @@ from utils.ui_metrics import (
     skalakan_px,
     tetapkan_ui_scale_aktif,
 )
-
 
 QT_GEOMETRY_MAX = 16_777_215
 
@@ -188,14 +188,46 @@ def _ancestor_item_view(widget: QWidget) -> bool:
     return False
 
 
+def _dalam_message_box(widget: QWidget) -> bool:
+    """True bila widget adalah QMessageBox atau child internalnya."""
+    current = widget
+    while current is not None:
+        if isinstance(current, QMessageBox):
+            return True
+        try:
+            current = current.parentWidget()
+        except RuntimeError:
+            return False
+    return False
+
+
+def _layout_dalam_message_box(layout: QLayout) -> bool:
+    """True bila layout dimiliki oleh QMessageBox atau salah satu child-nya."""
+    try:
+        parent = layout.parent()
+    except RuntimeError:
+        return False
+
+    while parent is not None:
+        if isinstance(parent, QMessageBox):
+            return True
+        if isinstance(parent, QWidget) and _dalam_message_box(parent):
+            return True
+        try:
+            parent = parent.parent()
+        except RuntimeError:
+            return False
+    return False
+
+
 class ResponsiveUIScaler(QObject):
     """Manager responsive untuk satu top-level/root QWidget."""
 
     def __init__(
-        self,
-        root: QWidget,
-        *,
-        on_scale_changed: Optional[Callable[[float], None]] = None,
+            self,
+            root: QWidget,
+            *,
+            on_scale_changed: Optional[Callable[[float], None]] = None,
     ) -> None:
         super().__init__(root)
         self._root = root
@@ -251,7 +283,6 @@ class ResponsiveUIScaler(QObject):
             return
 
     def _on_screen_changed(self, *_args) -> None:
-        # Jangan simpan atau gunakan QScreen dari argumen signal.
         self.schedule_apply()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
@@ -261,7 +292,6 @@ class ResponsiveUIScaler(QObject):
         event_type = event.type()
         if event_type in {
             QEvent.Type.ChildAdded,
-            QEvent.Type.StyleChange,
             QEvent.Type.Show,
             QEvent.Type.ParentChange,
         }:
@@ -286,6 +316,8 @@ class ResponsiveUIScaler(QObject):
         except RuntimeError:
             return
         for widget in widgets:
+            if _dalam_message_box(widget):
+                continue
             try:
                 if not bool(widget.property("_ui_scaler_filter_installed")):
                     widget.installEventFilter(self)
@@ -295,8 +327,15 @@ class ResponsiveUIScaler(QObject):
         self._ensure_screen_connection()
 
     def _scale_widget_constraints(self, widget: QWidget, scale: float) -> None:
-        # Internal children QAbstractItemView ditangani tabel/Qt, kecuali widget
-        # yang secara eksplisit diberi baseline oleh helper (mis. cell editor).
+        # OPTIMASI: FAST EXIT! Jika sudah di-scale pada ukuran ini, lewati
+        last_scale = _property_text(widget, "_ui_scaler_last_scale")
+        if last_scale == str(scale):
+            return
+        _set_property(widget, "_ui_scaler_last_scale", str(scale))
+
+        if _dalam_message_box(widget):
+            return
+
         if _ancestor_item_view(widget) and not bool(widget.property(_EXPLICIT_GEOMETRY)):
             return
         if isinstance(widget, QHeaderView):
@@ -311,10 +350,6 @@ class ResponsiveUIScaler(QObject):
             target_min_w = skalakan_px(min_w, scale=scale) if min_w > 0 else 0
             target_min_h = skalakan_px(min_h, scale=scale) if min_h > 0 else 0
 
-            # Komponen kecil tertentu (mis. icon-only QToolButton) dapat
-            # menetapkan floor ukuran render agar glyph tetap utuh pada scale
-            # compact. Floor tidak mengubah baseline dan tidak memengaruhi
-            # widget lain yang tidak memasang property ini.
             render_floor_w = _optional_positive_int_property(widget, _MIN_RENDER_W)
             render_floor_h = _optional_positive_int_property(widget, _MIN_RENDER_H)
             if render_floor_w is not None:
@@ -378,9 +413,9 @@ class ResponsiveUIScaler(QObject):
                 pass
 
     def _scale_widget_stylesheet(self, widget: QWidget, scale: float) -> None:
-        # Style item-view/tabel dikelola layer tabel/tema tersendiri. Melewatkan
-        # item-view juga mencegah akumulasi QSS pada subclass yang override
-        # setStyleSheet (mis. frozen table).
+        if _dalam_message_box(widget):
+            return
+
         if isinstance(widget, QAbstractItemView) or _ancestor_item_view(widget):
             return
 
@@ -388,14 +423,23 @@ class ResponsiveUIScaler(QObject):
             current = widget.styleSheet()
         except RuntimeError:
             return
+
+        last_scale = _property_text(widget, "_ui_scaler_qss_last_scale")
+        last_scaled = _property_text(widget, _LAST_SCALED_QSS)
+
+        # Fast-exit hanya aman bila scale DAN stylesheet masih sama.
+        # Saat toggle theme pada scale yang sama, QSS baru harus ditangkap
+        # sebagai baseline baru lalu di-scale satu kali.
+        if last_scale == str(scale) and current == last_scaled:
+            return
+
         if not current:
+            _set_property(widget, "_ui_scaler_qss_last_scale", str(scale))
+            _set_property(widget, _LAST_SCALED_QSS, "")
             return
 
         base = _property_text(widget, _BASE_QSS)
-        last_scaled = _property_text(widget, _LAST_SCALED_QSS)
 
-        # Bila style diubah oleh theme/module setelah apply terakhir, jadikan
-        # style baru itu sebagai baseline, bukan hasil scale sebelumnya.
         if base is None or current != last_scaled:
             base = current
             _set_property(widget, _BASE_QSS, base)
@@ -407,6 +451,7 @@ class ResponsiveUIScaler(QObject):
             except RuntimeError:
                 return
         _set_property(widget, _LAST_SCALED_QSS, scaled)
+        _set_property(widget, "_ui_scaler_qss_last_scale", str(scale))
 
     def _iter_layouts(self):
         root = self._root
@@ -435,6 +480,15 @@ class ResponsiveUIScaler(QObject):
         return result
 
     def _scale_layout(self, layout: QLayout, scale: float) -> None:
+        # OPTIMASI: FAST EXIT! Jika sudah di-scale pada ukuran ini, lewati
+        last_scale = _property_text(layout, "_ui_scaler_last_scale")
+        if last_scale == str(scale):
+            return
+        _set_property(layout, "_ui_scaler_last_scale", str(scale))
+
+        if _layout_dalam_message_box(layout):
+            return
+
         try:
             margins = layout.contentsMargins()
             base_left = _property_int(layout, "_ui_base_margin_left", margins.left())
@@ -515,7 +569,6 @@ class ResponsiveUIScaler(QObject):
                 )
             except RuntimeError:
                 continue
-
 
     def apply_now(self) -> None:
         self._apply_pending = False

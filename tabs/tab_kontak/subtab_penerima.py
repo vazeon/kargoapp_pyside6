@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 
 from config import CURRENT_SESSION
 import services.database_service as db_service
-from themes.components.combobox import terapkan_popup_bawah_combobox
 from themes.modules.kontak_armada import (
     get_kontak_riwayat_styles,
     get_penerima_blacklist_colors,
@@ -89,7 +88,6 @@ class _ComboBoxDelegate(QStyledItemDelegate):
         combo = QComboBox(parent)
         combo.addItems(self._options())
         atur_tinggi_input(combo)
-        terapkan_popup_bawah_combobox((combo,))
         return combo
 
     def setEditorData(self, editor, index):
@@ -506,7 +504,6 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         fields["provinsi"].setToolTip(
             "Pilihan mengikuti pengaturan provinsi_tujuan pada database/session aktif."
         )
-        terapkan_popup_bawah_combobox((fields["provinsi"], fields["pembayaran"]))
 
         widgets = tuple(fields.values())
         for widget in widgets:

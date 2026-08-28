@@ -28,6 +28,7 @@ THEME_COLORS = {
             "disabled_text": "#94a3b8",
         },
         "ui": {
+            "main_background": "#f8fafc",
             "text_primary": "#0f172a",
             "text_body": "#0f172a",
             "text_muted": "#64748b",
@@ -98,6 +99,7 @@ THEME_COLORS = {
             "disabled_text": "#94a3b8",
         },
         "ui": {
+            "main_background": "#202124",
             "text_primary": "#ffffff",
             "text_body": "#f8fafc",
             "text_muted": "#94a3b8",

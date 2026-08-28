@@ -81,7 +81,9 @@ class StatusColorDelegate(OverflowTooltipDelegate):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
 
-        # Preserve the view's native/QSS selection appearance.
+        background_color = None
+
+        # 1. Evaluasi warna HANYA jika baris tidak sedang di-select
         if not (opt.state & QStyle.StateFlag.State_Selected):
             background, foreground = self._color_provider(
                 is_dark=self._is_dark,
@@ -92,24 +94,33 @@ class StatusColorDelegate(OverflowTooltipDelegate):
             background_color = _to_qcolor(background)
             foreground_color = _to_qcolor(foreground)
 
-            if background_color is not None:
-                opt.backgroundBrush = QBrush(background_color)
-
+            # Manipulasi warna teks cukup lewat palette (aman dari intervensi QSS)
             if foreground_color is not None:
                 text_brush = QBrush(foreground_color)
                 opt.palette.setBrush(QPalette.ColorRole.Text, text_brush)
                 opt.palette.setBrush(QPalette.ColorRole.WindowText, text_brush)
 
-        # Jika cell memakai setCellWidget()/indexWidget (mis. STATUS PENAGIHAN
-        # dengan QLabel hyperlink), widget tersebut menjadi renderer teks utama.
-        # Delegate tetap menggambar background/selection/highlight, tetapi teks
-        # QTableWidgetItem di bawahnya harus disembunyikan agar tidak dobel.
+        # Sembunyikan teks bawaan jika cell menggunakan indexWidget
         view = self.parent()
         if isinstance(view, QAbstractItemView) and view.indexWidget(index) is not None:
             opt.text = ""
 
+        # --- 2. THE PRO WAY: Pengecatan Manual dengan Manajemen State & Optimasi ---
+        if background_color is not None:
+            painter.save()                      # Kunci state global QPainter
+            painter.setClipRect(opt.rect)       # Cegah cat meluber ke luar batas koordinat cell
+            painter.fillRect(opt.rect, background_color)
+            painter.restore()                   # Lepas state agar tidak merusak antrean render cell lain
+
+            # Optimasi: Kosongkan brush bawaan dari 'opt'
+            # Ini memberi tahu QStyle engine agar SKIP mencoba mengecat background
+            # sehingga kita menghemat overhead CPU (mencegah double-painting)
+            opt.backgroundBrush = QBrush(Qt.BrushStyle.NoBrush)
+        # --------------------------------------------------------------------------
+
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
+        # Biarkan style bawaan Qt menggambar sisanya (teks, ikon, indikator seleksi/fokus)
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
 
 

@@ -10,7 +10,6 @@ from themes.colors import get_theme_colors
 
 ARMADA_PREVIEW_FOTO_STYLE = """
     border: 2px dashed #9ca3af;
-    border-radius: 8px;
     color: #9ca3af;
     background-color: transparent;
 """

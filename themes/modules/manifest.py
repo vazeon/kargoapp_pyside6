@@ -18,6 +18,8 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     sz_base = sizes["sz_base"]
     sz_input = sizes["sz_input"]
     sz_title = sizes["sz_title"]
+    sz_total = sizes["sz_total"]
+
     ui = get_theme_colors(is_dark)["ui"]
     placeholder = ui["placeholder_text"]
 
@@ -76,28 +78,27 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
     """
 
     txt_tanggal_manifest = f"""
-        QLineEdit {{
+        QLabel {{
             color: {_warna_tema(is_dark, "#F8FAFC", "#10233F")};
             placeholder-text-color: {placeholder};
-            background: {_warna_tema(is_dark, "#181C24", "#FFFFFF")};
-            border: 1px solid {_warna_tema(is_dark, "#4B5563", "#C8D4E3")};
-            border-radius: 5px;
-            padding: 2px 8px;
+            background: transparent;
+            border: none;
+            padding: 2px 10px;
             font-size: {sz_base}px;
             font-family: '{get_master_font()}';
         }}
     """
 
     txt_no_manifest = f"""
-        QLineEdit {{
-            color: {_warna_tema(is_dark, "#FFC400", "#C90000")};
+        QLabel {{
+            color: {_warna_tema(is_dark, "#FFC400", "#3B82F6")};
             placeholder-text-color: {placeholder};
-            background: {_warna_tema(is_dark, "#171B23", "#FFF2F2")};
-            border: 2px solid {_warna_tema(is_dark, "#3B82F6", "#FF4D5E")};
+            background: {_warna_tema(is_dark, "#171B23", "#F2FCFF")};
+            border: 1px solid {_warna_tema(is_dark, "#3B82F6", "#3B82F6")};
             border-radius: 6px;
-            padding: 2px 10px;
-            font-size: {sz_base + 3}px;
-            font-weight: 800;
+            padding: 6px 12px;
+            font-size: {sz_total}px;
+            font-weight: 500;
             letter-spacing: 1px;
             font-family: '{get_master_font()}';
         }}

@@ -36,7 +36,7 @@ def get_invoice_styles(
     history_qss = f"""
         QTableWidget {{
             background:{ui["table_background"]};
-            alternate-background:{ui["table_alternate_background"]};
+            alternate-background-color:{ui["table_alternate_background"]};
             color:{ui["table_text"]};
             gridline-color:{ui["table_grid"]};
             font-size:{size_base}px;
@@ -53,12 +53,15 @@ def get_invoice_styles(
             background:{ui["selection_background"]};
             color:{ui["selection_text"]};
         }}
+        QTableWidget::item:hover:!selected {{
+            background: transparent;
+        }}
     """
 
     editor_qss = f"""
         QTableWidget {{
             background:{ui["field_background"]};
-            alternate-background:{_warna_tema(is_dark, "#25282e", "#f8fafc")};
+            alternate-background-color:{_warna_tema(is_dark, "#25282e", "#f8fafc")};
             color:{ui["table_text"]};
             gridline-color:{ui["field_border"]};
             font-size:{size_base}px;
@@ -74,6 +77,9 @@ def get_invoice_styles(
         QTableWidget::item:selected {{
             background:{_warna_tema(is_dark, "#0ea5e9", "#bfdbfe")};
             color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
+        }}
+        QTableWidget::item:hover:!selected {{
+            background: transparent;
         }}
     """
 
@@ -130,11 +136,6 @@ def get_invoice_styles(
             font-size:{size_input}px;
             font-family:'{get_master_font()}';
             padding:6px;
-            background:{ui["field_background"]};
-            color:{ui["text_primary"]};
-            placeholder-text-color:{ui["placeholder_text"]};
-            border:1px solid {ui["field_border"]};
-            border-radius:4px;
         """,
         "tabel_histori": history_qss,
         "tabel_editor": editor_qss,

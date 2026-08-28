@@ -1,7 +1,6 @@
 # themes/modules/resi.py
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font
-
+from utils.typography import get_master_font, get_global_font_sizes
 
 # Caller ukuran font khusus Tab Resi.
 # Ubah nilai di sini untuk menyesuaikan tipografi tanpa menyentuh kode widget.
@@ -86,8 +85,8 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
 
 
 def get_resi_detail_barang_theme(
-    is_dark: bool,
-    sz_base: int,
+        is_dark: bool,
+        sz_base: int,
 ) -> dict:
     """Warna dan style khusus tabel Detail Barang tanpa mengubah scrollbar."""
     ui = get_theme_colors(is_dark)["ui"]
@@ -100,36 +99,6 @@ def get_resi_detail_barang_theme(
         "grid": _warna_tema(is_dark, "#2d3139", "#e2e8f0"),
         "selection_background": ui["selection_background"],
         "selection_text": "#ffffff",
-
-        "header": f"""
-            QHeaderView::section {{
-                font-size: {UKURAN_FONT_INPUT}px;
-                font-family: '{get_master_font()}';
-                background-color: {_warna_tema(is_dark, "#31353d", "#243752")};
-                color: #ffffff;
-                font-weight: 500;
-                padding: 6px;
-                border: none;
-                border-right: 2px solid {_warna_tema(is_dark, "#64748b", "#a8b7c8")};
-                border-bottom: 1px solid {_warna_tema(is_dark, "#64748b", "#a8b7c8")};
-            }}
-        """,
-
-        "cell_input": f"""
-            QLineEdit {{
-                font-size: {UKURAN_FONT_INPUT}px;
-                font-family: '{get_master_font()}';
-                background-color: {ui["field_background"]};
-                color: {ui["text_primary"]};
-                placeholder-text-color: {placeholder};
-                border: 1px solid {ui["field_border"]};
-                border-radius: 0px;
-                padding: 4px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {ui["selection_background"]};
-            }}
-        """,
     }
 
 
@@ -159,18 +128,21 @@ def get_btn_simpan_cetak_style() -> str:
 
 
 def get_resi_styles(
-    is_dark: bool,
-    sz_title: int,
-    sz_tag: int,
-    sz_sm: int,
-    sz_base: int,
-    sz_input: int,
-    sz_total: int,
-    z: int = 0,
+        is_dark: bool,
+        z: int = 0,
 ) -> dict:
     """Menghasilkan seluruh style UI untuk TabResi."""
+    sizes = get_global_font_sizes(z)
+    sz_title = sizes["sz_title"]
+    sz_tag = sizes["sz_tag"]
+    sz_sm = sizes["sz_sm"]
+    sz_base = sizes["sz_base"]
+    sz_input = sizes["sz_input"]
+    sz_total = sizes["sz_total"]
+
     ui = get_theme_colors(is_dark)["ui"]
     placeholder = ui["placeholder_text"]
+
     input_style = f"""
         QLineEdit, QTextEdit, QDateEdit {{
             font-size: {UKURAN_FONT_INPUT}px;
@@ -278,13 +250,12 @@ def get_resi_styles(
             font-family: '{get_master_font()}';
         """,
         "date_input": f"""
-            QDateEdit {{
+            QLabel {{
                 font-size: {UKURAN_FONT_INPUT}px;
                 font-family: '{get_master_font()}';
                 padding: 2px 10px;
-                border: 1px solid {ui["field_border"]};
-                border-radius: 4px;
-                background-color: {ui["field_background"]};
+                border: none;
+                background-color: transparent;
                 color: {ui["text_primary"]};
             }}
         """,

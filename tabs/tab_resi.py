@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QEvent,
     QPropertyAnimation,
     QSettings,
+    QStringListModel,
     Qt,
     QTimer,
 )
@@ -41,8 +42,8 @@ from PySide6.QtWidgets import (
 from config import CURRENT_SESSION
 import services.database_service as db_service
 from themes.components.notification import FADE_NOTIFICATION_STYLE
-from themes.components.combobox import terapkan_popup_bawah_combobox
 from themes.components.calendar import terapkan_style_kalender
+from themes.components.table import get_table_styles
 from themes.modules.resi import (
     UKURAN_FONT_HISTORI_RESI,
     UKURAN_FONT_INPUT,
@@ -135,6 +136,7 @@ class FadeNotification(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -295,16 +297,11 @@ class TabResi(QWidget):
 
         area_tanggal = QHBoxLayout()
         area_tanggal.setSpacing(RESI_SPACING)
-        self.lbl_tgl_tag = QLabel("Tanggal:")
-        self.date_input = QDateEdit(self)
-        self.date_input.setDate(QDate.currentDate())
-        self.date_input.setReadOnly(True)
-        self.date_input.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.date_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.date_input = QLabel(self)
+        self.date_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.date_input.setFixedWidth(RESI_DATE_INPUT_WIDTH)
-        self.date_input.setDisplayFormat("dddd, dd/MM/yyyy")
-        self.date_input.dateChanged.connect(self.otomatisasi_nomor_resi)
-        area_tanggal.addWidget(self.lbl_tgl_tag)
+        self._tanggal_transaksi = QDate.currentDate()
+        self.set_tanggal_resi(self._tanggal_transaksi)
         area_tanggal.addWidget(self.date_input)
         top_bar.addLayout(area_tanggal)
         top_bar.addStretch(1)
@@ -428,7 +425,18 @@ class TabResi(QWidget):
         self.table_items.setHorizontalHeaderLabels(
             ["NO.", "NAMA BARANG", "KOLI", "BERAT (Kg)", "KUBIK (m³)"]
         )
+        # Tabel sendiri tidak perlu ikut menangkap fokus (mis. saat mouse
+        # hover/lewat di atasnya). Fokus tetap berpindah normal ke QLineEdit
+        # di dalam sel lewat klik langsung atau navigasi Tab.
+        self.table_items.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         header = self.table_items.horizontalHeader()
+
+        header.setHighlightSections(False)
+
+        font_header = header.font()
+        font_header.setBold(True)
+        header.setFont(font_header)
+
         for kolom in self.LEBAR_KOLOM_DASAR:
             mode = (
                 QHeaderView.ResizeMode.Fixed
@@ -659,6 +667,16 @@ class TabResi(QWidget):
         layout.addLayout(header)
         layout.addWidget(self.list_histori)
 
+    def set_tanggal_resi(self, qdate):
+        """Pure setter: Hanya update teks label dan variabel, tanpa side-effect."""
+        self._tanggal_transaksi = qdate
+        nama_hari = {
+            1: "Senin", 2: "Selasa", 3: "Rabu", 4: "Kamis",
+            5: "Jumat", 6: "Sabtu", 7: "Minggu"
+        }
+        teks = f"{nama_hari.get(qdate.dayOfWeek(), '')}, {qdate.toString('dd/MM/yyyy')}"
+        self.date_input.setText(teks)
+
     def reset_form_input_manual(self, _link=None):
         jawaban = QMessageBox.question(
             self,
@@ -673,8 +691,7 @@ class TabResi(QWidget):
             return
 
         self._keluar_mode_edit()
-        with _blokir_signal_sementara(self.date_input):
-            self.date_input.setDate(QDate.currentDate())
+        self.set_tanggal_resi(QDate.currentDate())
 
         reset_form_input_global(
             self.group_pengirim,
@@ -787,36 +804,59 @@ class TabResi(QWidget):
         is_dark: bool,
         sz_base: int,
     ) -> None:
-        """Terapkan tema tabel tanpa memberi stylesheet pada scrollbar."""
+        """Terapkan style lokal Detail Barang tanpa mengubah perilaku widget."""
 
         table = getattr(self, "table_items", None)
-
         if table is None:
             return
 
-        theme = konversi_style_font_ke_point(get_resi_detail_barang_theme(
+        theme = get_resi_detail_barang_theme(
             is_dark=is_dark,
             sz_base=sz_base,
-        ))
+        )
 
-        self._detail_barang_input_qss = theme["cell_input"]
+        # Override lokal ini mencegah style global pyqtdarktheme membuat
+        # QLineEdit di dalam cell tampak aktif hanya karena pointer melintas.
+        # State focus tetap muncul hanya saat widget benar-benar menerima focus.
+        qss = get_table_styles(is_dark) + f"""
+            QTableWidget {{
+                background-color: {theme["background"]};
+                alternate-background-color: {theme["alternate_background"]};
+                color: {theme["text"]};
+                gridline-color: {theme["grid"]};
+            }}
 
+            QTableWidget QLineEdit {{
+                background-color: transparent;
+                color: {theme["text"]};
+                border: none;
+                padding: 0px 4px;
+            }}
+
+            QTableWidget QLineEdit:hover {{
+                background-color: transparent;
+                border: none;
+            }}
+
+            QTableWidget QLineEdit:focus {{
+                background-color: {theme["background"]};
+                border: 1px solid {theme["selection_background"]};
+            }}
+        """
+        table.setStyleSheet(konversi_font_qss_ke_point(qss))
         table.setAlternatingRowColors(True)
         table.setShowGrid(True)
+        table.setMouseTracking(False)
+        table.viewport().setMouseTracking(False)
 
         font_table = table.font()
         font_table.setPointSizeF(ukuran_font_px_ke_pt(sz_base))
         table.setFont(font_table)
 
-        table.horizontalHeader().setStyleSheet(
-            theme["header"]
-        )
-
         for row in range(table.rowCount()):
             for column in self.KOLOM_INPUT_BARANG:
                 editor = table.cellWidget(row, column)
                 if editor is not None:
-                    editor.setStyleSheet(theme["cell_input"])
                     atur_tinggi_input(
                         editor,
                         tinggi=self._tinggi_input_detail_barang(),
@@ -862,12 +902,6 @@ class TabResi(QWidget):
         fs = get_global_font_sizes(0)
         styles = get_resi_styles(
             is_dark,
-            fs["sz_title"],
-            fs["sz_tag"],
-            fs["sz_sm"],
-            fs["sz_base"],
-            fs["sz_input"],
-            fs["sz_total"],
             z=0,
         )
         return fs, konversi_style_font_ke_point(styles)
@@ -901,7 +935,6 @@ class TabResi(QWidget):
                 widget.setStyleSheet(styles["input_utama"])
 
         comboboxes = (self.cb_provinsi, self.cb_pajak, self.cb_payment)
-        terapkan_popup_bawah_combobox(comboboxes)
 
         if self.txt_total_ongkir is not None:
             self.txt_total_ongkir.setStyleSheet(styles["txt_total_ongkir"])
@@ -1032,6 +1065,36 @@ class TabResi(QWidget):
         ):
             widget.setValidator(self.upper_validator)
 
+    def _pastikan_autocomplete(self):
+        """Buat model dan completer Resi satu kali agar lifetime object Qt stabil."""
+        if hasattr(self, "model_autocomplete_pengirim"):
+            return
+
+        self.model_autocomplete_pengirim = QStringListModel(self)
+        self.model_autocomplete_penerima = QStringListModel(self)
+
+        self.comp_pengirim = self._buat_completer(
+            self.model_autocomplete_pengirim,
+            self.txt_pengirim,
+            self.pilih_autocomplete_pengirim,
+        )
+        self.comp_penerima = self._buat_completer(
+            self.model_autocomplete_penerima,
+            self.txt_penerima,
+            self.pilih_autocomplete_penerima,
+        )
+
+        self._hubungkan_autocomplete_once(
+            self.txt_pengirim,
+            "comp_pengirim",
+            lambda: self.eksekusi_autofill_pengirim(self.txt_pengirim.text()),
+        )
+        self._hubungkan_autocomplete_once(
+            self.txt_penerima,
+            "comp_penerima",
+            lambda: self.eksekusi_autofill_penerima(self.txt_penerima.text()),
+        )
+
     def setup_autocomplete(self):
         try:
             self.kode_cabang = self._kode_cabang_aktif()
@@ -1045,24 +1108,10 @@ class TabResi(QWidget):
                 len(penerima),
             )
 
-            self.txt_pengirim.setCompleter(None)
-            self.txt_penerima.setCompleter(None)
-            self.comp_pengirim = self._buat_completer(
-                pengirim, self.txt_pengirim, self.pilih_autocomplete_pengirim
-            )
-            self.comp_penerima = self._buat_completer(
-                penerima, self.txt_penerima, self.pilih_autocomplete_penerima
-            )
-            self._hubungkan_autocomplete_once(
-                self.txt_pengirim,
-                "comp_pengirim",
-                lambda: self.eksekusi_autofill_pengirim(self.txt_pengirim.text()),
-            )
-            self._hubungkan_autocomplete_once(
-                self.txt_penerima,
-                "comp_penerima",
-                lambda: self.eksekusi_autofill_penerima(self.txt_penerima.text()),
-            )
+            self._pastikan_autocomplete()
+            self.model_autocomplete_pengirim.setStringList(pengirim)
+            self.model_autocomplete_penerima.setStringList(penerima)
+
             for widget in (
                 self.txt_hp_pengirim, self.txt_alamat_pengirim, self.txt_kota_pengirim,
                 self.txt_hp_penerima, self.txt_alamat_penerima, self.txt_kota_penerima,
@@ -1076,8 +1125,8 @@ class TabResi(QWidget):
         return sorted({str(item).strip().upper() for item in data if str(item).strip()})
 
     @staticmethod
-    def _buat_completer(data, lineedit, callback):
-        completer = QCompleter(data, lineedit)
+    def _buat_completer(model, lineedit, callback):
+        completer = QCompleter(model, lineedit)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
@@ -1427,6 +1476,8 @@ class TabResi(QWidget):
 
     def _buat_input_barang(self, placeholder, jenis):
         widget = self._lineedit(placeholder)
+        widget.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
         if jenis == "nama":
             widget.textChanged.connect(lambda: paksa_kapital_lineedit(widget))
         else:
@@ -1438,10 +1489,6 @@ class TabResi(QWidget):
             else:
                 widget.setValidator(get_decimal_validator(widget))
                 widget.textChanged.connect(self.kalkulator_finansial_otomatis)
-
-        input_qss = getattr(self, "_detail_barang_input_qss", "")
-        if input_qss:
-            widget.setStyleSheet(input_qss)
 
         atur_tinggi_input(
             widget,
@@ -1580,8 +1627,7 @@ class TabResi(QWidget):
         # Resi baru selalu memakai tanggal hari ini. Sumber tanggal yang sama
         # diteruskan ke database dan data cetak agar keduanya tidak berbeda.
         tanggal_transaksi = QDate.currentDate()
-        with _blokir_signal_sementara(self.date_input):
-            self.date_input.setDate(tanggal_transaksi)
+        self.set_tanggal_resi(tanggal_transaksi)
 
         self.otomatisasi_nomor_resi()
         ctx = self._siapkan_transaksi_form(
@@ -1771,7 +1817,7 @@ class TabResi(QWidget):
         fmt_kg = _format_ongkir_aman(ongkir_kg)
         fmt_m3 = _format_ongkir_aman(ongkir_m3)
         return {
-            "tanggal": format_tanggal_ke_ui(self.date_input.date()),
+            "tanggal": format_tanggal_ke_ui(self._tanggal_transaksi),
             "no_resi": no_resi,
             "pengirim_nama": self.txt_pengirim.text().strip(),
             "pengirim_telp": self.txt_hp_pengirim.text().strip(),
@@ -2150,8 +2196,9 @@ class TabResi(QWidget):
         }]
 
     def _isi_identitas_edit_dari_row(self, row):
-        with _blokir_signal_sementara(self.date_input):
-            self.date_input.setDate(self._qdate_dari_nilai_db(row[0]))
+        self.set_tanggal_resi(
+            self._qdate_dari_nilai_db(row[0])
+        )
 
         self.txt_pengirim.setText(str(row[1] or ""))
         self.txt_hp_pengirim.setText(str(row[2] or ""))
@@ -2307,7 +2354,7 @@ class TabResi(QWidget):
 
         self.otomatisasi_nomor_resi()
         no_resi_baru = str(self.txt_resi_display.text() or no_resi_lama).strip()
-        tanggal_edit = self.date_input.date()
+        tanggal_edit = self._tanggal_transaksi
         ctx = self._siapkan_transaksi_form(
             no_resi_baru,
             format_tanggal_ke_db(tanggal_edit),
@@ -2415,8 +2462,7 @@ class TabResi(QWidget):
         # date_input berada di top bar (di luar container reset). Resi baru harus
         # selalu kembali ke tanggal hari ini setelah keluar dari mode Edit.
         if hasattr(self, "date_input"):
-            with _blokir_signal_sementara(self.date_input):
-                self.date_input.setDate(QDate.currentDate())
+            self.set_tanggal_resi(QDate.currentDate())
 
         # Pertahankan pilihan yang pada implementasi lama tidak ikut di-reset.
         status_combo = {

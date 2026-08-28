@@ -6,7 +6,10 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -24,12 +27,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from config import CURRENT_SESSION, DATA_CLIENT, refresh_data_client
+from config import (
+    CENTRAL_BRANCH_ROLES,
+    CURRENT_SESSION,
+    DATA_CLIENT,
+    refresh_data_client,
+)
 
 import services.database_service as db_service
 
 from themes.modules.setting import get_setting_styles
-from themes.components.combobox import terapkan_popup_bawah_combobox
 
 from utils.typography import (
     get_master_font,
@@ -97,7 +104,8 @@ class TabSettingSistem(QWidget):
             "📦  Format & Resi",
             "🏦  Rekening Bank",
             "📍  Kantor Cabang",
-            "🎨  Tampilan & Font"
+            "👤  Manajemen User",
+            "🎨  Tampilan & Font",
         ]
         self.sidebar_list.addItems(menus)
         self.sidebar_list.setCurrentRow(0)
@@ -117,12 +125,14 @@ class TabSettingSistem(QWidget):
         self.page_resi = QWidget()
         self.page_bank = QWidget()
         self.page_cabang = QWidget()
+        self.page_user_access = QWidget()
         self.page_font = QWidget()
 
         self._build_page_general()
         self._build_page_resi()
         self._build_page_bank()
         self._build_page_cabang()
+        self._build_page_user_access()
         self._build_page_font()
 
         atur_tinggi_input((
@@ -144,17 +154,11 @@ class TabSettingSistem(QWidget):
             self.combo_font,
         ))
 
-        terapkan_popup_bawah_combobox(
-            (
-                self.cmb_format_resi_manual,
-                self.combo_font,
-            )
-        )
-
         self.stacked_widget.addWidget(self.page_general)
         self.stacked_widget.addWidget(self.page_resi)
         self.stacked_widget.addWidget(self.page_bank)
         self.stacked_widget.addWidget(self.page_cabang)
+        self.stacked_widget.addWidget(self.page_user_access)
         self.stacked_widget.addWidget(self.page_font)
 
         self.sidebar_list.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
@@ -434,6 +438,598 @@ class TabSettingSistem(QWidget):
         layout.addWidget(self.group_branches)
         layout.addStretch()
 
+    def _build_page_user_access(self):
+        layout = QVBoxLayout(self.page_user_access)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        lbl_title = QLabel("Manajemen User & Akses Cabang")
+        lbl_title.setProperty("is_page_title", True)
+        layout.addWidget(lbl_title)
+
+        self.group_user_access = QGroupBox("Akun User dan Hak Akses Cabang")
+        vbox = QVBoxLayout(self.group_user_access)
+        vbox.setContentsMargins(*SETTING_BRANCH_GROUP_MARGINS)
+        vbox.setSpacing(SETTING_BRANCH_GROUP_SPACING)
+
+        action_bar = QHBoxLayout()
+        self.btn_tambah_user = QPushButton("➕ TAMBAH USER")
+        self.btn_edit_user = QPushButton("✏️ EDIT USER")
+        self.btn_reset_password_user = QPushButton("🔑 RESET PASSWORD")
+        self.btn_toggle_status_user = QPushButton("⛔ NONAKTIFKAN")
+        self.btn_tambah_user.clicked.connect(self.tambah_user)
+        self.btn_edit_user.clicked.connect(self.edit_user_terpilih)
+        self.btn_reset_password_user.clicked.connect(self.reset_password_user_terpilih)
+        self.btn_toggle_status_user.clicked.connect(self.toggle_status_user_terpilih)
+        for button in (
+            self.btn_tambah_user,
+            self.btn_edit_user,
+            self.btn_reset_password_user,
+            self.btn_toggle_status_user,
+        ):
+            action_bar.addWidget(button)
+        action_bar.addStretch()
+
+        self.table_user_access = QTableWidget()
+        self.table_user_access.setAlternatingRowColors(True)
+        self.table_user_access.verticalHeader().setVisible(False)
+        self.table_user_access.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows,
+        )
+        self.table_user_access.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection,
+        )
+        self.table_user_access.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers,
+        )
+        self.table_user_access.setMinimumHeight(300)
+        self.table_user_access.itemSelectionChanged.connect(
+            self._update_user_action_state
+        )
+        self.table_user_access.itemDoubleClicked.connect(
+            lambda _item: self.edit_user_terpilih()
+        )
+
+        self.lbl_user_access_hint = QLabel(
+            "💡 SUPER_ADMIN dapat membuat/edit/reset/nonaktifkan user. OWNER hanya "
+            "dapat melihat. HOME selalu aktif. Role pusat memakai akses AUTO ke "
+            "seluruh cabang bisnis. User tidak dihapus agar histori tetap utuh."
+        )
+        self.lbl_user_access_hint.setWordWrap(True)
+        self.lbl_user_access_hint.setProperty("setting_hint_italic", True)
+
+        self.btn_simpan_akses_user = QPushButton("💾 SIMPAN AKSES CABANG")
+        self.btn_simpan_akses_user.clicked.connect(self.simpan_akses_user)
+
+        vbox.addLayout(action_bar)
+        vbox.addWidget(self.table_user_access)
+        vbox.addWidget(self.lbl_user_access_hint)
+        vbox.addWidget(self.btn_simpan_akses_user)
+        layout.addWidget(self.group_user_access)
+        layout.addStretch()
+
+    @staticmethod
+    def _akses_user_otomatis(role, home):
+        role_bersih = str(role or "ADMIN").strip().upper()
+        home_bersih = str(home or "").strip().upper()
+        return (
+            role_bersih in CENTRAL_BRANCH_ROLES
+            or home_bersih == "PUSAT"
+        )
+
+    def load_user_branch_access(self):
+        try:
+            payload = db_service.ambil_data_akses_cabang_user() or {}
+            branches = list(payload.get("branches") or [])
+            users = list(payload.get("users") or [])
+        except Exception as exc:
+            print(f"[TabSetting] Gagal memuat akses user: {exc}")
+            branches, users = [], []
+
+        self._user_access_branches = branches
+        self._user_access_users = users
+        base_headers = [
+            "USERNAME", "NAMA LENGKAP", "ROLE", "HOME BRANCH", "STATUS", "MODE"
+        ]
+        branch_headers = [
+            str(branch.get("kode_cabang") or "").strip().upper()
+            for branch in branches
+        ]
+        headers = base_headers + branch_headers
+
+        table = self.table_user_access
+        table.blockSignals(True)
+        try:
+            table.clear()
+            table.setColumnCount(len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setRowCount(len(users))
+
+            hdr = table.horizontalHeader()
+            for column in range(len(headers)):
+                hdr.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+            if len(headers) > 1:
+                hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+            role_session = str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper()
+            boleh_edit = role_session == "SUPER_ADMIN"
+
+            for row_index, user in enumerate(users):
+                id_user = str(user.get("id_user") or "").strip()
+                username = str(user.get("username") or "").strip().upper()
+                nama_lengkap = str(user.get("nama_lengkap") or "").strip()
+                role = str(user.get("role") or "ADMIN").strip().upper()
+                home = str(user.get("kode_cabang") or "").strip().upper()
+                home_nama = str(user.get("nama_cabang") or home).strip()
+                status = str(user.get("status_user") or "AKTIF").strip().upper()
+                akses = {
+                    str(kode or "").strip().upper()
+                    for kode in user.get("akses_cabang", [])
+                    if str(kode or "").strip()
+                }
+                otomatis = bool(
+                    user.get("akses_otomatis")
+                    or self._akses_user_otomatis(role, home)
+                )
+
+                item_user = QTableWidgetItem(username or id_user)
+                item_user.setData(Qt.ItemDataRole.UserRole, id_user)
+                table.setItem(row_index, 0, item_user)
+                table.setItem(row_index, 1, QTableWidgetItem(nama_lengkap))
+                table.setItem(row_index, 2, QTableWidgetItem(role))
+                table.setItem(
+                    row_index, 3,
+                    QTableWidgetItem(f"{home_nama} ({home})" if home else home_nama),
+                )
+                table.setItem(row_index, 4, QTableWidgetItem(status))
+                table.setItem(
+                    row_index, 5,
+                    QTableWidgetItem("AUTO (ROLE)" if otomatis else "MANUAL"),
+                )
+
+                for branch_offset, branch in enumerate(branches, start=6):
+                    kode = str(branch.get("kode_cabang") or "").strip().upper()
+                    item = QTableWidgetItem("")
+                    checked = otomatis or kode == home or kode in akses
+                    item.setCheckState(
+                        Qt.CheckState.Checked if checked
+                        else Qt.CheckState.Unchecked
+                    )
+
+                    editable = boleh_edit and not otomatis and kode != home
+                    flags = item.flags()
+                    if editable:
+                        item.setFlags(flags | Qt.ItemFlag.ItemIsUserCheckable)
+                        item.setToolTip(f"Izinkan user mengakses cabang {kode}")
+                    else:
+                        item.setFlags(flags & ~Qt.ItemFlag.ItemIsUserCheckable)
+                        if otomatis:
+                            item.setToolTip("Akses otomatis berdasarkan role/home PUSAT")
+                        elif kode == home:
+                            item.setToolTip("Home branch wajib selalu aktif")
+                        elif not boleh_edit:
+                            item.setToolTip("Mode read-only")
+                    table.setItem(row_index, branch_offset, item)
+        finally:
+            table.blockSignals(False)
+
+        if users and table.currentRow() < 0:
+            table.selectRow(0)
+        self.validasi_hak_akses_setting()
+        self._update_user_action_state()
+
+    def _user_terpilih(self):
+        row = self.table_user_access.currentRow()
+        if row < 0:
+            return None
+        item = self.table_user_access.item(row, 0)
+        if item is None:
+            return None
+        id_user = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        return next(
+            (
+                dict(user)
+                for user in getattr(self, "_user_access_users", [])
+                if str(user.get("id_user") or "").strip() == id_user
+            ),
+            None,
+        )
+
+    def _update_user_action_state(self):
+        if not hasattr(self, "btn_tambah_user"):
+            return
+        role_session = str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper()
+        boleh_edit = role_session == "SUPER_ADMIN"
+        user = self._user_terpilih()
+        punya_pilihan = user is not None
+
+        self.btn_tambah_user.setEnabled(boleh_edit)
+        self.btn_edit_user.setEnabled(boleh_edit and punya_pilihan)
+        self.btn_reset_password_user.setEnabled(boleh_edit and punya_pilihan)
+
+        is_self = bool(
+            user
+            and str(user.get("id_user") or "").strip()
+            == str(CURRENT_SESSION.get("id_user") or "").strip()
+        )
+        self.btn_toggle_status_user.setEnabled(
+            boleh_edit and punya_pilihan and not is_self
+        )
+        status = str((user or {}).get("status_user") or "AKTIF").strip().upper()
+        self.btn_toggle_status_user.setText(
+            "✅ AKTIFKAN" if status == "NONAKTIF" else "⛔ NONAKTIFKAN"
+        )
+        self.btn_simpan_akses_user.setEnabled(boleh_edit)
+
+    def _ambil_akses_user_tabel(self):
+        branches = list(getattr(self, "_user_access_branches", []) or [])
+        result = []
+        for row in range(self.table_user_access.rowCount()):
+            user_item = self.table_user_access.item(row, 0)
+            if user_item is None:
+                continue
+            id_user = str(
+                user_item.data(Qt.ItemDataRole.UserRole) or ""
+            ).strip()
+            if not id_user:
+                continue
+
+            selected = []
+            for branch_offset, branch in enumerate(branches, start=6):
+                item = self.table_user_access.item(row, branch_offset)
+                if item is not None and item.checkState() == Qt.CheckState.Checked:
+                    kode = str(branch.get("kode_cabang") or "").strip().upper()
+                    if kode:
+                        selected.append(kode)
+            result.append({
+                "id_user": id_user,
+                "kode_cabang": selected,
+            })
+        return result
+
+    def simpan_akses_user(self):
+        if str(CURRENT_SESSION.get("role", "ADMIN")).upper() != "SUPER_ADMIN":
+            QMessageBox.warning(
+                self,
+                "Akses Ditolak",
+                "Hanya SUPER_ADMIN yang dapat mengubah akses cabang user.",
+            )
+            return
+
+        rows = self._ambil_akses_user_tabel()
+        if not rows:
+            QMessageBox.information(
+                self,
+                "Tidak Ada User",
+                "Belum ada akun database yang dapat diatur akses cabangnya.",
+            )
+            return
+
+        sukses, pesan = db_service.simpan_akses_cabang_users(rows)
+        if not sukses:
+            QMessageBox.critical(
+                self,
+                "Gagal Menyimpan Akses",
+                str(pesan or "Akses cabang user gagal disimpan."),
+            )
+            return
+
+        self.load_user_branch_access()
+        QMessageBox.information(
+            self,
+            "Akses User Tersimpan",
+            "Hak akses cabang user berhasil diperbarui. Perubahan berlaku pada "
+            "login berikutnya; user yang sedang aktif dapat melakukan refresh "
+            "session/branch selector sesuai hak akses terbarunya.",
+        )
+
+    def _buat_dialog_user(self, user=None):
+        is_edit = isinstance(user, dict)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit User" if is_edit else "Tambah User Baru")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(520)
+        root = QVBoxLayout(dialog)
+
+        form = QFormLayout()
+        self._init_form(form)
+        txt_username = QLineEdit()
+        txt_username.setPlaceholderText("Contoh: ADMINSBY")
+        txt_nama = QLineEdit()
+        txt_nama.setPlaceholderText("Nama lengkap user")
+        cmb_role = QComboBox()
+        cmb_role.addItems(["ADMIN", "FINANCE", "ADMIN_PUSAT", "OWNER", "SUPER_ADMIN"])
+        cmb_home = QComboBox()
+
+        branches = list(getattr(self, "_user_access_branches", []) or [])
+        for branch in branches:
+            kode = str(branch.get("kode_cabang") or "").strip().upper()
+            nama = str(branch.get("nama_cabang") or kode).strip()
+            if kode:
+                cmb_home.addItem(f"{nama} ({kode})", kode)
+
+        form.addRow("Username:", txt_username)
+        form.addRow("Nama Lengkap:", txt_nama)
+        form.addRow("Role:", cmb_role)
+        form.addRow("Home Branch:", cmb_home)
+
+        txt_password = None
+        txt_konfirmasi = None
+        if not is_edit:
+            txt_password = QLineEdit()
+            txt_password.setEchoMode(QLineEdit.EchoMode.Password)
+            txt_konfirmasi = QLineEdit()
+            txt_konfirmasi.setEchoMode(QLineEdit.EchoMode.Password)
+            chk_tampilkan_password = QCheckBox("Tampilkan Password")
+
+            def atur_tampilan_password(ditampilkan):
+                mode = (
+                    QLineEdit.EchoMode.Normal
+                    if ditampilkan
+                    else QLineEdit.EchoMode.Password
+                )
+                txt_password.setEchoMode(mode)
+                txt_konfirmasi.setEchoMode(mode)
+
+            chk_tampilkan_password.toggled.connect(atur_tampilan_password)
+            form.addRow("Password:", txt_password)
+            form.addRow("Konfirmasi:", txt_konfirmasi)
+            form.addRow("", chk_tampilkan_password)
+
+        root.addLayout(form)
+
+        group_access = QGroupBox("Akses Cabang")
+        access_layout = QVBoxLayout(group_access)
+        checkboxes = {}
+        for branch in branches:
+            kode = str(branch.get("kode_cabang") or "").strip().upper()
+            nama = str(branch.get("nama_cabang") or kode).strip()
+            if not kode:
+                continue
+            checkbox = QCheckBox(f"{nama} ({kode})")
+            checkboxes[kode] = checkbox
+            access_layout.addWidget(checkbox)
+        root.addWidget(group_access)
+
+        lbl_info = QLabel(
+            "HOME selalu aktif. Role pusat (SUPER_ADMIN/OWNER/ADMIN_PUSAT/FINANCE) "
+            "mendapat akses AUTO ke seluruh cabang bisnis."
+        )
+        lbl_info.setWordWrap(True)
+        lbl_info.setProperty("setting_hint_italic", True)
+        root.addWidget(lbl_info)
+
+        def sync_access():
+            role = str(cmb_role.currentText() or "ADMIN").strip().upper()
+            home = str(cmb_home.currentData() or "").strip().upper()
+            otomatis = self._akses_user_otomatis(role, home)
+            for kode, checkbox in checkboxes.items():
+                if otomatis:
+                    checkbox.setChecked(True)
+                    checkbox.setEnabled(False)
+                elif kode == home:
+                    checkbox.setChecked(True)
+                    checkbox.setEnabled(False)
+                else:
+                    checkbox.setEnabled(True)
+
+        cmb_role.currentTextChanged.connect(lambda _text: sync_access())
+        cmb_home.currentIndexChanged.connect(lambda _index: sync_access())
+
+        if is_edit:
+            txt_username.setText(str(user.get("username") or ""))
+            txt_username.setReadOnly(True)
+            txt_nama.setText(str(user.get("nama_lengkap") or ""))
+            idx_role = cmb_role.findText(str(user.get("role") or "ADMIN").upper())
+            cmb_role.setCurrentIndex(max(0, idx_role))
+            idx_home = cmb_home.findData(str(user.get("kode_cabang") or "").upper())
+            if idx_home >= 0:
+                cmb_home.setCurrentIndex(idx_home)
+            existing_access = {
+                str(kode or "").strip().upper()
+                for kode in user.get("akses_cabang", [])
+            }
+            for kode, checkbox in checkboxes.items():
+                checkbox.setChecked(kode in existing_access)
+
+            if str(user.get("id_user") or "") == str(CURRENT_SESSION.get("id_user") or ""):
+                cmb_role.setEnabled(False)
+                cmb_role.setToolTip("Role akun SUPER_ADMIN yang sedang login dikunci.")
+        sync_access()
+
+        hasil_dialog = {}
+
+        def validasi_dan_terima():
+            """Validasi form sebelum dialog boleh ditutup."""
+            username = txt_username.text().strip().upper()
+            nama = txt_nama.text().strip()
+            role = cmb_role.currentText().strip().upper()
+            home = str(cmb_home.currentData() or "").strip().upper()
+
+            if not username or not nama or not home:
+                QMessageBox.warning(
+                    dialog,
+                    "Data Belum Lengkap",
+                    "Username, Nama Lengkap, dan Home Branch wajib diisi.",
+                )
+                return
+
+            payload = {
+                "username": username,
+                "nama_lengkap": nama,
+                "role": role,
+                "kode_cabang": home,
+                "akses_cabang": [
+                    kode for kode, checkbox in checkboxes.items()
+                    if checkbox.isChecked()
+                ],
+            }
+
+            if is_edit:
+                payload["id_user"] = str(user.get("id_user") or "")
+            else:
+                password = txt_password.text() if txt_password is not None else ""
+                konfirmasi = txt_konfirmasi.text() if txt_konfirmasi is not None else ""
+                if not password:
+                    QMessageBox.warning(
+                        dialog,
+                        "Password Kosong",
+                        "Password wajib diisi.",
+                    )
+                    return
+                if password != konfirmasi:
+                    QMessageBox.warning(
+                        dialog,
+                        "Konfirmasi Password",
+                        "Password dan konfirmasi password tidak sama.",
+                    )
+                    return
+                payload["password"] = password
+
+            hasil_dialog["payload"] = payload
+            dialog.accept()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(validasi_dan_terima)
+        buttons.rejected.connect(dialog.reject)
+        root.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        return hasil_dialog.get("payload")
+
+    def tambah_user(self):
+        if str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper() != "SUPER_ADMIN":
+            return
+        payload = self._buat_dialog_user()
+        if not payload:
+            return
+        sukses, pesan = db_service.buat_user_baru(payload)
+        if not sukses:
+            QMessageBox.critical(self, "Gagal Membuat User", str(pesan))
+            return
+        self.load_user_branch_access()
+        QMessageBox.information(self, "User Dibuat", str(pesan))
+
+    def edit_user_terpilih(self):
+        if str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper() != "SUPER_ADMIN":
+            return
+        user = self._user_terpilih()
+        if not user:
+            QMessageBox.information(self, "Pilih User", "Pilih user yang ingin diedit.")
+            return
+        payload = self._buat_dialog_user(user)
+        if not payload:
+            return
+        sukses, pesan = db_service.ubah_user(payload)
+        if not sukses:
+            QMessageBox.critical(self, "Gagal Mengubah User", str(pesan))
+            return
+        self.load_user_branch_access()
+        QMessageBox.information(self, "User Diperbarui", str(pesan))
+
+    def reset_password_user_terpilih(self):
+        if str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper() != "SUPER_ADMIN":
+            return
+        user = self._user_terpilih()
+        if not user:
+            QMessageBox.information(self, "Pilih User", "Pilih user terlebih dahulu.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Reset Password - {user.get('username', '')}")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        self._init_form(form)
+        txt_password = QLineEdit()
+        txt_password.setEchoMode(QLineEdit.EchoMode.Password)
+        txt_confirm = QLineEdit()
+        txt_confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        chk_tampilkan_password = QCheckBox("Tampilkan Password")
+
+        def atur_tampilan_password(ditampilkan):
+            mode = (
+                QLineEdit.EchoMode.Normal
+                if ditampilkan
+                else QLineEdit.EchoMode.Password
+            )
+            txt_password.setEchoMode(mode)
+            txt_confirm.setEchoMode(mode)
+
+        chk_tampilkan_password.toggled.connect(atur_tampilan_password)
+        form.addRow("Password Baru:", txt_password)
+        form.addRow("Konfirmasi:", txt_confirm)
+        form.addRow("", chk_tampilkan_password)
+        layout.addLayout(form)
+
+        password_tervalidasi = {}
+
+        def validasi_dan_terima():
+            password = txt_password.text()
+            if not password:
+                QMessageBox.warning(
+                    dialog,
+                    "Password Kosong",
+                    "Password baru wajib diisi.",
+                )
+                return
+            if password != txt_confirm.text():
+                QMessageBox.warning(
+                    dialog,
+                    "Konfirmasi Password",
+                    "Password dan konfirmasi password tidak sama.",
+                )
+                return
+            password_tervalidasi["password"] = password
+            dialog.accept()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(validasi_dan_terima)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        password = password_tervalidasi.get("password", "")
+        sukses, pesan = db_service.reset_password_user(
+            user.get("id_user"), password
+        )
+        if not sukses:
+            QMessageBox.critical(self, "Gagal Reset Password", str(pesan))
+            return
+        QMessageBox.information(self, "Password Direset", str(pesan))
+
+    def toggle_status_user_terpilih(self):
+        if str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper() != "SUPER_ADMIN":
+            return
+        user = self._user_terpilih()
+        if not user:
+            return
+        status = str(user.get("status_user") or "AKTIF").strip().upper()
+        aktifkan = status == "NONAKTIF"
+        aksi = "aktifkan" if aktifkan else "nonaktifkan"
+        konfirmasi = QMessageBox.question(
+            self,
+            "Konfirmasi Status User",
+            f"Yakin ingin {aksi} user {user.get('username', '')}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if konfirmasi != QMessageBox.StandardButton.Yes:
+            return
+        sukses, pesan = db_service.set_status_user(user.get("id_user"), aktifkan)
+        if not sukses:
+            QMessageBox.critical(self, "Gagal Mengubah Status", str(pesan))
+            return
+        self.load_user_branch_access()
+        QMessageBox.information(self, "Status User", str(pesan))
+
     def _build_page_font(self):
         layout = QVBoxLayout(self.page_font)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -523,6 +1119,7 @@ class TabSettingSistem(QWidget):
     def validasi_hak_akses_setting(self):
         role = str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper()
         boleh_edit = role == "SUPER_ADMIN"
+        boleh_lihat_user = role in {"SUPER_ADMIN", "OWNER"}
 
         self.btn_simpan_all.setEnabled(boleh_edit)
         self.btn_simpan_all.setText(
@@ -545,6 +1142,14 @@ class TabSettingSistem(QWidget):
         for widget_type in (QComboBox, QTableWidget):
             for widget in self.findChildren(widget_type):
                 widget.setEnabled(boleh_edit)
+
+        # OWNER boleh membaca daftar user, tetapi tidak dapat mengubah checkbox/akun.
+        if hasattr(self, "table_user_access"):
+            self.table_user_access.setEnabled(boleh_lihat_user)
+        if hasattr(self, "btn_simpan_akses_user"):
+            self.btn_simpan_akses_user.setEnabled(boleh_edit)
+        if hasattr(self, "btn_tambah_user"):
+            self._update_user_action_state()
 
         # Database selalu ditentukan dari app_env.json.
         self.txt_db_path.setReadOnly(True)
@@ -739,6 +1344,7 @@ class TabSettingSistem(QWidget):
             self.group_logo_html,
             self.group_resi,
             self.group_branches,
+            self.group_user_access,
             self.group_db,
             self.group_font,
         ]
@@ -784,6 +1390,15 @@ class TabSettingSistem(QWidget):
         self.txt_db_path.setStyleSheet(s['input_readonly'])
 
         self.table_cabang.setStyleSheet(s['input'])
+        self.table_user_access.setStyleSheet(s.get('input', ''))
+        for button in (
+            self.btn_tambah_user,
+            self.btn_edit_user,
+            self.btn_reset_password_user,
+            self.btn_toggle_status_user,
+            self.btn_simpan_akses_user,
+        ):
+            button.setStyleSheet(s.get('btn_secondary', ''))
         self.btn_simpan_all.setStyleSheet(s['btn_simpan'])
 
         if hasattr(self, 'table_np'):
@@ -898,6 +1513,7 @@ class TabSettingSistem(QWidget):
             self.table_cabang.setRowCount(10)
             print(f"[TabSetting] Gagal memuat data cabang: {exc}")
 
+        self.load_user_branch_access()
         self.validasi_hak_akses_setting()
 
     def _ambil_rekening_tabel(self, table, label):

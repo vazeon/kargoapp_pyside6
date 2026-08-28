@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -95,12 +94,13 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         layout_utama = QVBoxLayout(self)
         layout_utama.setContentsMargins(*ARMADA_PAGE_MARGINS)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout_utama.addWidget(self.splitter)
+        self.layout_panel = QHBoxLayout()
+        self.layout_panel.setSpacing(0)
+        layout_utama.addLayout(self.layout_panel)
 
         self._bangun_panel_master_kapal()
         self._bangun_panel_editor_kapal()
-        self._konfigurasi_splitter()
+        self._konfigurasi_panel()
 
         self.atur_mode("IDLE")
         self.refresh_session_ui()
@@ -220,13 +220,9 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         self._bangun_area_foto_kapal(layout)
         self._bangun_tombol_editor_kapal(layout)
 
-    def _konfigurasi_splitter(self):
-        self.splitter.addWidget(self.panel_kiri)
-        self.splitter.addWidget(self.panel_kanan)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes(list(ARMADA_SPLITTER_INITIAL_SIZES))
+    def _konfigurasi_panel(self):
+        self.layout_panel.addWidget(self.panel_kiri)
+        self.layout_panel.addWidget(self.panel_kanan)
 
     # --- LIFECYCLE & REFRESH ---
 

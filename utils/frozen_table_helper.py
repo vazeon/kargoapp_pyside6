@@ -100,17 +100,26 @@ class FrozenTableWidget(QTableWidget):
     def update_section_width(self, logicalIndex, oldSize, newSize):
         if logicalIndex >= self.frozen_cols:
             return
-        self.frozen_table.blockSignals(True)
+
+        # sectionResized dipancarkan oleh QHeaderView, bukan QTableView.
+        # Blokir header tujuan agar sinkronisasi tidak memantul balik.
+        frozen_header = self.frozen_table.horizontalHeader()
+        blocker = QSignalBlocker(frozen_header)
         self.frozen_table.setColumnWidth(logicalIndex, newSize)
-        self.frozen_table.blockSignals(False)
+        del blocker
         self.update_frozen_geometry()
 
     def update_main_section_width(self, logicalIndex, oldSize, newSize):
         if logicalIndex >= self.frozen_cols:
             return
-        self.blockSignals(True)
+
+        main_header = self.horizontalHeader()
+        frozen_header = self.frozen_table.horizontalHeader()
+        blocker_main = QSignalBlocker(main_header)
+        blocker_frozen = QSignalBlocker(frozen_header)
         self.setColumnWidth(logicalIndex, newSize)
-        self.blockSignals(False)
+        del blocker_frozen
+        del blocker_main
         self.update_frozen_geometry()
 
     def update_frozen_geometry(self):

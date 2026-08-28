@@ -3,8 +3,6 @@ from PySide6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from tabs.tab_kontak.subtab_pengirim import SubTabPengirim
 from tabs.tab_kontak.subtab_penerima import SubTabPenerima
-
-
 class TabKontak(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -15,10 +13,13 @@ class TabKontak(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
 
         self.tabs_internal = QTabWidget(self)
+        # Pakai QTabBar default. Geometry/style mengikuti themes.base
+        # dari baseline global TAB_* di utils.ui_metrics.
         self.subtab_pengirim = SubTabPengirim()
         self.subtab_penerima = SubTabPenerima()
         self.tabs_internal.addTab(self.subtab_pengirim, "Pengirim")
         self.tabs_internal.addTab(self.subtab_penerima, "Penerima")
+
         self.tabs_internal.currentChanged.connect(self._tema_subtab_aktif)
 
         layout.addWidget(self.tabs_internal)
@@ -40,6 +41,13 @@ class TabKontak(QWidget):
     def sesuaikan_tema_lokal(self):
         """Perbarui tema dan zoom tabel pada subtab yang sedang terlihat."""
         self._tema_subtab_aktif()
+
+    def refresh_session_ui(self):
+        """Teruskan refresh session/cabang ke seluruh subtab terkait."""
+        for subtab in (self.subtab_pengirim, self.subtab_penerima):
+            refresh = getattr(subtab, "refresh_session_ui", None)
+            if callable(refresh):
+                refresh()
 
     def showEvent(self, event):
         super().showEvent(event)

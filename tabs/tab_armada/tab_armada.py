@@ -4,8 +4,6 @@ from PySide6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from tabs.tab_armada.subtab_truk import SubTabTruk
 from tabs.tab_armada.subtab_kapal import SubTabKapal
-
-
 class TabArmada(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -14,13 +12,16 @@ class TabArmada(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(0, 8, 0, 8)
 
         self.tabs_internal = QTabWidget(self)
+        # Pakai QTabBar default. Geometry/style mengikuti themes.base
+        # dari baseline global TAB_* di utils.ui_metrics.
         self.subtab_truk = SubTabTruk(self.tabs_internal)
         self.subtab_kapal = SubTabKapal(self.tabs_internal)
         self.tabs_internal.addTab(self.subtab_truk, "Truk")
         self.tabs_internal.addTab(self.subtab_kapal, "Kapal")
+
         self.tabs_internal.currentChanged.connect(self._tema_subtab_aktif)
 
         layout.addWidget(self.tabs_internal)
@@ -51,6 +52,13 @@ class TabArmada(QWidget):
 
     def sesuaikan_tema_lokal(self):
         self._tema_subtab_aktif()
+
+    def refresh_session_ui(self):
+        """Teruskan refresh session/cabang ke subtab Armada."""
+        for subtab in (self.subtab_truk, self.subtab_kapal):
+            refresh = getattr(subtab, "refresh_session_ui", None)
+            if callable(refresh):
+                refresh()
 
     def showEvent(self, event):
         super().showEvent(event)

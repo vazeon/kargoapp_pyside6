@@ -36,8 +36,6 @@ from themes.modules.manifest import (
     get_manifest_styles,
 )
 
-from themes.components.combobox import terapkan_popup_bawah_combobox
-
 from utils.splitter_helper import buat_splitter
 from utils.printer.print_manifest import cetak_manifest_ke_printer
 from utils.frozen_table_helper import FrozenTableWidget
@@ -245,11 +243,11 @@ class TabManifest(QWidget):
         layout.setSpacing(spacing)
 
         label = QLabel(label_text)
-        editor = QLineEdit()
-        editor.setReadOnly(True)
+        editor = QLabel()
+        # editor.setReadOnly(True)
         editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
         editor.setFixedWidth(ukuran[0])
-        atur_tinggi_input(editor)
+        # atur_tinggi_input(editor)
         editor.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout.addWidget(label)
         layout.addWidget(editor)
@@ -266,14 +264,14 @@ class TabManifest(QWidget):
         for column in range(3):
             layout_header.setColumnStretch(column, 1)
 
-        self.lbl_title = QLabel("📦 Pembuatan Manifest Pengiriman")
+        self.lbl_title = QLabel("Manifest Pengiriman")
         layout_header.addWidget(
             self.lbl_title, 0, 0,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
 
         wadah_tanggal, self.lbl_tanggal_manifest, self.txt_tanggal_manifest = (
-            self._buat_wadah_header_field("Tanggal Transaksi:", MANIFEST_HEADER_FIELD_SIZE, MANIFEST_HEADER_FIELD_SPACING)
+            self._buat_wadah_header_field("", MANIFEST_HEADER_FIELD_SIZE, 0)
         )
         layout_header.addWidget(
             wadah_tanggal, 0, 1,
@@ -402,12 +400,12 @@ class TabManifest(QWidget):
         layout.setSpacing(MANIFEST_SPACING)
         layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        self.btn_proses = QPushButton("BUAT MANIFEST")
+        self.btn_proses = QPushButton("Simpan")
         self.btn_proses.setMinimumWidth(MANIFEST_ACTION_BUTTON_MIN_WIDTH)
         self.btn_proses.setMinimumHeight(MANIFEST_ACTION_BUTTON_MIN_HEIGHT)
         layout.addWidget(self.btn_proses, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        self.btn_batal_edit = QPushButton("❌ BATAL")
+        self.btn_batal_edit = QPushButton("Batal")
         self.btn_batal_edit.setMinimumWidth(MANIFEST_ACTION_BUTTON_MIN_WIDTH)
         self.btn_batal_edit.clicked.connect(self.batal_edit)
         self.btn_batal_edit.hide()
@@ -574,6 +572,17 @@ class TabManifest(QWidget):
         self.cb_jenis_truk.setCurrentIndex(idx_lainnya)
         self.txt_jenis_truk_lain.setText(jenis_bersih.upper())
 
+    def _pastikan_completer_sopir(self):
+        """Membuat completer sopir satu kali agar lifetime object Qt tetap stabil."""
+        if hasattr(self, "model_autocomplete_sopir"):
+            return
+
+        self.model_autocomplete_sopir = QStringListModel(self)
+        self.completer_sopir = QCompleter(self.model_autocomplete_sopir, self)
+        self.completer_sopir.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.txt_sopir.setCompleter(self.completer_sopir)
+        self.completer_sopir.activated.connect(self.on_sopir_selected)
+
     def setup_autocomplete_truk(self):
         try:
             rows = db_service.ambil_truk_list() or []
@@ -585,18 +594,8 @@ class TabManifest(QWidget):
                 },
             )
 
-            completer_lama = getattr(self, 'completer_sopir', None)
-            if completer_lama is not None:
-                try:
-                    completer_lama.activated.disconnect(self.on_sopir_selected)
-                except (TypeError, RuntimeError):
-                    pass
-                completer_lama.deleteLater()
-
-            self.completer_sopir = QCompleter(sopirs, self)
-            self.completer_sopir.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-            self.txt_sopir.setCompleter(self.completer_sopir)
-            self.completer_sopir.activated.connect(self.on_sopir_selected)
+            self._pastikan_completer_sopir()
+            self.model_autocomplete_sopir.setStringList(sopirs)
 
             self.txt_no_pol.setCompleter(None)
         except Exception as e:
@@ -1472,6 +1471,10 @@ class TabManifest(QWidget):
         if self._show_event_pertama:
             self._show_event_pertama = False
             self.perbarui_tanggal_header()
+            # Sebelumnya refresh autocomplete pertama datang dari MainWindow.
+            # Tab sekarang mengelola refresh-nya sendiri agar tidak terjadi
+            # pemanggilan ganda pada perpindahan tab berikutnya.
+            self.setup_autocomplete_truk()
             return
 
         self.refresh_session_ui()
@@ -1499,9 +1502,8 @@ class TabManifest(QWidget):
             self.cb_filter_wilayah, self.txt_nama_kapal, self.txt_note_manifest,
             self.cb_jenis_truk, self.txt_jenis_truk_lain, self.txt_no_pol,
             self.txt_sopir, self.txt_keterangan, self.cb_tahun_filter,
-            self.txt_cari_histori, self.txt_tanggal_manifest, self.txt_no_manifest,
+            self.txt_cari_histori,
         ))
-        terapkan_popup_bawah_combobox(comboboxes)
 
         for card in (self.card_rute_manifest, self.card_armada_manifest):
             card.setStyleSheet(styles_statis["card_manifest"])
@@ -1766,9 +1768,9 @@ class TabManifest(QWidget):
         return nama_kapal, str(note_manifest or "").strip().upper()
 
     def _terapkan_tampilan_mode_edit(self, m_id):
-        self.lbl_title.setText(f"✏️ Edit Manifest: {m_id}")
+        self.lbl_title.setText(f"Edit Manifest: {m_id}")
         self.txt_no_manifest.setText(m_id)
-        self.btn_proses.setText("💾 SIMPAN MANIFEST")
+        self.btn_proses.setText("Simpan")
         self.btn_batal_edit.show()
         self.sesuaikan_tema_lokal()
         self.load_data_resi_gudang()
@@ -1805,8 +1807,8 @@ class TabManifest(QWidget):
         self.is_edit_mode = False
         self.edit_manifest_id = ""
         self._tanggal_edit_manifest = ""
-        self.lbl_title.setText("📦 Pembuatan Manifest Pengiriman")
-        self.btn_proses.setText("⚡ BUAT MANIFEST")
+        self.lbl_title.setText("Manifest Pengiriman")
+        self.btn_proses.setText("Simpan")
         self.btn_batal_edit.hide()
         self._kosongkan_input_manifest()
 

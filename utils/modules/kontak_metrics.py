@@ -10,6 +10,8 @@ Responsive scaling tetap ditangani layer global UI.
 # Wrapper Tab Kontak
 # ---------------------------------------------------------------------------
 KONTAK_TAB_MARGINS = (0, 8, 0, 0)
+# Ukuran QTabBar tidak disimpan per modul.
+# Sumber tunggal: TAB_* di utils.ui_metrics, diterapkan oleh themes.base.
 
 # ---------------------------------------------------------------------------
 # Layout subtab

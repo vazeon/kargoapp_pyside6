@@ -21,6 +21,7 @@ from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -43,7 +45,6 @@ import services.database_service as db_service
 
 from themes.modules.invoice import get_invoice_dialog_styles, get_invoice_styles
 from themes.components.calendar import terapkan_style_kalender
-from themes.components.combobox import terapkan_popup_bawah_combobox
 
 from utils.splitter_helper import buat_splitter
 from utils.typography import (
@@ -821,6 +822,305 @@ class ColumnDesignerDialog(QDialog):
 
 # TAB INVOICE
 
+class DialogPilihClientBilling(QDialog):
+    """Memilih pihak tertagih setelah Resi dipilih dari Billing Queue."""
+
+    def __init__(self, list_resi, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Pilih Pihak Tertagih")
+        self.setMinimumWidth(520)
+        self._list_resi = [item for item in (list_resi or []) if isinstance(item, dict)]
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Invoice akan ditagihkan kepada:</b>"))
+
+        self.cmb_client = QComboBox()
+        kandidat = []
+        sudah = set()
+        for label, key in (("PENGIRIM", "pengirim"), ("PENERIMA", "penerima")):
+            for data in self._list_resi:
+                nama = str(data.get(key, "") or "").strip().upper()
+                identitas = (label, nama)
+                if nama and identitas not in sudah:
+                    sudah.add(identitas)
+                    kandidat.append((label, nama))
+
+        for label, nama in kandidat:
+            self.cmb_client.addItem(f"{label} — {nama}", nama)
+        self.cmb_client.addItem("PIHAK KETIGA / INPUT MANUAL...", None)
+        layout.addWidget(self.cmb_client)
+
+        self.txt_manual = QLineEdit()
+        self.txt_manual.setPlaceholderText("Nama pihak tertagih...")
+        self.txt_manual.setEnabled(self.cmb_client.currentData() is None)
+        layout.addWidget(self.txt_manual)
+
+        info = QLabel(
+            "Nama ini menjadi Bill To. Resi yang dipilih tetap mempertahankan "
+            "asal cabang dan snapshot transaksinya masing-masing."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        tombol = QHBoxLayout()
+        tombol.addStretch()
+        self.btn_batal = QPushButton("Batal")
+        self.btn_lanjut = QPushButton("Lanjutkan ke Draft Invoice")
+        tombol.addWidget(self.btn_batal)
+        tombol.addWidget(self.btn_lanjut)
+        layout.addLayout(tombol)
+
+        self.cmb_client.currentIndexChanged.connect(self._sinkronkan_input_manual)
+        self.btn_batal.clicked.connect(self.reject)
+        self.btn_lanjut.clicked.connect(self._validasi)
+
+    def _sinkronkan_input_manual(self, *_):
+        manual = self.cmb_client.currentData() is None
+        self.txt_manual.setEnabled(manual)
+        if manual:
+            self.txt_manual.setFocus()
+
+    def _validasi(self):
+        if not self.get_nama_client():
+            QMessageBox.warning(self, "Peringatan", "Nama pihak tertagih tidak boleh kosong.")
+            return
+        self.accept()
+
+    def get_nama_client(self):
+        data = self.cmb_client.currentData()
+        if data is not None:
+            return str(data or "").strip().upper()
+        return self.txt_manual.text().strip().upper()
+
+
+class BillingQueueDialog(QDialog):
+    """Daftar Resi belum ditagihkan yang dapat dipilih langsung dari Tab Invoice."""
+
+    COL_CHECK = 0
+    COL_RESI = 1
+    COL_CABANG = 2
+    COL_TANGGAL = 3
+    COL_PENGIRIM = 4
+    COL_PENERIMA = 5
+    COL_TUJUAN = 6
+    COL_KOLI = 7
+    COL_BERAT = 8
+    COL_CBM = 9
+    COL_ONGKIR = 10
+    COL_STATUS = 11
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Billing Queue — Resi Belum Ditagihkan")
+        self.resize(1240, 680)
+        self._selected_data = []
+
+        layout = QVBoxLayout(self)
+        self._bangun_filter(layout)
+        self._bangun_tabel(layout)
+        self._bangun_footer(layout)
+        self.muat_data()
+
+    def _bangun_filter(self, layout):
+        group = QGroupBox("Filter Resi Belum Ditagihkan")
+        grid = QGridLayout(group)
+
+        self.cmb_cabang = QComboBox()
+        current_branch = str(CURRENT_SESSION.get("kode_cabang", "PUSAT") or "PUSAT").strip().upper()
+        allowed_branches = CURRENT_SESSION.get("allowed_branches") or []
+        allowed_codes = [
+            str(item.get("kode_cabang") or "").strip().upper()
+            for item in allowed_branches
+            if isinstance(item, dict) and str(item.get("kode_cabang") or "").strip()
+        ]
+        allowed_codes = list(dict.fromkeys(allowed_codes)) or [current_branch]
+        cabang_rows = db_service.ambil_daftar_cabang_billing() or []
+        cabang_rows = [
+            (kode, nama) for kode, nama in cabang_rows
+            if str(kode or "").strip().upper() in set(allowed_codes)
+        ]
+
+        if len(allowed_codes) > 1:
+            self.cmb_cabang.addItem("SEMUA CABANG", "__ALL__")
+        for kode, nama in cabang_rows:
+            kode_bersih = str(kode or "").strip().upper()
+            self.cmb_cabang.addItem(f"{nama} ({kode_bersih})", kode_bersih)
+
+        if self.cmb_cabang.count() == 0:
+            self.cmb_cabang.addItem(current_branch, current_branch)
+
+        self.txt_cari = QLineEdit()
+        self.txt_cari.setPlaceholderText("Cari No. Resi / pengirim / penerima / tujuan / barang...")
+
+        self.chk_periode = QCheckBox("Batasi periode")
+        self.date_awal = QDateEdit(QDate.currentDate().addMonths(-1))
+        self.date_akhir = QDateEdit(QDate.currentDate())
+        for widget in (self.date_awal, self.date_akhir):
+            widget.setCalendarPopup(True)
+            widget.setDisplayFormat("dd/MM/yyyy")
+            widget.setEnabled(False)
+
+        self.btn_cari = QPushButton("🔎 Muat / Cari")
+        grid.addWidget(QLabel("Cabang"), 0, 0)
+        grid.addWidget(self.cmb_cabang, 0, 1)
+        grid.addWidget(QLabel("Pencarian"), 0, 2)
+        grid.addWidget(self.txt_cari, 0, 3, 1, 3)
+        grid.addWidget(self.chk_periode, 1, 0)
+        grid.addWidget(self.date_awal, 1, 1)
+        grid.addWidget(QLabel("s.d."), 1, 2)
+        grid.addWidget(self.date_akhir, 1, 3)
+        grid.addWidget(self.btn_cari, 1, 5)
+        grid.setColumnStretch(4, 1)
+        layout.addWidget(group)
+
+        self.chk_periode.toggled.connect(self._toggle_periode)
+        self.btn_cari.clicked.connect(self.muat_data)
+        self.txt_cari.returnPressed.connect(self.muat_data)
+        self.cmb_cabang.currentIndexChanged.connect(self.muat_data)
+
+    def _bangun_tabel(self, layout):
+        self.tabel = QTableWidget()
+        self.tabel.setColumnCount(12)
+        self.tabel.setHorizontalHeaderLabels((
+            "✓", "NO. RESI", "CABANG", "TANGGAL", "PENGIRIM", "PENERIMA",
+            "TUJUAN", "KOLI", "BERAT", "CBM", "ONGKIR", "STATUS",
+        ))
+        self.tabel.verticalHeader().setVisible(False)
+        self.tabel.setAlternatingRowColors(True)
+        self.tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = self.tabel.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        for col in (self.COL_PENGIRIM, self.COL_PENERIMA, self.COL_TUJUAN):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        self.tabel.setColumnWidth(self.COL_CHECK, 38)
+        self.tabel.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.tabel, 1)
+
+    def _bangun_footer(self, layout):
+        bar = QHBoxLayout()
+        self.btn_pilih_semua = QPushButton("Pilih Semua")
+        self.btn_kosongkan = QPushButton("Kosongkan Pilihan")
+        self.lbl_ringkasan = QLabel("Dipilih: 0 Resi | Total: Rp 0")
+        self.btn_batal = QPushButton("Batal")
+        self.btn_masukkan = QPushButton("Masukkan ke Invoice")
+
+        bar.addWidget(self.btn_pilih_semua)
+        bar.addWidget(self.btn_kosongkan)
+        bar.addWidget(self.lbl_ringkasan)
+        bar.addStretch()
+        bar.addWidget(self.btn_batal)
+        bar.addWidget(self.btn_masukkan)
+        layout.addLayout(bar)
+
+        self.btn_pilih_semua.clicked.connect(lambda: self._set_semua_check(True))
+        self.btn_kosongkan.clicked.connect(lambda: self._set_semua_check(False))
+        self.btn_batal.clicked.connect(self.reject)
+        self.btn_masukkan.clicked.connect(self._terima_pilihan)
+
+    def _toggle_periode(self, aktif):
+        self.date_awal.setEnabled(bool(aktif))
+        self.date_akhir.setEnabled(bool(aktif))
+
+    def _scope_cabang(self):
+        data = self.cmb_cabang.currentData()
+        if data == "__ALL__":
+            return None, True
+        return str(data or CURRENT_SESSION.get("kode_cabang", "PUSAT")).strip().upper(), False
+
+    def muat_data(self, *_):
+        kode_cabang, semua_cabang = self._scope_cabang()
+        gunakan_periode = self.chk_periode.isChecked()
+        rows = db_service.ambil_resi_belum_ditagihkan(
+            kode_cabang,
+            semua_cabang=semua_cabang,
+            kode_cabang_list=[
+                str(item.get("kode_cabang") or "").strip().upper()
+                for item in (CURRENT_SESSION.get("allowed_branches") or [])
+                if isinstance(item, dict) and str(item.get("kode_cabang") or "").strip()
+            ],
+            keyword=self.txt_cari.text(),
+            tanggal_awal=(self.date_awal.date().toString("yyyy-MM-dd") if gunakan_periode else None),
+            tanggal_akhir=(self.date_akhir.date().toString("yyyy-MM-dd") if gunakan_periode else None),
+            limit=2000,
+        ) or []
+
+        with blokir_signal_sementara(self.tabel):
+            self.tabel.setRowCount(0)
+            for data in rows:
+                row = self.tabel.rowCount()
+                self.tabel.insertRow(row)
+
+                check = QTableWidgetItem("")
+                check.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                check.setCheckState(Qt.CheckState.Unchecked)
+                check.setData(Qt.ItemDataRole.UserRole, dict(data))
+                self.tabel.setItem(row, self.COL_CHECK, check)
+
+                values = (
+                    data.get("no_resi", ""),
+                    data.get("kode_cabang", ""),
+                    data.get("tanggal", ""),
+                    data.get("pengirim", ""),
+                    data.get("penerima", ""),
+                    data.get("tujuan", ""),
+                    data.get("koli", "0"),
+                    data.get("berat", "0"),
+                    data.get("kubik", "0"),
+                    f"Rp {format_ke_rupiah(data.get('ongkir', 0))}",
+                    data.get("status_resi", ""),
+                )
+                for offset, value in enumerate(values, start=1):
+                    item = buat_tabel_item(value, editable=False)
+                    self.tabel.setItem(row, offset, item)
+        self._perbarui_ringkasan()
+
+    def _set_semua_check(self, checked):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        with blokir_signal_sementara(self.tabel):
+            for row in range(self.tabel.rowCount()):
+                item = self.tabel.item(row, self.COL_CHECK)
+                if item is not None:
+                    item.setCheckState(state)
+        self._perbarui_ringkasan()
+
+    def _on_item_changed(self, item):
+        if item is not None and item.column() == self.COL_CHECK:
+            self._perbarui_ringkasan()
+
+    def _data_terpilih(self):
+        hasil = []
+        for row in range(self.tabel.rowCount()):
+            item = self.tabel.item(row, self.COL_CHECK)
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict):
+                hasil.append(dict(data))
+        return hasil
+
+    def _perbarui_ringkasan(self):
+        data = self._data_terpilih()
+        total = sum(rupiah_to_int(item.get("ongkir", 0)) for item in data)
+        self.lbl_ringkasan.setText(
+            f"Dipilih: {len(data)} Resi | Total: Rp {format_ke_rupiah(total)}"
+        )
+
+    def _terima_pilihan(self):
+        self._selected_data = self._data_terpilih()
+        if not self._selected_data:
+            QMessageBox.warning(self, "Peringatan", "Pilih minimal satu Resi terlebih dahulu.")
+            return
+        self.accept()
+
+    def selected_data(self):
+        return [dict(item) for item in self._selected_data]
+
+
 class TabInvoice(ZoomTableMixin, QWidget):
     KOL_HISTORI_NO_INV = 0
     KOL_HISTORI_TANGGAL = 1
@@ -966,7 +1266,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self.cmb_tipe_invoice.addItems(list(self.template_configs.keys()))
         self.cmb_pajak = QComboBox()
         self.cmb_pajak.addItems(["NONPAJAK", "PPN 1,1%"])
-        terapkan_popup_bawah_combobox((self.cmb_tipe_invoice, self.cmb_pajak))
 
         self.txt_payment_info = self._buat_lineedit_invoice(
             "Contoh: BCA 8292572980 a.n PT Ekspedisi kargo",
@@ -1009,6 +1308,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
     def _bangun_toolbar_invoice(self, layout):
         toolbar = QHBoxLayout()
+        self.btn_ambil_resi = QPushButton("📥 Ambil Resi")
         self.btn_tambah_baris = QPushButton("＋ Baris")
         self.btn_hapus_baris = QPushButton("Hapus Baris")
         self.btn_duplikat_baris = QPushButton("Duplikat")
@@ -1018,6 +1318,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self.btn_atur_kolom = QPushButton("⚙ Atur Kolom")
         self.btn_bersihkan = QPushButton("Bersihkan")
         for button in (
+            self.btn_ambil_resi,
             self.btn_tambah_baris,
             self.btn_hapus_baris,
             self.btn_duplikat_baris,
@@ -1094,6 +1395,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             field.textChanged.connect(self._on_metadata_changed)
         self.date_invoice.dateChanged.connect(self._on_metadata_changed)
 
+        self.btn_ambil_resi.clicked.connect(self.buka_billing_queue)
         self.btn_tambah_baris.clicked.connect(self.tabel_item_invoice.insert_row_below)
         self.btn_hapus_baris.clicked.connect(self.tabel_item_invoice.delete_selected_rows)
         self.btn_duplikat_baris.clicked.connect(
@@ -1548,6 +1850,25 @@ class TabInvoice(ZoomTableMixin, QWidget):
             QMessageBox.StandardButton.No,
         )
         return answer == QMessageBox.StandardButton.Yes
+
+    def buka_billing_queue(self):
+        """Pilih Resi belum ditagihkan tanpa harus masuk ke Buku Gudang."""
+        dialog = BillingQueueDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        list_resi_data = dialog.selected_data()
+        if not list_resi_data:
+            return False
+
+        dialog_client = DialogPilihClientBilling(list_resi_data, self)
+        if dialog_client.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        return self.terima_data_baru(
+            dialog_client.get_nama_client(),
+            list_resi_data,
+        )
 
     @staticmethod
     def _row_invoice_dari_resi(nomor, data):
@@ -2042,19 +2363,38 @@ class TabInvoice(ZoomTableMixin, QWidget):
         }
 
     def _headers_html_invoice(self):
+        total_width = sum(
+            max(int(column.get("width", 100)), 1)
+            for column in self.active_columns
+        ) or 1
         return "".join(
-            f'<th style="width:{int(column.get("width", 100))}px">{self._esc(column.get("title", ""))}</th>'
+            f'<th style="width:{(max(int(column.get("width", 100)), 1) / total_width) * 100:.2f}%">'
+            f'{self._esc(column.get("title", ""))}</th>'
             for column in self.active_columns
         )
 
     def _body_html_invoice(self, rows):
         body_lines = []
+        center_keys = {
+            "no",
+            "package",
+            "quantity",
+            "weight",
+            "volume",
+            "ship_date",
+        }
         for row_data in rows:
             cells = []
             for column in self.active_columns:
-                value = row_data.get(column["key"], "")
+                key = column["key"]
+                value = row_data.get(key, "")
                 data_type = column.get("type", "text")
-                cls = "num" if data_type in {"currency", "integer", "decimal"} else ""
+                if data_type == "currency":
+                    cls = "num"
+                elif data_type in {"integer", "decimal"} or key in center_keys:
+                    cls = "center"
+                else:
+                    cls = ""
                 if data_type == "currency" and value:
                     parsed = rupiah_to_int(value)
                     value = format_ke_rupiah(parsed) if parsed else value
@@ -2088,31 +2428,53 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 """
 
     @staticmethod
-    @staticmethod
     def _style_html_invoice(font_family_css):
         return f"""
         @page {{ size: A4; margin: 8mm; }}
         * {{ box-sizing: border-box; }}
-        body {{ font-family: "{font_family_css}"; color: #111; font-size: 10pt; margin: 0; }}
-        .page {{ width: 100%; }}
-        .company {{ width: 100%; border: 1px solid #111; border-bottom: none; border-collapse: collapse; }}
-        .company td {{ padding: 7px 10px; vertical-align: middle; }}
-        .brand {{ font-size: 18pt; font-weight: bold; color: #1747a6; }} .logo-kargo {{ color: #e00000; }}
-        .address {{ text-align:right; font-size:9pt; }} .invoice-title {{ border: 1px solid #111; text-align:center; padding:5px; }}
-        .invoice-title .title {{ font-size:13pt; font-weight:bold; }} .invoice-title .number {{ font-size:10pt; margin-top:2px; }}
-        .party {{ width:100%; border-collapse:collapse; margin-top:0; table-layout:fixed; }}
-        .party th, .party td {{ border:1px solid #111; padding:5px 8px; text-align:center; }} .party th {{ background:#e5e5e5; font-weight:bold; }}
-        .party.single th {{ width:70px; text-align:left; }} .party.single td {{ text-align:left; font-size:13pt; font-weight:bold; }}
-        .items {{ width:100%; border-collapse:collapse; table-layout:fixed; margin-top:0; }}
-        .items th, .items td {{ border:1px solid #111; padding:4px 5px; word-wrap:break-word; vertical-align:top; }}
-        .items th {{ background:#d9d9d9; text-align:center; font-size:8.5pt; }} .items td {{ font-size:8.5pt; }}
-        .items .num {{ text-align:right; white-space:nowrap; }} .items .empty {{ text-align:center; color:#777; padding:20px; }}
-        .bottom {{ width:100%; border-collapse:collapse; margin-top:0; }} .bottom td {{ vertical-align:top; }}
-        .payment {{ width:65%; padding:8px 4px; line-height:1.45; }} .totals {{ width:35%; border-collapse:collapse; }}
-        .totals td {{ border:1px solid #111; padding:5px 7px; }} .totals .label {{ text-align:right; font-weight:bold; }}
-        .totals .value {{ text-align:right; white-space:nowrap; }} .totals .grand {{ font-size:13pt; font-weight:bold; }}
-        .notes {{ margin-top:8px; padding:6px; border:1px solid #999; }} .signature {{ margin-top:12px; text-align:right; padding-right:18px; }}
-        .signature .space {{ height:55px; }} .signature .name {{ font-weight:bold; text-decoration:underline; }}
+        html, body {{ margin: 0; padding: 0; width: 100%; }}
+        body {{ font-family: "{font_family_css}"; color: #000; font-size: 8.5pt; font-weight: normal; line-height: 1.15; margin: 0; }}
+        .page {{ width: 100%; margin: 0; padding: 0; }}
+
+        .company {{ width: 100%; border: none; border-collapse: collapse; table-layout: fixed; margin-bottom: 2px; }}
+        .company td {{ padding: 0 6px 4px 6px; vertical-align: top; border: none; }}
+        .brand, .brand * {{ font-family: "{font_family_css}" !important; font-size: 14pt !important; line-height: 1 !important; font-weight: bold; }}
+        .brand {{ color: #1747a6; }} .logo-kargo {{ color: #e00000; }}
+        .company-name {{ font-size: 8.5pt; font-weight: bold; }}
+        .address {{ text-align: right; font-size: 7.5pt; line-height: 1.2; }}
+
+        .invoice-title {{ border: 1px solid #000; text-align: center; padding: 2px 4px; }}
+        .invoice-title .title {{ font-size: 10.5pt; line-height: 1.1; font-weight: bold; }}
+        .invoice-title .number {{ font-size: 8pt; margin-top: 1px; font-weight: normal; }}
+
+        .party {{ width: 100%; border-collapse: collapse; margin: 0; table-layout: fixed; }}
+        .party th, .party td {{ border: 1px solid #000; padding: 3px 5px; }}
+        .party th {{ background: transparent; text-align: center; font-size: 8pt; font-weight: bold; }}
+        .party td {{ text-align: center; font-size: 8.5pt; font-weight: normal; }}
+        .party.single th {{ width: 45px; text-align: left; }}
+        .party.single td {{ text-align: left; font-size: 9pt; font-weight: bold; }}
+
+        .items {{ width: 100%; border-collapse: collapse; table-layout: fixed; margin: 0; }}
+        .items th {{ border: 1px solid #000; background: transparent; padding: 2px 3px; text-align: center; vertical-align: middle; font-size: 7.5pt; line-height: 1.1; font-weight: bold; }}
+        .items td {{ border: 1px solid #000; padding: 2px 3px; vertical-align: top; font-size: 8pt; line-height: 1.15; font-weight: normal; word-wrap: break-word; }}
+        .items .num {{ text-align: right; white-space: nowrap; }}
+        .items .center {{ text-align: center; white-space: nowrap; }}
+        .items .empty {{ text-align: center; color: #777; padding: 10px; }}
+
+        .bottom {{ width: 100%; border-collapse: collapse; margin: 0; table-layout: fixed; }}
+        .bottom > tbody > tr > td {{ vertical-align: top; }}
+        .payment {{ width: 65%; padding: 4px; font-size: 8pt; line-height: 1.25; font-weight: normal; }}
+        .total-container {{ width: 35%; padding: 0; }}
+        .totals {{ width: 100%; border-collapse: collapse; }}
+        .totals td {{ border: 1px solid #000; padding: 3px 5px; font-size: 8.5pt; }}
+        .totals .label {{ text-align: right; font-weight: bold; }}
+        .totals .value {{ text-align: right; white-space: nowrap; font-weight: normal; }}
+        .totals .grand {{ font-size: 10.5pt; line-height: 1.1; font-weight: bold; }}
+
+        .notes {{ margin-top: 4px; padding: 3px; border: 1px solid #999; font-size: 7.5pt; line-height: 1.2; }}
+        .signature {{ margin-top: 7px; text-align: right; padding-right: 8px; font-size: 8pt; line-height: 1.2; }}
+        .signature .space {{ height: 38px; }}
+        .signature .name {{ font-size: 8.5pt; font-weight: bold; text-decoration: underline; }}
     """
 
     def _render_invoice_html(
@@ -2136,7 +2498,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
     <head><meta charset="utf-8"><style>{style_html}</style></head>
     <body><div class="page">
     <table class="company"><tr>
-    <td><span class="brand">{context["logo_html"]}</span><br><span style="font-weight:bold;">{self._esc(context["nama_perusahaan"])}</span></td>
+    <td><span class="brand">{context["logo_html"]}</span><br><span class="company-name">{self._esc(context["nama_perusahaan"])}</span></td>
     <td class="address">{context["alamat_lengkap"]}</td>
     </tr></table>
     <div class="invoice-title"><div class="title">INVOICE</div><div class="number">No. {self._esc(context["invoice_number"])}</div></div>
@@ -2144,7 +2506,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
     <table class="items"><thead><tr>{headers_html}</tr></thead><tbody>{body_html}</tbody></table>
     <table class="bottom"><tr>
     <td class="payment"><b>PAYMENT INFO</b><br>{payment_html}{notes_html}</td>
-    <td><table class="totals">
+    <td class="total-container"><table class="totals">
     <tr><td class="label">SUB TOTAL</td><td class="value">Rp {format_ke_rupiah(subtotal)}</td></tr>
     <tr><td class="label">{self._esc(tax_name)}</td><td class="value">Rp {format_ke_rupiah(tax_value)}</td></tr>
     <tr><td class="label grand">TOTAL</td><td class="value grand">Rp {format_ke_rupiah(self.total_invoice_aktif)}</td></tr>
@@ -2224,8 +2586,8 @@ class TabInvoice(ZoomTableMixin, QWidget):
                 )
                 font_family_css = self._font_family_css()
                 html_content = html_content.replace(
-                    f'body {{ font-family: "{font_family_css}"; color: #111; font-size: 10pt; margin: 0; }}',
-                    'body { font-family: "Courier New", monospace; color: #000; font-size: 9pt; font-weight: bold; margin: 0; }',
+                    f'body {{ font-family: "{font_family_css}"; color: #000; font-size: 8.5pt; font-weight: normal; line-height: 1.15; margin: 0; }}',
+                    f'body {{ font-family: "{font_family_css}"; color: #000; font-size: 8pt; font-weight: normal; line-height: 1.1; margin: 0; }}',
                 )
 
             document = QTextDocument()
@@ -2339,8 +2701,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
         )
 
         atur_tinggi_input(comboboxes)
-
-        terapkan_popup_bawah_combobox(comboboxes)
 
     @staticmethod
     def _sinkronkan_font_item_tabel(tabel):

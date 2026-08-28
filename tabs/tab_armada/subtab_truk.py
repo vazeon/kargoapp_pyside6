@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -22,7 +21,6 @@ from PySide6.QtWidgets import (
 import services.database_service as db_service
 
 from themes.modules.kontak_armada import get_armada_styles
-from themes.components.combobox import terapkan_popup_bawah_combobox
 
 from utils.typography import get_master_font, get_global_font_sizes_pt
 from utils.mixins import ZoomTableMixin
@@ -46,7 +44,6 @@ from utils.modules.armada_metrics import (
     ARMADA_PHOTO_BUTTON_MIN_HEIGHT,
     ARMADA_PHOTO_PREVIEW_HEIGHT,
     ARMADA_SEARCH_WIDTH,
-    ARMADA_SPLITTER_INITIAL_SIZES,
     ARMADA_TABLE_HEADER_MIN_HEIGHT,
     ARMADA_TABLE_ROW_BASE_HEIGHT,
     ARMADA_TRUK_COLUMN_WIDTHS,
@@ -104,12 +101,13 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         layout_utama = QVBoxLayout(self)
         layout_utama.setContentsMargins(*ARMADA_PAGE_MARGINS)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout_utama.addWidget(self.splitter)
+        self.layout_panel = QHBoxLayout()
+        self.layout_panel.setSpacing(0)
+        layout_utama.addLayout(self.layout_panel)
 
         self._bangun_panel_master_truk()
         self._bangun_panel_editor_truk()
-        self._konfigurasi_splitter()
+        self._konfigurasi_panel()
 
         self.atur_mode("IDLE")
         self.refresh_session_ui()
@@ -186,7 +184,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self.combo_jenis.addItems(["TB", "Tronton", "CDD", "Pick-up", "Lainnya..."])
         self.combo_jenis.setEditable(False)
         self.combo_jenis.currentIndexChanged.connect(self.on_jenis_truk_changed)
-        terapkan_popup_bawah_combobox((self.combo_jenis,))
         layout.addWidget(self.lbl_jenis)
         layout.addWidget(self.combo_jenis)
 
@@ -251,13 +248,9 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self._bangun_area_foto_truk(layout)
         self._bangun_tombol_editor_truk(layout)
 
-    def _konfigurasi_splitter(self):
-        self.splitter.addWidget(self.panel_kiri)
-        self.splitter.addWidget(self.panel_kanan)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setCollapsible(0, False)
-        self.splitter.setCollapsible(1, False)
-        self.splitter.setSizes(list(ARMADA_SPLITTER_INITIAL_SIZES))
+    def _konfigurasi_panel(self):
+        self.layout_panel.addWidget(self.panel_kiri)
+        self.layout_panel.addWidget(self.panel_kanan)
 
     # --- LIFECYCLE & REFRESH ---
 

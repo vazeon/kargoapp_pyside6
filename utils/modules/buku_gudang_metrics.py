@@ -40,6 +40,9 @@ BUKU_GUDANG_MAIN_MARGINS = (0, 6, 0, 0)
 BUKU_GUDANG_MAIN_SPACING = 6
 BUKU_GUDANG_TABLE_TAB_MARGINS = (6, 6, 6, 6)
 
+# Ukuran QTabBar tidak disimpan per modul.
+# Sumber tunggal: TAB_* di utils.ui_metrics, diterapkan oleh themes.base.
+
 # ---------------------------------------------------------------------------
 # Tabel
 # ---------------------------------------------------------------------------

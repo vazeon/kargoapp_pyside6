@@ -25,6 +25,26 @@ BASELINE_HEIGHT = 900
 MIN_UI_SCALE = 0.84
 MAX_UI_SCALE = 1.06
 
+# ---------------------------------------------------------------------------
+# Baseline geometry UI umum
+# ---------------------------------------------------------------------------
+# Semua nilai adalah logical-pixel baseline, BUKAN ukuran final.
+# Scaling responsive dilakukan satu kali oleh ResponsiveUIScaler.
+TAB_MIN_WIDTH = 88
+TAB_PADDING_V = 10
+TAB_PADDING_H = 16
+
+# Tinggi baseline kontrol pada corner-widget kanan MainTabs.
+# Nilai final tetap mengikuti ResponsiveUIScaler.
+# Tinggi kontrol kanan dibuat sedikit lebih lega agar QComboBox tidak ter-clip
+# setelah responsive scaling pada layar yang scale-nya < 1.0.
+TOP_RIGHT_CONTROL_HEIGHT = 32
+TOP_RIGHT_ZOOM_SLIDER_WIDTH = 105
+
+# Tinggi minimum bar tab utama. Memberi ruang vertikal yang cukup untuk
+# corner-widget kanan tanpa memperbesar semua subtab.
+MAIN_TAB_BAR_MIN_HEIGHT = 36
+
 _APP_SCALE_PROPERTY = "_responsive_ui_scale"
 
 
@@ -38,6 +58,7 @@ class UIMetrics:
     input_padding_v: int
     input_padding_h: int
     combo_padding_right: int
+    combo_padding_left: int
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -160,6 +181,7 @@ def dapatkan_ui_metrics(
         input_padding_v=skalakan_px(4, scale=scale, minimum=3, maximum=5),
         input_padding_h=skalakan_px(10, scale=scale, minimum=8, maximum=11),
         combo_padding_right=skalakan_px(28, scale=scale, minimum=24, maximum=30),
+        combo_padding_left=skalakan_px(12, scale=scale, minimum=10, maximum=16),
     )
 
 

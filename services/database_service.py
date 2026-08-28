@@ -12,7 +12,7 @@ import logging
 import re
 import uuid
 from contextlib import contextmanager
-from config import CURRENT_SESSION, DATA_CLIENT
+from config import CURRENT_SESSION, DATA_CLIENT, CENTRAL_BRANCH_ROLES
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +239,33 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
         """,
         (baru, id_gudang_lama, id_gudang_baru, lama, cabang),
     )
+
+    # invoice_detail tetap menjadi snapshot historis. invoice_resi adalah relasi
+    # operasional ke nomor Resi aktif, sehingga ikut bergerak saat nomor berubah.
+    try:
+        cursor.execute(
+            """
+            DELETE FROM invoice_resi
+            WHERE UPPER(no_resi) = UPPER(?)
+              AND no_invoice IN (
+                  SELECT no_invoice
+                  FROM invoice_resi
+                  WHERE UPPER(no_resi) = UPPER(?)
+              )
+            """,
+            (lama, baru),
+        )
+        cursor.execute(
+            """
+            UPDATE invoice_resi
+            SET no_resi = ?, kode_cabang = ?
+            WHERE UPPER(no_resi) = UPPER(?)
+            """,
+            (baru, cabang, lama),
+        )
+    except sqlite3.OperationalError:
+        # Kompatibilitas bila service dipakai sebelum migration v2 dijalankan.
+        pass
 
     cursor.execute(
         "DELETE FROM data_resi WHERE no_resi = ? AND kode_cabang = ?",
@@ -1359,7 +1386,7 @@ def _status_penagihan_cocok(info, filter_status):
     return True
 
 def _ambil_peta_status_penagihan_batch(no_resi_list):
-    """Map Resi aktif -> Invoice terkait paling baru tanpa N+1 query."""
+    """Map Resi aktif -> Invoice terbaru memakai invoice_resi, fallback snapshot legacy."""
     daftar = [
         str(no_resi or "").strip().upper()
         for no_resi in (no_resi_list or [])
@@ -1373,37 +1400,28 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
         for varian in _varian_nomor_resi_pajak(no_resi):
             varian_ke_resi.setdefault(varian, set()).add(no_resi)
 
+    peta = {}
+    invoices_per_resi = {no_resi: set() for no_resi in daftar}
     conn = None
     try:
         conn = get_db_connection()
-        rows = conn.execute(
-            """
-            SELECT h.no_invoice, h.status, h.tanggal, h.created_at,
-                   h.updated_at, h.id, d.data_kolom
-            FROM invoice_header AS h
-            INNER JOIN invoice_detail AS d ON d.no_invoice = h.no_invoice
-            ORDER BY h.updated_at DESC, h.id DESC, d.nomor_urut ASC
-            """
-        ).fetchall()
 
-        peta = {}
-        invoices_per_resi = {no_resi: set() for no_resi in daftar}
-        for no_invoice, status, tanggal, created_at, _updated_at, _id, data_kolom in rows:
-            raw = str(data_kolom or "")
-            matched = set()
-            try:
-                parsed = json.loads(raw)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                parsed = None
+        # Jalur utama: relasi terstruktur, jauh lebih murah daripada parse seluruh JSON.
+        try:
+            relation_rows = conn.execute(
+                """
+                SELECT h.no_invoice, h.status, h.tanggal, h.created_at,
+                       h.updated_at, h.id, ir.no_resi
+                FROM invoice_header AS h
+                INNER JOIN invoice_resi AS ir ON ir.no_invoice = h.no_invoice
+                ORDER BY h.updated_at DESC, h.id DESC, ir.id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            relation_rows = []
 
-            if parsed is not None:
-                for kandidat in _kumpulkan_nomor_resi_snapshot(parsed):
-                    matched.update(varian_ke_resi.get(kandidat, ()))
-            elif raw:
-                for varian, resi_set in varian_ke_resi.items():
-                    if _teks_memuat_nomor_resi(raw, {varian}):
-                        matched.update(resi_set)
-
+        for no_invoice, status, tanggal, created_at, _updated_at, _id, nomor_relasi in relation_rows:
+            matched = varian_ke_resi.get(str(nomor_relasi or "").strip().upper(), set())
             for no_resi in matched:
                 invoice = str(no_invoice or "").strip().upper()
                 if not invoice:
@@ -1416,6 +1434,54 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
                     "created_at": str(created_at or "").strip(),
                     "jumlah_invoice": 0,
                 })
+
+        # Fallback hanya untuk Resi yang belum berhasil dipetakan, agar invoice
+        # legacy/malformed lama tetap terdeteksi selama masa transisi.
+        belum = [no_resi for no_resi in daftar if no_resi not in peta]
+        if belum:
+            varian_legacy = {}
+            for no_resi in belum:
+                for varian in _varian_nomor_resi_pajak(no_resi):
+                    varian_legacy.setdefault(varian, set()).add(no_resi)
+
+            rows = conn.execute(
+                """
+                SELECT h.no_invoice, h.status, h.tanggal, h.created_at,
+                       h.updated_at, h.id, d.data_kolom
+                FROM invoice_header AS h
+                INNER JOIN invoice_detail AS d ON d.no_invoice = h.no_invoice
+                ORDER BY h.updated_at DESC, h.id DESC, d.nomor_urut ASC
+                """
+            ).fetchall()
+
+            for no_invoice, status, tanggal, created_at, _updated_at, _id, data_kolom in rows:
+                raw = str(data_kolom or "")
+                matched = set()
+                try:
+                    parsed = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed = None
+
+                if parsed is not None:
+                    for kandidat in _kumpulkan_nomor_resi_snapshot(parsed):
+                        matched.update(varian_legacy.get(kandidat, ()))
+                elif raw:
+                    for varian, resi_set in varian_legacy.items():
+                        if _teks_memuat_nomor_resi(raw, {varian}):
+                            matched.update(resi_set)
+
+                for no_resi in matched:
+                    invoice = str(no_invoice or "").strip().upper()
+                    if not invoice:
+                        continue
+                    invoices_per_resi.setdefault(no_resi, set()).add(invoice)
+                    peta.setdefault(no_resi, {
+                        "no_invoice": invoice,
+                        "status": str(status or "").strip().upper(),
+                        "tanggal": str(tanggal or "").strip(),
+                        "created_at": str(created_at or "").strip(),
+                        "jumlah_invoice": 0,
+                    })
 
         for no_resi, info in peta.items():
             info["jumlah_invoice"] = len(invoices_per_resi.get(no_resi, ()))
@@ -2183,13 +2249,7 @@ def _kumpulkan_nomor_resi_snapshot(value, *, izinkan_fallback=True):
     return fallback if izinkan_fallback else set()
 
 def ambil_invoice_terkait_resi(no_resi):
-    """Ambil Invoice yang menyimpan snapshot Resi tanpa mengubah Invoice.
-
-    ``invoice_detail.data_kolom`` merupakan snapshot JSON, bukan FK langsung ke
-    ``data_resi``. Lookup karena itu memeriksa isi snapshot dan juga varian nomor
-    dengan/tanpa suffix pajak agar relasi historis tetap dapat ditemukan setelah
-    koreksi PAJAK <-> NONPAJAK.
-    """
+    """Ambil Invoice terkait Resi; prioritaskan relasi invoice_resi, fallback snapshot."""
     if USE_CLOUD:
         return []
 
@@ -2200,6 +2260,34 @@ def ambil_invoice_terkait_resi(no_resi):
     conn = None
     try:
         conn = get_db_connection()
+        placeholders = ",".join("?" for _ in kandidat)
+        try:
+            rows_relasi = conn.execute(
+                f"""
+                SELECT DISTINCT h.no_invoice, h.status, h.tanggal,
+                       h.updated_at, h.id
+                FROM invoice_header AS h
+                INNER JOIN invoice_resi AS ir ON ir.no_invoice = h.no_invoice
+                WHERE UPPER(ir.no_resi) IN ({placeholders})
+                ORDER BY h.updated_at DESC, h.id DESC
+                """,
+                tuple(kandidat),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows_relasi = []
+
+        if rows_relasi:
+            return [
+                {
+                    "no_invoice": str(row[0] or "").strip(),
+                    "status": str(row[1] or "").strip().upper(),
+                    "tanggal": str(row[2] or "").strip(),
+                }
+                for row in rows_relasi
+                if str(row[0] or "").strip()
+            ]
+
+        # Fallback kompatibilitas untuk invoice legacy yang belum berhasil dibackfill.
         rows = conn.execute(
             """
             SELECT h.no_invoice, h.status, h.tanggal,
@@ -2246,7 +2334,22 @@ def ambil_invoice_terkait_resi(no_resi):
         _close(conn)
 
 def _nomor_resi_snapshot_invoice_cursor(cursor, no_invoice):
-    hasil = set()
+    try:
+        rows_relasi = cursor.execute(
+            "SELECT no_resi FROM invoice_resi WHERE no_invoice = ? ORDER BY id ASC",
+            (no_invoice,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows_relasi = []
+
+    hasil = {
+        str(row[0] or "").strip().upper()
+        for row in rows_relasi
+        if row and str(row[0] or "").strip()
+    }
+    if hasil:
+        return hasil
+
     rows = cursor.execute(
         "SELECT data_kolom FROM invoice_detail WHERE no_invoice = ?",
         (no_invoice,),
@@ -2308,18 +2411,31 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
         if status == "LUNAS":
             snapshot_resi = _nomor_resi_snapshot_invoice_cursor(cursor, invoice)
             for nomor_snapshot in snapshot_resi:
-                kandidat = sorted(_varian_nomor_resi_pajak(nomor_snapshot))
-                if not kandidat:
+                nomor = str(nomor_snapshot or "").strip().upper()
+                if not nomor:
                     continue
-                placeholders = ",".join("?" for _ in kandidat)
+                # invoice_resi menyimpan nomor aktif lintas cabang. Bila berasal dari
+                # snapshot legacy, fallback varian PAJAK/NONPAJAK tetap dipertahankan.
                 cursor.execute(
-                    f"""
+                    """
                     UPDATE data_resi
                     SET status_resi = 'SELESAI', updated_at = CURRENT_TIMESTAMP
-                    WHERE kode_cabang = ? AND UPPER(no_resi) IN ({placeholders})
+                    WHERE UPPER(no_resi) = UPPER(?)
                     """,
-                    [cabang, *kandidat],
+                    (nomor,),
                 )
+                if cursor.rowcount == 0:
+                    kandidat = sorted(_varian_nomor_resi_pajak(nomor))
+                    if kandidat:
+                        placeholders = ",".join("?" for _ in kandidat)
+                        cursor.execute(
+                            f"""
+                            UPDATE data_resi
+                            SET status_resi = 'SELESAI', updated_at = CURRENT_TIMESTAMP
+                            WHERE UPPER(no_resi) IN ({placeholders})
+                            """,
+                            kandidat,
+                        )
 
         conn.commit()
         return True, f"Invoice {invoice} berhasil ditandai {status}."
@@ -2390,6 +2506,195 @@ def cek_proteksi_invoice_resi(no_resi, perubahan=None, kode_cabang=None):
 # ==============================================================================
 # 06. INVOICE — TAGIHAN & TEMPLATE JSON
 # ==============================================================================
+
+def ambil_daftar_cabang_billing():
+    """Daftar cabang untuk filter Billing Queue."""
+    if USE_CLOUD:
+        return []
+    try:
+        return _fetchall(
+            """
+            SELECT kode_cabang, nama_cabang
+            FROM data_cabang
+            ORDER BY nama_cabang COLLATE NOCASE ASC, kode_cabang ASC
+            """
+        )
+    except sqlite3.Error as exc:
+        logger.error("[Invoice] Gagal memuat daftar cabang billing: %s", exc)
+        return []
+
+
+def ambil_resi_belum_ditagihkan(
+    kode_cabang=None,
+    *,
+    semua_cabang=False,
+    kode_cabang_list=None,
+    keyword="",
+    tanggal_awal=None,
+    tanggal_akhir=None,
+    limit=1000,
+):
+    """Ambil Resi yang belum mempunyai relasi Invoice untuk Billing Queue."""
+    if USE_CLOUD:
+        return []
+
+    cabang = str(
+        kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT") or "PUSAT"
+    ).strip().upper()
+    keyword = str(keyword or "").strip().casefold()
+    try:
+        batas = max(1, min(int(limit), 5000))
+    except (TypeError, ValueError):
+        batas = 1000
+
+    where = [
+        """
+        NOT EXISTS (
+            SELECT 1
+            FROM invoice_resi AS ir
+            WHERE UPPER(ir.no_resi) = UPPER(r.no_resi)
+        )
+        """
+    ]
+    params = []
+
+    if semua_cabang:
+        allowed = [
+            str(item or "").strip().upper()
+            for item in (kode_cabang_list or [])
+            if str(item or "").strip()
+        ]
+        allowed = list(dict.fromkeys(allowed))
+        if allowed:
+            placeholders = ",".join("?" for _ in allowed)
+            where.append(f"r.kode_cabang IN ({placeholders})")
+            params.extend(allowed)
+    else:
+        where.append("r.kode_cabang = ?")
+        params.append(cabang)
+    if tanggal_awal:
+        where.append("DATE(r.tanggal_masuk) >= DATE(?)")
+        params.append(str(tanggal_awal))
+    if tanggal_akhir:
+        where.append("DATE(r.tanggal_masuk) <= DATE(?)")
+        params.append(str(tanggal_akhir))
+    if keyword:
+        pola = f"%{keyword}%"
+        where.append(
+            """
+            (
+                LOWER(COALESCE(r.no_resi, '')) LIKE ? OR
+                LOWER(COALESCE(r.pengirim, '')) LIKE ? OR
+                LOWER(COALESCE(r.penerima, '')) LIKE ? OR
+                LOWER(COALESCE(r.kota_tujuan, '')) LIKE ? OR
+                LOWER(COALESCE(r.nama_barang, '')) LIKE ?
+            )
+            """
+        )
+        params.extend([pola] * 5)
+
+    params.append(batas)
+    conn = None
+    try:
+        conn = get_db_connection()
+        rows = conn.execute(
+            f"""
+            SELECT r.no_resi, r.kode_cabang, r.tanggal_masuk,
+                   COALESCE(r.pengirim, ''), COALESCE(r.penerima, ''),
+                   COALESCE(r.kota_tujuan, ''), COALESCE(r.nama_barang, ''),
+                   COALESCE(r.koli, 0), COALESCE(r.berat, 0),
+                   COALESCE(r.cbm, 0), COALESCE(r.total_ongkir, 0),
+                   COALESCE(r.status_resi, '')
+            FROM data_resi AS r
+            WHERE {' AND '.join(where)}
+            ORDER BY DATE(r.tanggal_masuk) DESC, r.no_resi DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [
+            {
+                "no_resi": str(row[0] or "").strip().upper(),
+                "kode_cabang": str(row[1] or "").strip().upper(),
+                "tanggal": str(row[2] or "").strip(),
+                "pengirim": str(row[3] or "").strip().upper(),
+                "penerima": str(row[4] or "").strip().upper(),
+                "tujuan": str(row[5] or "").strip().upper(),
+                "nama_barang": str(row[6] or "").strip().upper(),
+                "koli": str(row[7] if row[7] is not None else "0"),
+                "berat": str(row[8] if row[8] is not None else "0"),
+                "kubik": str(row[9] if row[9] is not None else "0"),
+                "ongkir": str(row[10] if row[10] is not None else "0"),
+                "status_resi": str(row[11] or "").strip().upper(),
+            }
+            for row in rows
+        ]
+    except sqlite3.Error as exc:
+        logger.error("[Invoice] Gagal memuat Billing Queue: %s", exc)
+        return []
+    finally:
+        _close(conn)
+
+
+def _resolve_resi_aktif_cursor(cursor, nomor_resi):
+    nomor = str(nomor_resi or "").strip().upper()
+    if not nomor:
+        return None
+    kandidat = [nomor]
+    kandidat.extend(
+        varian for varian in sorted(_varian_nomor_resi_pajak(nomor))
+        if varian not in kandidat
+    )
+    for kandidat_nomor in kandidat:
+        row = cursor.execute(
+            """
+            SELECT no_resi, kode_cabang
+            FROM data_resi
+            WHERE UPPER(no_resi) = UPPER(?)
+            LIMIT 1
+            """,
+            (kandidat_nomor,),
+        ).fetchone()
+        if row:
+            return (
+                str(row[0] or "").strip().upper(),
+                str(row[1] or "").strip().upper() or None,
+            )
+    return nomor, None
+
+
+def _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items):
+    """Sinkronkan relasi operasional Invoice-Resi dari detail snapshot yang disimpan."""
+    cursor.execute("DELETE FROM invoice_resi WHERE no_invoice = ?", (no_invoice,))
+    relasi = set()
+    for item in items or []:
+        raw = item.get("data_kolom") if isinstance(item, dict) else None
+        if raw in (None, ""):
+            continue
+        try:
+            parsed = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        for nomor_snapshot in _kumpulkan_nomor_resi_snapshot(
+            parsed, izinkan_fallback=False
+        ):
+            resolved = _resolve_resi_aktif_cursor(cursor, nomor_snapshot)
+            if resolved:
+                relasi.add(resolved)
+
+    if relasi:
+        cursor.executemany(
+            """
+            INSERT OR IGNORE INTO invoice_resi (
+                no_invoice, no_resi, kode_cabang
+            ) VALUES (?, ?, ?)
+            """,
+            [
+                (no_invoice, no_resi, kode_cabang)
+                for no_resi, kode_cabang in sorted(relasi)
+            ],
+        )
+
 
 def dapatkan_sequence_invoice_baru(prefix):
     """Menghasilkan sequence berikutnya dari angka terakhir nomor invoice."""
@@ -2494,6 +2799,7 @@ def simpan_atau_update_invoice(header, items, is_update=False):
             return False, pesan
 
         _simpan_detail_invoice(cursor, no_invoice, items)
+        _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items)
         conn.commit()
         return True, "Sukses"
     except sqlite3.IntegrityError as exc:
@@ -3084,6 +3390,426 @@ def ambil_semua_data_cabang(limit=10):
     except sqlite3.Error as exc:
         logger.error("[Setting] Gagal mengambil cabang: %s", exc)
         return []
+
+def ambil_data_akses_cabang_user():
+    """Data user dan branch scope untuk UI Manajemen Akses Cabang."""
+    if USE_CLOUD:
+        return {"branches": [], "users": []}
+
+    try:
+        branches = _fetchall(
+            """
+            SELECT kode_cabang, nama_cabang
+            FROM data_cabang
+            WHERE UPPER(kode_cabang) <> 'DEV_SYS'
+            ORDER BY nama_cabang COLLATE NOCASE, kode_cabang
+            """
+        )
+        users = _fetchall(
+            """
+            SELECT
+                u.id_user, u.username, u.role, u.nama_lengkap,
+                u.kode_cabang, COALESCE(c.nama_cabang, u.kode_cabang),
+                COALESCE(u.status_user, 'AKTIF'),
+                GROUP_CONCAT(a.kode_cabang, ',')
+            FROM manajemen_user AS u
+            LEFT JOIN data_cabang AS c
+                ON c.kode_cabang = u.kode_cabang
+            LEFT JOIN user_cabang_access AS a
+                ON a.id_user = u.id_user
+            GROUP BY
+                u.id_user, u.username, u.role, u.nama_lengkap,
+                u.kode_cabang, c.nama_cabang, u.status_user
+            ORDER BY u.username COLLATE NOCASE, u.id_user
+            """
+        )
+    except sqlite3.Error as exc:
+        logger.error("[Setting] Gagal mengambil akses cabang user: %s", exc)
+        return {"branches": [], "users": []}
+
+    branch_rows = [
+        {
+            "kode_cabang": _upper(kode),
+            "nama_cabang": _text(nama) or _upper(kode),
+        }
+        for kode, nama in branches
+        if _upper(kode)
+    ]
+
+    user_rows = []
+    for (
+        id_user, username, role, nama_lengkap,
+        kode_cabang, nama_cabang, status_user, akses_csv,
+    ) in users:
+        akses = {
+            _upper(kode)
+            for kode in str(akses_csv or "").split(",")
+            if _upper(kode)
+        }
+        home = _upper(kode_cabang)
+        if home:
+            akses.add(home)
+        role_bersih = _upper(role or "ADMIN") or "ADMIN"
+        akses_otomatis = (
+            role_bersih in CENTRAL_BRANCH_ROLES
+            or home == "PUSAT"
+        )
+        user_rows.append({
+            "id_user": _text(id_user),
+            "username": _upper(username),
+            "role": role_bersih,
+            "nama_lengkap": _text(nama_lengkap),
+            "kode_cabang": home,
+            "nama_cabang": _text(nama_cabang) or home,
+            "status_user": _upper(status_user or "AKTIF") or "AKTIF",
+            "akses_cabang": sorted(akses),
+            "akses_otomatis": akses_otomatis,
+        })
+
+    return {"branches": branch_rows, "users": user_rows}
+
+
+def simpan_akses_cabang_users(user_access_rows):
+    """
+    Menyimpan branch scope user secara atomic.
+
+    Home branch selalu dipertahankan. Role pusat dan user ber-home PUSAT
+    selalu memperoleh seluruh cabang bisnis, sesuai policy login di config.py.
+    """
+    if USE_CLOUD:
+        return False, "Penyimpanan cloud belum diaktifkan."
+
+    try:
+        _pastikan_super_admin()
+    except Exception as exc:
+        return False, str(exc)
+
+    rows = list(user_access_rows or [])
+    try:
+        with _db_transaction(immediate=True) as (_, cursor):
+            valid_branches = {
+                _upper(row[0])
+                for row in cursor.execute(
+                    "SELECT kode_cabang FROM data_cabang"
+                ).fetchall()
+                if _upper(row[0])
+            }
+            business_branches = {
+                kode for kode in valid_branches
+                if kode != "DEV_SYS"
+            }
+
+            for entry in rows:
+                id_user = _text(entry.get("id_user"))
+                if not id_user:
+                    continue
+
+                user_row = cursor.execute(
+                    """
+                    SELECT role, kode_cabang
+                    FROM manajemen_user
+                    WHERE id_user = ?
+                    LIMIT 1
+                    """,
+                    (id_user,),
+                ).fetchone()
+                if user_row is None:
+                    raise ValueError(
+                        f"User dengan ID '{id_user}' tidak ditemukan."
+                    )
+
+                role = _upper(user_row[0] or "ADMIN") or "ADMIN"
+                home = _upper(user_row[1])
+                akses_otomatis = (
+                    role in CENTRAL_BRANCH_ROLES
+                    or home == "PUSAT"
+                )
+
+                if akses_otomatis:
+                    desired = set(business_branches)
+                    if home in valid_branches:
+                        desired.add(home)
+                else:
+                    requested = {
+                        _upper(kode)
+                        for kode in entry.get("kode_cabang", [])
+                        if _upper(kode)
+                    }
+                    unknown = requested - valid_branches
+                    if unknown:
+                        raise ValueError(
+                            "Cabang tidak dikenal pada akses user "
+                            f"{id_user}: {', '.join(sorted(unknown))}."
+                        )
+                    desired = requested & business_branches
+                    if home in valid_branches:
+                        desired.add(home)
+
+                cursor.execute(
+                    "DELETE FROM user_cabang_access WHERE id_user = ?",
+                    (id_user,),
+                )
+                cursor.executemany(
+                    """
+                    INSERT INTO user_cabang_access (id_user, kode_cabang)
+                    VALUES (?, ?)
+                    """,
+                    [(id_user, kode) for kode in sorted(desired)],
+                )
+
+        return True, "Akses cabang user berhasil disimpan."
+    except Exception as exc:
+        logger.exception("[Setting] Gagal menyimpan akses cabang user")
+        return False, str(exc)
+
+
+_VALID_USER_ROLES = {"SUPER_ADMIN", "OWNER", "ADMIN_PUSAT", "FINANCE", "ADMIN"}
+
+
+def _pastikan_super_admin():
+    role = _upper(CURRENT_SESSION.get("role"))
+    if role != "SUPER_ADMIN":
+        raise PermissionError("Hanya SUPER_ADMIN yang dapat mengelola akun user.")
+
+
+def _ambil_cabang_bisnis_cursor(cursor):
+    rows = cursor.execute(
+        """
+        SELECT kode_cabang
+        FROM data_cabang
+        WHERE UPPER(kode_cabang) <> 'DEV_SYS'
+        """
+    ).fetchall()
+    return {_upper(row[0]) for row in rows if _upper(row[0])}
+
+
+def _normalisasi_role_user(role):
+    role_bersih = _upper(role or "ADMIN") or "ADMIN"
+    if role_bersih not in _VALID_USER_ROLES:
+        raise ValueError(f"Role user tidak valid: {role_bersih}.")
+    return role_bersih
+
+
+def _set_akses_user_cursor(cursor, id_user, role, home, requested=None):
+    valid_branches = _ambil_cabang_bisnis_cursor(cursor)
+    home = _upper(home)
+    if home not in valid_branches:
+        raise ValueError(f"Home branch '{home}' tidak ditemukan/valid.")
+
+    otomatis = role in CENTRAL_BRANCH_ROLES or home == "PUSAT"
+    if otomatis:
+        desired = set(valid_branches)
+    else:
+        requested_set = {_upper(kode) for kode in (requested or []) if _upper(kode)}
+        unknown = requested_set - valid_branches
+        if unknown:
+            raise ValueError(
+                "Cabang akses tidak dikenal: " + ", ".join(sorted(unknown))
+            )
+        desired = requested_set
+        desired.add(home)
+
+    cursor.execute("DELETE FROM user_cabang_access WHERE id_user = ?", (id_user,))
+    cursor.executemany(
+        """
+        INSERT INTO user_cabang_access (id_user, kode_cabang)
+        VALUES (?, ?)
+        """,
+        [(id_user, kode) for kode in sorted(desired)],
+    )
+
+
+def buat_user_baru(data_user):
+    """Membuat akun + branch access dalam satu transaksi. Khusus SUPER_ADMIN."""
+    if USE_CLOUD:
+        return False, "Penyimpanan cloud belum diaktifkan."
+    try:
+        _pastikan_super_admin()
+        data = dict(data_user or {})
+        username = _upper(data.get("username"))
+        nama = _text(data.get("nama_lengkap"))
+        password = str(data.get("password") or "")
+        role = _normalisasi_role_user(data.get("role"))
+        home = _upper(data.get("kode_cabang"))
+        akses = list(data.get("akses_cabang") or [])
+
+        if not username:
+            raise ValueError("Username wajib diisi.")
+        if not re.fullmatch(r"[A-Z0-9._-]{3,32}", username):
+            raise ValueError(
+                "Username minimal 3 karakter dan hanya boleh berisi huruf, angka, titik, garis bawah, atau strip."
+            )
+        if not nama:
+            raise ValueError("Nama lengkap wajib diisi.")
+        if not password:
+            raise ValueError("Password wajib diisi.")
+
+        id_user = f"USR-{uuid.uuid4().hex[:12].upper()}"
+        with _db_transaction(immediate=True) as (_, cursor):
+            if cursor.execute(
+                "SELECT 1 FROM manajemen_user WHERE UPPER(username) = ? LIMIT 1",
+                (username,),
+            ).fetchone():
+                raise ValueError(f"Username '{username}' sudah digunakan.")
+            if home not in _ambil_cabang_bisnis_cursor(cursor):
+                raise ValueError(f"Home branch '{home}' tidak valid.")
+
+            cursor.execute(
+                """
+                INSERT INTO manajemen_user (
+                    id_user, username, password, role, nama_lengkap,
+                    kode_cabang, status_user
+                ) VALUES (?, ?, ?, ?, ?, ?, 'AKTIF')
+                """,
+                (id_user, username, password, role, nama, home),
+            )
+            _set_akses_user_cursor(cursor, id_user, role, home, akses)
+        return True, f"User {username} berhasil dibuat."
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal membuat user")
+        return False, str(exc)
+
+
+def ubah_user(data_user):
+    """Mengubah profil/role/home branch tanpa mengubah username/password."""
+    if USE_CLOUD:
+        return False, "Penyimpanan cloud belum diaktifkan."
+    try:
+        _pastikan_super_admin()
+        data = dict(data_user or {})
+        id_user = _text(data.get("id_user"))
+        nama = _text(data.get("nama_lengkap"))
+        role_baru = _normalisasi_role_user(data.get("role"))
+        home_baru = _upper(data.get("kode_cabang"))
+        akses = list(data.get("akses_cabang") or [])
+        if not id_user:
+            raise ValueError("ID user tidak valid.")
+        if not nama:
+            raise ValueError("Nama lengkap wajib diisi.")
+
+        with _db_transaction(immediate=True) as (_, cursor):
+            existing = cursor.execute(
+                """
+                SELECT username, role, kode_cabang, COALESCE(status_user, 'AKTIF')
+                FROM manajemen_user
+                WHERE id_user = ?
+                LIMIT 1
+                """,
+                (id_user,),
+            ).fetchone()
+            if existing is None:
+                raise ValueError("User tidak ditemukan.")
+            if home_baru not in _ambil_cabang_bisnis_cursor(cursor):
+                raise ValueError(f"Home branch '{home_baru}' tidak valid.")
+
+            current_id = _text(CURRENT_SESSION.get("id_user"))
+            if id_user == current_id and role_baru != "SUPER_ADMIN":
+                raise ValueError(
+                    "SUPER_ADMIN yang sedang login tidak dapat menurunkan role dirinya sendiri."
+                )
+
+            cursor.execute(
+                """
+                UPDATE manajemen_user
+                SET nama_lengkap = ?, role = ?, kode_cabang = ?
+                WHERE id_user = ?
+                """,
+                (nama, role_baru, home_baru, id_user),
+            )
+            _set_akses_user_cursor(cursor, id_user, role_baru, home_baru, akses)
+        return True, f"User {_upper(existing[0])} berhasil diperbarui."
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal mengubah user")
+        return False, str(exc)
+
+
+def reset_password_user(id_user, password_baru):
+    """Reset password user. Mekanisme hash akan ditingkatkan pada tahap security."""
+    if USE_CLOUD:
+        return False, "Penyimpanan cloud belum diaktifkan."
+    try:
+        _pastikan_super_admin()
+        user_id = _text(id_user)
+        password = str(password_baru or "")
+        if not user_id:
+            raise ValueError("ID user tidak valid.")
+        if not password:
+            raise ValueError("Password baru wajib diisi.")
+        with _db_transaction(immediate=True) as (_, cursor):
+            row = cursor.execute(
+                "SELECT username FROM manajemen_user WHERE id_user = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("User tidak ditemukan.")
+            cursor.execute(
+                "UPDATE manajemen_user SET password = ? WHERE id_user = ?",
+                (password, user_id),
+            )
+        return True, f"Password user {_upper(row[0])} berhasil direset."
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal reset password")
+        return False, str(exc)
+
+
+def set_status_user(id_user, aktif):
+    """Aktif/nonaktifkan akun tanpa menghapus row user dan histori terkait."""
+    if USE_CLOUD:
+        return False, "Penyimpanan cloud belum diaktifkan."
+    try:
+        _pastikan_super_admin()
+        user_id = _text(id_user)
+        status_baru = "AKTIF" if bool(aktif) else "NONAKTIF"
+        if not user_id:
+            raise ValueError("ID user tidak valid.")
+        if user_id == _text(CURRENT_SESSION.get("id_user")) and status_baru != "AKTIF":
+            raise ValueError("Akun SUPER_ADMIN yang sedang login tidak dapat dinonaktifkan.")
+
+        with _db_transaction(immediate=True) as (_, cursor):
+            row = cursor.execute(
+                """
+                SELECT username, role, COALESCE(status_user, 'AKTIF')
+                FROM manajemen_user
+                WHERE id_user = ?
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("User tidak ditemukan.")
+
+            role = _upper(row[1])
+            if status_baru == "NONAKTIF" and role == "SUPER_ADMIN":
+                count_other = cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM manajemen_user
+                    WHERE id_user <> ?
+                      AND UPPER(role) = 'SUPER_ADMIN'
+                      AND UPPER(COALESCE(status_user, 'AKTIF')) = 'AKTIF'
+                    """,
+                    (user_id,),
+                ).fetchone()[0]
+                if int(count_other or 0) <= 0 and not bool(CURRENT_SESSION.get("is_developer")):
+                    raise ValueError("Minimal satu SUPER_ADMIN database harus tetap aktif.")
+
+            cursor.execute(
+                "UPDATE manajemen_user SET status_user = ? WHERE id_user = ?",
+                (status_baru, user_id),
+            )
+        return True, f"User {_upper(row[0])} sekarang {status_baru}."
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal mengubah status user")
+        return False, str(exc)
+
 
 def _normalisasi_data_cabang(branch):
     kode = str(branch.get("kode_cabang", "")).strip().upper()

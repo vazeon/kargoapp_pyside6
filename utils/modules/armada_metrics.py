@@ -9,14 +9,16 @@ Table-only zoom tetap ditangani ``utils.zoom``.
 # ---------------------------------------------------------------------------
 # Wrapper Tab Armada
 # ---------------------------------------------------------------------------
-ARMADA_TAB_MARGINS = (5, 5, 5, 5)
+ARMADA_TAB_MARGINS = (0, 0, 0, 0)
+# Ukuran QTabBar tidak disimpan per modul.
+# Sumber tunggal: TAB_* di utils.ui_metrics, diterapkan oleh themes.base.
 
 # ---------------------------------------------------------------------------
 # Layout subtab
 # ---------------------------------------------------------------------------
-ARMADA_PAGE_MARGINS = (10, 10, 10, 10)
-ARMADA_MASTER_PANEL_MARGINS = (0, 0, 10, 0)
-ARMADA_EDITOR_PANEL_MARGINS = (15, 15, 15, 15)
+ARMADA_PAGE_MARGINS = (8, 8, 8, 8)
+ARMADA_MASTER_PANEL_MARGINS = (0, 0, 8, 0)
+ARMADA_EDITOR_PANEL_MARGINS = (8, 8, 8, 8)
 ARMADA_SPLITTER_INITIAL_SIZES = (650, 350)
 
 # ---------------------------------------------------------------------------

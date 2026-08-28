@@ -147,6 +147,8 @@ def get_buku_gudang_styles(
     return {
         "lbl_judul": f"""
             color: {_warna_tema(is_dark, "#ffffff", "#1e293b")};
+            background-color: transparent;
+            border: none;
             font-size: {ukuran_judul}px;
             font-weight: 600;
             font-family: '{get_master_font()}';
