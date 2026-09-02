@@ -64,7 +64,6 @@ from utils.modules.manifest_metrics import (
     MANIFEST_HEADER_HEIGHT,
     MANIFEST_HISTORY_MAX_WIDTH,
     MANIFEST_HISTORY_MIN_WIDTH,
-    MANIFEST_HISTORY_YEAR_WIDTH,
     MANIFEST_INPUT_LABEL_MIN_WIDTH,
     MANIFEST_LEFT_PANEL_MARGINS,
     MANIFEST_LEFT_PANEL_MAX_WIDTH,
@@ -493,12 +492,12 @@ class TabManifest(QWidget):
         self.panel_kanan.setMinimumWidth(MANIFEST_HISTORY_MIN_WIDTH)
         self.panel_kanan.setMaximumWidth(MANIFEST_HISTORY_MAX_WIDTH)
         layout = QVBoxLayout(self.panel_kanan)
-        layout.addWidget(QLabel("🕒 Histori Manifest:"))
+        layout.addWidget(QLabel("Histori Manifest:"))
 
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("Tahun:"))
         self.cb_tahun_filter = QComboBox()
-        self.cb_tahun_filter.setFixedWidth(MANIFEST_HISTORY_YEAR_WIDTH)
+        self.cb_tahun_filter.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.cb_tahun_filter.currentTextChanged.connect(self.load_histori)
         filter_layout.addWidget(self.cb_tahun_filter)
 

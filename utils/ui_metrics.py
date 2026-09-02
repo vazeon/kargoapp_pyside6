@@ -38,8 +38,7 @@ TAB_PADDING_H = 16
 # Nilai final tetap mengikuti ResponsiveUIScaler.
 # Tinggi kontrol kanan dibuat sedikit lebih lega agar QComboBox tidak ter-clip
 # setelah responsive scaling pada layar yang scale-nya < 1.0.
-TOP_RIGHT_CONTROL_HEIGHT = 32
-TOP_RIGHT_ZOOM_SLIDER_WIDTH = 105
+TOP_RIGHT_CONTROL_HEIGHT = 28
 
 # Tinggi minimum bar tab utama. Memberi ruang vertikal yang cukup untuk
 # corner-widget kanan tanpa memperbesar semua subtab.

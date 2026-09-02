@@ -1308,7 +1308,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
     def _bangun_toolbar_invoice(self, layout):
         toolbar = QHBoxLayout()
-        self.btn_ambil_resi = QPushButton("📥 Ambil Resi")
+        self.btn_ambil_resi = QPushButton("Ambil Resi")
         self.btn_tambah_baris = QPushButton("＋ Baris")
         self.btn_hapus_baris = QPushButton("Hapus Baris")
         self.btn_duplikat_baris = QPushButton("Duplikat")

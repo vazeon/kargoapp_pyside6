@@ -47,7 +47,6 @@ BUKU_GUDANG_TABLE_TAB_MARGINS = (6, 6, 6, 6)
 # Tabel
 # ---------------------------------------------------------------------------
 BUKU_GUDANG_DEFAULT_COLUMN_WIDTHS = (
-    45,   # NO.
     115,  # RESI
     95,   # MASUK
     95,   # KELUAR

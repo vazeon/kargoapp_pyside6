@@ -112,6 +112,7 @@ BUKU_GUDANG_BUTTON_CANCEL_STYLE = f"""
 """
 
 
+
 def get_dialog_pilih_penagih_styles() -> Dict[str, str]:
     """Mengembalikan style dialog pemilihan pihak tertagih."""
     return {
@@ -156,29 +157,32 @@ def get_buku_gudang_styles(
             padding: 0px;
         """,
 
-        "lbl_filter": f"""
-            color: {ui["text_primary"]};
-            font-size: {ukuran_label}px;
-            font-weight: 600;
-            font-family: '{get_master_font()}';
-            padding-right: 2px;
-        """,
-
         "btn_tahun": f"""
-            font-size: {ukuran_filter}px;
-            font-weight: 600;
-            background-color: {ui["field_background"]};
-            color: {ui["text_primary"]};
-            border: 1px solid {ui["field_border"]};
-            padding: 4px 10px;
-            border-radius: 5px;
-            font-family: '{get_master_font()}';
+            QPushButton {{
+                font-size: {ukuran_filter}px;
+                font-weight: 400;
+                background-color: {ui["field_background"]};
+                color: {ui["text_primary"]};
+                border: 1px solid {ui["field_border"]};
+                padding: 0px;
+                border-radius: 5px;
+                font-family: '{get_master_font()}';
+                text-align: center;
+            }}
+            QPushButton:hover {{
+                background-color: {ui["field_border"]};
+            }}
+            QPushButton::menu-indicator {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                right: 4px;
+            }}
         """,
 
         "btn_reset_filter": f"""
             QToolButton {{
                 font-size: {ukuran_filter}px;
-                font-weight: 500;
+                font-weight: 400;
                 background-color: transparent;
                 color: {ui["text_primary"]};
                 border: 1px solid transparent;

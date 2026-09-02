@@ -249,7 +249,7 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         layout.setSpacing(KONTAK_SPACING)
 
         ukuran = get_global_font_sizes_pt(0)
-        self.lbl_judul_histori = QLabel("📦 Riwayat Penerimaan")
+        self.lbl_judul_histori = QLabel("Histori Penerimaan")
         self.lbl_judul_histori.setFont(_buat_font_pt(ukuran["sz_total"]))
         self.txt_cari_histori = self._buat_input_cari(
             "Cari di histori ini...",
@@ -663,7 +663,7 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
                 nama_penerima,
                 CURRENT_SESSION.get("kode_cabang", "PUSAT"),
             )
-            self.lbl_judul_histori.setText(f"📦 Riwayat Nota: {nama_penerima}")
+            self.lbl_judul_histori.setText(f"Histori Penerimaan: {nama_penerima}")
             for baris, histori in enumerate(histori_rows):
                 self.tabel_histori.insertRow(baris)
                 self._isi_baris_histori(baris, histori)

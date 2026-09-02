@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
+from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
@@ -27,7 +28,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -53,6 +55,10 @@ from themes.modules.resi import (
     get_resi_static_styles,
     get_resi_styles,
     get_btn_clear_container_style,
+)
+from themes.modules.manifest import (
+    get_manifest_history_date_appearance,
+    get_manifest_styles,
 )
 
 from utils.splitter_helper import buat_splitter
@@ -173,6 +179,20 @@ class FadeNotification(QWidget):
 
 
 class TabResi(QWidget):
+    NAMA_BULAN = {
+        1: "Januari",
+        2: "Februari",
+        3: "Maret",
+        4: "April",
+        5: "Mei",
+        6: "Juni",
+        7: "Juli",
+        8: "Agustus",
+        9: "September",
+        10: "Oktober",
+        11: "November",
+        12: "Desember",
+    }
     KOL_NO = 0
     KOL_NAMA_BARANG = 1
     KOL_KOLI = 2
@@ -453,9 +473,9 @@ class TabResi(QWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(RESI_SPACING)
-        self.btn_tambah_baris = QPushButton("➕ Tambah Baris")
+        self.btn_tambah_baris = QPushButton("＋Tambah Baris")
         self.btn_tambah_baris.clicked.connect(self.tambah_baris_barang)
-        self.btn_hapus_baris = QPushButton("🗑️ Hapus Baris")
+        self.btn_hapus_baris = QPushButton("－Hapus Baris")
         self.btn_hapus_baris.clicked.connect(self.hapus_baris_terpilih)
         self.btn_clear_barang = self._buat_tombol_clear_container(
             self.group_tabel_container,
@@ -643,7 +663,7 @@ class TabResi(QWidget):
         layout.addWidget(self.txt_search)
 
         header = QHBoxLayout()
-        self.lbl_histori_title = QLabel("🕒 Histori Resi")
+        self.lbl_histori_title = QLabel("Histori Resi")
         self.date_histori = QDateEdit(self)
         self.date_histori.setCalendarPopup(True)
         self.date_histori.setDate(QDate.currentDate())
@@ -658,7 +678,17 @@ class TabResi(QWidget):
         header.addWidget(self.btn_reset_tgl)
         header.addStretch()
 
-        self.list_histori = QListWidget()
+        # Tree histori mengikuti struktur visual Tab Manifest.
+        # Parent = bulan, child = satu baris transaksi Resi.
+        self.list_histori = QTreeWidget()
+        self.list_histori.setColumnCount(2)
+        self.list_histori.setHeaderHidden(True)
+        self.list_histori.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents,
+        )
+        self.list_histori.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch,
+        )
         self.list_histori.itemDoubleClicked.connect(self.munculkan_preview)
         self.list_histori.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_histori.customContextMenuRequested.connect(
@@ -879,6 +909,7 @@ class TabResi(QWidget):
             styles,
         )
         self._terapkan_tema_histori_statis(fs)
+        self._terapkan_style_histori_seperti_manifest(is_dark)
         self._terapkan_tema_input(styles)
         self._terapkan_tema_detail_barang(
             is_dark=is_dark,
@@ -1208,9 +1239,113 @@ class TabResi(QWidget):
         self.date_histori.blockSignals(False)
         self.load_data_resi()
 
-    def _isi_list_histori(self, rows):
-        for row in rows:
-            self.list_histori.addItem(f"{row[0]} - {row[1]}")
+    def _ukuran_point_histori_aktif(self):
+        """Mengikuti perhitungan ukuran font Histori Manifest."""
+        font_histori = self.list_histori.font()
+        ukuran_point = font_histori.pointSizeF()
+        if ukuran_point > 0:
+            return ukuran_point
+
+        ukuran_pixel = font_histori.pixelSize()
+        if ukuran_pixel <= 0:
+            return ukuran_font_px_ke_pt(get_global_font_sizes(0)["sz_base"])
+
+        dpi_y = max(1, self.list_histori.logicalDpiY())
+        return max(1.0, ukuran_pixel * 72.0 / dpi_y)
+
+    def _sinkronkan_font_item_histori_resi(self, is_dark):
+        """Samakan tampilan kolom tanggal dengan child pada Histori Manifest."""
+        font_tanggal, warna_abu = get_manifest_history_date_appearance(
+            is_dark,
+            self._ukuran_point_histori_aktif(),
+        )
+        for parent_index in range(self.list_histori.topLevelItemCount()):
+            parent = self.list_histori.topLevelItem(parent_index)
+            if parent is None:
+                continue
+            for child_index in range(parent.childCount()):
+                child = parent.child(child_index)
+                child.setFont(0, font_tanggal)
+                child.setForeground(0, QBrush(warna_abu))
+
+    def _terapkan_style_histori_seperti_manifest(self, is_dark):
+        """Sumber QSS histori langsung dari theme Manifest agar selalu konsisten."""
+        style_manifest = konversi_style_font_ke_point(
+            get_manifest_styles(is_dark, False, 0)
+        )
+        self.list_histori.setStyleSheet(style_manifest["list_histori"])
+        font_histori = self.list_histori.font()
+        font_histori.setPointSizeF(
+            ukuran_font_px_ke_pt(get_global_font_sizes(0)["sz_base"])
+        )
+        self.list_histori.setFont(font_histori)
+        self._sinkronkan_font_item_histori_resi(is_dark)
+
+    @staticmethod
+    def _tanggal_histori_dari_row(row):
+        """Pakai tanggal dari hasil query hanya jika memang tersedia."""
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            return ""
+        kandidat = str(row[2] or "").strip()
+        if not kandidat or ("/" not in kandidat and "-" not in kandidat):
+            return ""
+        return format_tanggal_ke_ui(kandidat)
+
+    def _isi_tree_histori(
+        self,
+        rows,
+        tanggal_default=None,
+        parent_default="Hasil Pencarian",
+    ):
+        parents = {}
+        is_dark = self._tema_gelap_aktif()
+        font_tanggal, warna_abu = get_manifest_history_date_appearance(
+            is_dark,
+            self._ukuran_point_histori_aktif(),
+        )
+
+        tanggal_default_ui = (
+            tanggal_default.toString("dd/MM/yyyy")
+            if isinstance(tanggal_default, QDate)
+            else ""
+        )
+
+        for raw_row in rows or []:
+            row = tuple(raw_row or ())
+            no_resi = str(row[0] or "").strip() if len(row) > 0 else ""
+            detail = str(row[1] or "").strip() if len(row) > 1 else ""
+            if not no_resi:
+                continue
+
+            tanggal_ui = self._tanggal_histori_dari_row(row) or tanggal_default_ui
+            bulan_nama = ""
+            if tanggal_ui:
+                bagian = tanggal_ui.replace("-", "/").split("/")
+                if len(bagian) >= 2:
+                    try:
+                        bulan_nama = self.NAMA_BULAN.get(int(bagian[1]), "")
+                    except (TypeError, ValueError):
+                        bulan_nama = ""
+
+            parent_title = (
+                f"📂 {bulan_nama}"
+                if bulan_nama
+                else f"📂 {parent_default}"
+            )
+            parent = parents.get(parent_title)
+            if parent is None:
+                parent = QTreeWidgetItem(self.list_histori)
+                parent.setText(0, parent_title)
+                parents[parent_title] = parent
+
+            child = QTreeWidgetItem(parent)
+            child.setText(0, tanggal_ui)
+            child.setFont(0, font_tanggal)
+            child.setForeground(0, QBrush(warna_abu))
+            child.setText(1, f"{no_resi} | {detail}" if detail else no_resi)
+            child.setData(0, Qt.ItemDataRole.UserRole, no_resi)
+
+        self.list_histori.expandAll()
 
     def filter_data_resi(self):
         keyword = self.txt_search.text().strip().lower()
@@ -1218,14 +1353,20 @@ class TabResi(QWidget):
             self.load_data_resi()
             return
 
+        self.list_histori.setUpdatesEnabled(False)
         self.list_histori.clear()
         kode_cabang = self._kode_cabang_aktif()
         try:
-            self._isi_list_histori(
-                db_service.cari_histori_resi(keyword, kode_cabang)
+            rows = db_service.cari_histori_resi(keyword, kode_cabang) or []
+            self._isi_tree_histori(
+                rows,
+                parent_default="Hasil Pencarian",
             )
         except Exception:
             logger.exception("Gagal memuat pencarian histori resi")
+        finally:
+            self.list_histori.setUpdatesEnabled(True)
+            self.list_histori.viewport().update()
 
     def _transaksi_kena_ppn(self):
         """True bila Jenis Transaksi memakai PPN 1,1%."""
@@ -1864,7 +2005,7 @@ class TabResi(QWidget):
     def _tampilkan_context_menu_histori(self, pos):
         """Tampilkan aksi histori hanya ketika klik kanan tepat pada item."""
         item = self.list_histori.itemAt(pos)
-        if item is None:
+        if item is None or item.parent() is None:
             return
 
         self.list_histori.setCurrentItem(item)
@@ -2077,7 +2218,21 @@ class TabResi(QWidget):
     def _ambil_no_resi_dari_item(item):
         if item is None:
             return ""
-        return item.text().split(" - ", 1)[0].strip()
+
+        try:
+            no_resi = str(
+                item.data(0, Qt.ItemDataRole.UserRole) or ""
+            ).strip()
+            if no_resi:
+                return no_resi
+            if item.parent() is None:
+                return ""
+            return str(item.text(1) or "").split(" | ", 1)[0].strip()
+        except (AttributeError, TypeError):
+            try:
+                return str(item.text() or "").split(" - ", 1)[0].strip()
+            except (AttributeError, TypeError):
+                return ""
 
     def _set_mode_edit(self, no_resi):
         no_resi = str(no_resi or "").strip()
@@ -2391,16 +2546,30 @@ class TabResi(QWidget):
     def load_data_resi(self):
         tgl_pilih = format_tanggal_ke_db(self.date_histori.date())
         kode_cabang = self._kode_cabang_aktif()
+        self.list_histori.setUpdatesEnabled(False)
         self.list_histori.clear()
         try:
-            self._isi_list_histori(
-                db_service.ambil_histori_resi_by_tanggal(tgl_pilih, kode_cabang)
+            rows = db_service.ambil_histori_resi_by_tanggal(
+                tgl_pilih,
+                kode_cabang,
+            ) or []
+            self._isi_tree_histori(
+                rows,
+                tanggal_default=self.date_histori.date(),
             )
         except Exception:
-            logger.exception("Gagal memuat histori resi untuk tanggal %s", tgl_pilih)
+            logger.exception(
+                "Gagal memuat histori resi untuk tanggal %s",
+                tgl_pilih,
+            )
+        finally:
+            self.list_histori.setUpdatesEnabled(True)
+            self.list_histori.viewport().update()
 
-    def munculkan_preview(self, item):
+    def munculkan_preview(self, item, _column=None):
         no_resi = self._ambil_no_resi_dari_item(item)
+        if not no_resi:
+            return
         try:
             row = db_service.ambil_detail_resi(no_resi)
             if not row:

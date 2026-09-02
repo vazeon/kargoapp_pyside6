@@ -67,7 +67,7 @@ def setup_tabel_modern(
     h_header = tabel.horizontalHeader()
     h_header.setStretchLastSection(stretch_last_column)
     h_header.setHighlightSections(False)
-    h_header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    h_header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
 
     # 4. Konfigurasi Header Baris (Vertikal)
     v_header = tabel.verticalHeader()

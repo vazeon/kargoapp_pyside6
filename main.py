@@ -4,6 +4,7 @@ import sys
 import faulthandler
 import traceback
 from PySide6.QtCore import QLocale, QSettings, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -16,7 +17,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QScroller,
-    QSlider,
     QTabBar,
     QTableWidget,
     QTabWidget,
@@ -34,7 +34,6 @@ from utils.typography import (
 from utils.splitter_helper import perbarui_semua_style_splitter
 from utils.ui_metrics import (
     TOP_RIGHT_CONTROL_HEIGHT,
-    TOP_RIGHT_ZOOM_SLIDER_WIDTH,
     dapatkan_ui_scale,
 )
 from utils.ui_scaler import ResponsiveUIScaler
@@ -192,7 +191,6 @@ class MainWindow(QMainWindow):
         self._bangun_tab_utama()
         self._konfigurasi_scrolling()
         self.tabs.currentChanged.connect(self.refresh_tab_utama_diklik)
-        self._sinkronkan_slider_zoom(self.tab_resi_widget)
         self.apply_theme()
 
     def _bangun_shell_utama(self):
@@ -235,10 +233,10 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(self.container_top_right)
         # Corner widget berbagi tinggi dengan MainTabBar. Margin vertikal 0
         # mencegah total tinggi kontrol melebihi tinggi bar tab.
-        layout.setContentsMargins(0, 0, 15, 0)
+        layout.setContentsMargins(0, 0, 8, 5)
         layout.setSpacing(6)
 
-        self.lbl_info_cabang = QLabel("🏢:")
+        self.lbl_info_cabang = QLabel("")
         self.lbl_info_cabang.setObjectName("LabelCabang")  # Pengenal CSS
 
         self.cmb_cabang_aktif = QComboBox(self)
@@ -246,22 +244,6 @@ class MainWindow(QMainWindow):
         self.cmb_cabang_aktif.setFixedHeight(TOP_RIGHT_CONTROL_HEIGHT)
         self.cmb_cabang_aktif.setToolTip("Ganti cabang operasional tanpa logout")
         self.cmb_cabang_aktif.currentIndexChanged.connect(self._ganti_cabang_aktif)
-
-        self.lbl_zoom = QLabel("🔍")
-        self.lbl_zoom.setObjectName("LabelZoom")
-        self.lbl_zoom.setToolTip("Zoom tampilan tab aktif")
-
-        self.slider_zoom = QSlider(Qt.Orientation.Horizontal, self)
-        self.slider_zoom.setObjectName("ZoomSlider")
-        self.slider_zoom.setRange(self.ZOOM_MIN, self.ZOOM_MAX)
-        self.slider_zoom.setSingleStep(1)
-        self.slider_zoom.setPageStep(1)
-        self.slider_zoom.setTracking(False)
-        self.slider_zoom.setFixedWidth(TOP_RIGHT_ZOOM_SLIDER_WIDTH)
-        self.slider_zoom.setFixedHeight(TOP_RIGHT_CONTROL_HEIGHT)
-        self.slider_zoom.setValue(0)
-        self.slider_zoom.setToolTip("Zoom level: 0")
-        self.slider_zoom.valueChanged.connect(self._ubah_zoom_dari_slider)
 
         self.btn_theme = self._buat_tombol_top_right(
             "",
@@ -273,7 +255,7 @@ class MainWindow(QMainWindow):
             self.buka_dasbor_pengaturan,
             size=(40, TOP_RIGHT_CONTROL_HEIGHT),
         )
-        self.btn_setting.setToolTip("Pengaturan Sistem (Super Admin)")
+        self.btn_setting.setToolTip("Pengaturan")
 
         # Posisikan seluruh kontrol top-right tepat di tengah secara vertikal
         # terhadap tinggi MainTabBar.
@@ -281,7 +263,6 @@ class MainWindow(QMainWindow):
 
         for widget in (
                 self.lbl_info_cabang, self.cmb_cabang_aktif,
-                self.lbl_zoom, self.slider_zoom,
                 self.btn_theme, self.btn_setting,
         ):
             layout.addWidget(
@@ -297,22 +278,22 @@ class MainWindow(QMainWindow):
         # dibuat on-demand agar pergantian theme global tidak perlu memproses
         # seluruh widget tree aplikasi sejak startup.
         self.tab_resi_widget = TabResi()
-        self.tabs.addTab(self.tab_resi_widget, "📦 Data Resi")
+        self.tabs.addTab(self.tab_resi_widget, "Data Resi")
 
         self.tab_buku_gudang = _LazyTabPage(self._buat_tab_buku_gudang, self.tabs)
-        self.tabs.addTab(self.tab_buku_gudang, "🏭 Buku Gudang")
+        self.tabs.addTab(self.tab_buku_gudang, "Buku Gudang")
 
         self.tab_manifest = _LazyTabPage(self._buat_tab_manifest, self.tabs)
-        self.tabs.addTab(self.tab_manifest, "📋 Manifest")
+        self.tabs.addTab(self.tab_manifest, "Manifest")
 
         self.tab_invoice = _LazyTabPage(self._buat_tab_invoice, self.tabs)
-        self.tabs.addTab(self.tab_invoice, "🧾 Invoice")
+        self.tabs.addTab(self.tab_invoice, "Invoice")
 
         self.tab_kontak = _LazyTabPage(self._buat_tab_kontak, self.tabs)
-        self.tabs.addTab(self.tab_kontak, "👥 Kontak")
+        self.tabs.addTab(self.tab_kontak, "Kontak")
 
         self.tab_armada = _LazyTabPage(self._buat_tab_armada, self.tabs)
-        self.tabs.addTab(self.tab_armada, "🚛🚢 Armada")
+        self.tabs.addTab(self.tab_armada, "Armada")
 
     @staticmethod
     def _buat_tab_buku_gudang():
@@ -478,11 +459,6 @@ class MainWindow(QMainWindow):
         if isinstance(page, _LazyTabPage):
             self._konfigurasi_scrolling_widget(tab_aktif)
 
-        # Slider zoom selalu mengikuti zoom milik tab yang sedang aktif.
-        self._sinkronkan_slider_zoom(tab_aktif)
-
-        # Data tab disegarkan oleh showEvent masing-masing tab. MainWindow cukup
-        # menangani tema agar satu perpindahan tab tidak memicu query/refresh ganda.
         self._terapkan_tema_lokal(tab_aktif)
 
     @staticmethod
@@ -584,7 +560,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"{nama_perusahaan} - {nama_cabang} - PANEL ADMIN v1.0"
         )
-        self.lbl_info_cabang.setText("🏢:")
+        self.lbl_info_cabang.setText("")
 
         role_aktif = str(CURRENT_SESSION.get('role', '')).strip().upper()
         self.btn_setting.setToolTip(
@@ -690,7 +666,7 @@ class MainWindow(QMainWindow):
             scale,
         )
 
-        self.btn_theme.setText("☀️ Mode Terang" if is_dark else "🌙 Mode Gelap")
+        self.btn_theme.setText("Mode Terang" if is_dark else "Mode Gelap")
 
 
     def buka_dasbor_pengaturan(self):
@@ -839,48 +815,6 @@ class MainWindow(QMainWindow):
             value = 0
         return max(self.ZOOM_MIN, min(value, self.ZOOM_MAX))
 
-    def _sinkronkan_slider_zoom(self, active_tab=None):
-        """Sinkronkan posisi slider dengan zoom milik tab yang sedang aktif."""
-        slider = getattr(self, "slider_zoom", None)
-        if slider is None:
-            return
-
-        value = self._zoom_tab_aktif(active_tab)
-        blocked = slider.blockSignals(True)
-        try:
-            slider.setValue(value)
-            slider.setToolTip(f"Zoom level: {value:+d}" if value else "Zoom level: 0")
-        finally:
-            slider.blockSignals(blocked)
-
-    def _ubah_zoom_dari_slider(self, value):
-        """Terapkan posisi slider sebagai zoom absolut tab aktif."""
-        active_tab = self._konten_tab(self.tabs.currentWidget(), muat=True)
-        if active_tab is None:
-            return
-
-        try:
-            new_z = int(value)
-        except (TypeError, ValueError):
-            return
-
-        new_z = max(self.ZOOM_MIN, min(new_z, self.ZOOM_MAX))
-        current_z = self._zoom_tab_aktif(active_tab)
-
-        slider = getattr(self, "slider_zoom", None)
-        if slider is not None:
-            slider.setToolTip(
-                f"Zoom level: {new_z:+d}" if new_z else "Zoom level: 0"
-            )
-
-        if new_z == current_z:
-            return
-
-        key = f"zoom_{active_tab.__class__.__name__}"
-        self.settings.setValue(key, new_z)
-        self.settings.sync()
-        self._terapkan_tema_lokal(active_tab, force=True)
-
     def ubah_zoom(self, step):
         active_tab = self._konten_tab(self.tabs.currentWidget(), muat=True)
         if active_tab is None:
@@ -895,13 +829,11 @@ class MainWindow(QMainWindow):
         current_z = self._zoom_tab_aktif(active_tab)
         new_z = max(self.ZOOM_MIN, min(current_z + step, self.ZOOM_MAX))
         if new_z == current_z:
-            self._sinkronkan_slider_zoom(active_tab)
             return
 
         key = f"zoom_{active_tab.__class__.__name__}"
         self.settings.setValue(key, new_z)
         self.settings.sync()
-        self._sinkronkan_slider_zoom(active_tab)
         self._terapkan_tema_lokal(active_tab, force=True)
 
 
@@ -946,6 +878,9 @@ def jalankan_aplikasi():
     )
 
     app = QApplication(sys.argv)
+
+    app.setWindowIcon(QIcon("assets/logo/logo_mahkota_kargo.png"))
+
     # app.setStyle("Fusion")
 
     # --- DEBUG SEMENTARA: lacak bug "input aktif sendiri saat hover" ---

@@ -8,7 +8,7 @@ import urllib.parse
 import webbrowser
 from typing import Optional
 
-from PySide6.QtCore import QMarginsF, QSizeF, Qt
+from PySide6.QtCore import QEvent, QMarginsF, QSizeF, Qt
 from PySide6.QtGui import (
     QFont,
     QImage,
@@ -189,7 +189,6 @@ def buat_dokumen_html(
     sinkronkan_ukuran_dokumen(document, printer)
     document.setHtml(str(html_content or ""))
     return document
-
 
 
 class JendelaPreviewCustom(QDialog):
@@ -395,7 +394,32 @@ class JendelaPreviewCustom(QDialog):
                 border-radius: 6px;
             """
         )
+
+        # Menangkap gesture Ctrl + Scroll Mouse pada widget preview
+        self.widget_preview.installEventFilter(self)
+        for child in self.widget_preview.findChildren(QWidget):
+            child.installEventFilter(self)
+
         layout_utama.addWidget(self.widget_preview)
+
+    def eventFilter(self, watched, event):
+        """Menangkap Ctrl + Scroll Mouse untuk Zoom dengan batas rasio aman (0.25x - 3.0x)."""
+        if event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                if hasattr(self, "widget_preview"):
+                    # Ambil rasio zoom saat ini
+                    zoom_saat_ini = self.widget_preview.zoomFactor()
+                    delta = event.angleDelta().y()
+
+                    # Batasi Zoom In maksimal 2.0x (200%)
+                    if delta > 0 and zoom_saat_ini < 2.0:
+                        self.widget_preview.zoomIn()
+                    # Batasi Zoom Out minimal 0.25x (25%)
+                    elif delta < 0 and zoom_saat_ini > 0.25:
+                        self.widget_preview.zoomOut()
+
+                return True
+        return super().eventFilter(watched, event)
 
     def _sinkronkan_printer(self, printer: QPrinter) -> None:
         konfigurasi_printer(printer, self.jenis_dokumen, self.tipe_kertas)
@@ -486,19 +510,16 @@ class JendelaPreviewCustom(QDialog):
             QMessageBox.critical(self, "Gagal Menyimpan PDF", str(exc))
 
     def aksi_simpan_gambar(self) -> None:
-        file_path, selected_filter = QFileDialog.getSaveFileName(
+        file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Simpan sebagai Gambar",
+            "Simpan sebagai Gambar (PNG)",
             self._nama_export(".png"),
-            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg)",
+            "PNG Image (*.png)",
         )
         if not file_path:
             return
-        if "JPEG" in selected_filter:
-            if not file_path.lower().endswith((".jpg", ".jpeg")):
-                file_path += ".jpg"
-        else:
-            file_path = pastikan_ekstensi(file_path, ".png")
+
+        file_path = pastikan_ekstensi(file_path, ".png")
 
         try:
             ukuran_dokumen = self.doc_terikat.size()
@@ -513,7 +534,7 @@ class JendelaPreviewCustom(QDialog):
             painter.scale(skala, skala)
             self.doc_terikat.drawContents(painter)
             painter.end()
-            if not gambar.save(file_path):
+            if not gambar.save(file_path, "PNG"):
                 raise RuntimeError("Gambar tidak dapat disimpan pada lokasi tersebut.")
             QMessageBox.information(self, "Sukses", "Gambar berhasil disimpan di:\n" f"{file_path}")
         except Exception as exc:

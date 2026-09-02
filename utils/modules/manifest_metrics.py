@@ -81,4 +81,3 @@ MANIFEST_TABLE_ROW_MIN_HEIGHT = 20
 # ---------------------------------------------------------------------------
 MANIFEST_HISTORY_MIN_WIDTH = 260
 MANIFEST_HISTORY_MAX_WIDTH = 520
-MANIFEST_HISTORY_YEAR_WIDTH = 80

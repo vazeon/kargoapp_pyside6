@@ -1,5 +1,6 @@
 # tabs/tab_buku_gudang.py
 import html
+from enum import Enum
 from datetime import datetime
 from PySide6.QtCore import QDate, QEvent, QSettings, QTimer, Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -23,7 +24,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QWidgetAction,
-    QFrame,
 )
 
 from config import CURRENT_SESSION, DATA_CLIENT
@@ -88,6 +88,39 @@ from themes.modules.buku_gudang import (
     get_buku_gudang_styles,
     get_dialog_pilih_penagih_styles,
 )
+
+class StatusTagihan(str, Enum):
+    SEMUA = "SEMUA"
+    BELUM_INVOICE = "BELUM INVOICE"
+    BELUM_LUNAS = "BELUM LUNAS"
+    LUNAS = "LUNAS"
+    MACET = "MACET"
+
+class DBIndex(int, Enum):
+    RESI = 0
+    MASUK = 1
+    KELUAR = 2
+    STATUS_RESI = 3
+    TRUK = 4
+    PENGIRIM = 5
+    KOTA_ASAL = 6
+    PENERIMA = 7
+    KOTA_TUJUAN = 8
+    NAMA_BARANG = 9
+    KOLI = 10
+    BERAT = 11
+    CBM = 12
+    ONGKIR = 13
+    PAYMENT = 14
+    KETERANGAN = 15
+    DETAIL_ID = 16
+    URUTAN = 17
+    REVISION = 18
+    NO_INVOICE = 19
+    STATUS_INVOICE = 20
+    TANGGAL_INVOICE = 21
+    JUMLAH_INVOICE = 22
+
 
 NAMA_BULAN = (
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -190,25 +223,24 @@ class DialogPilihPenagih(QDialog):
 
 
 class TabBukuGudang(QWidget):
-    KOL_NO = 0
-    KOL_RESI = 1
-    KOL_MASUK = 2
-    KOL_KELUAR = 3
-    KOL_STATUS = 4
+    KOL_RESI = 0
+    KOL_MASUK = 1
+    KOL_KELUAR = 2
+    KOL_STATUS = 3
     KOL_STATUS_RESI = KOL_STATUS
-    KOL_STATUS_PENAGIHAN = 5
-    KOL_TRUK = 6
-    KOL_PENGIRIM = 7
-    KOL_KOTA_ASAL = 8
-    KOL_PENERIMA = 9
-    KOL_KOTA_TUJUAN = 10
-    KOL_NAMA_BARANG = 11
-    KOL_KOLI = 12
-    KOL_BERAT = 13
-    KOL_CBM = 14
-    KOL_ONGKIR = 15
-    KOL_PAYMENT = 16
-    KOL_KETERANGAN = 17
+    KOL_STATUS_PENAGIHAN = 4
+    KOL_TRUK = 5
+    KOL_PENGIRIM = 6
+    KOL_KOTA_ASAL = 7
+    KOL_PENERIMA = 8
+    KOL_KOTA_TUJUAN = 9
+    KOL_NAMA_BARANG = 10
+    KOL_KOLI = 11
+    KOL_BERAT = 12
+    KOL_CBM = 13
+    KOL_ONGKIR = 14
+    KOL_PAYMENT = 15
+    KOL_KETERANGAN = 16
 
     SETTINGS_ORGANIZATION = "EkspedisiApp"
     SETTINGS_APPLICATION = "BukuGudang"
@@ -229,7 +261,7 @@ class TabBukuGudang(QWidget):
     DEFAULT_LEBAR_KOLOM = BUKU_GUDANG_DEFAULT_COLUMN_WIDTHS
 
     HEADERS = (
-        "NO.", "RESI", "MASUK", "KELUAR", "STATUS RESI", "STATUS PENAGIHAN",
+        "RESI", "MASUK", "KELUAR", "STATUS RESI", "STATUS PENAGIHAN",
         "TRUK", "PENGIRIM", "KOTA ASAL", "PENERIMA", "KOTA TUJUAN",
         "NAMA BARANG", "KOLI", "BERAT (kg)", "KUBIK (m3)", "ONGKIR (Rp)",
         "PAYMENT", "KETERANGAN",
@@ -263,7 +295,6 @@ class TabBukuGudang(QWidget):
         sekarang = datetime.now()
         self._bulan_terpilih = {sekarang.month}
         self._status_penagihan_terpilih = "SEMUA"
-        self._filter_bulan_kotor = False
         self._sinkronisasi_checkbox_bulan = False
         self._checkbox_bulan = {}
         self._checkbox_semua_bulan = None
@@ -284,10 +315,49 @@ class TabBukuGudang(QWidget):
 
         baris_utama = QHBoxLayout()
         baris_utama.setSpacing(BUKU_GUDANG_PRIMARY_ROW_SPACING)
+
+        # 1. Judul di paling kiri
         self.lbl_judul = QLabel("Buku Gudang")
         baris_utama.addWidget(self.lbl_judul)
+
+        # Spacer Kiri (Mendorong Filter ke Tengah)
         baris_utama.addStretch()
 
+        # 2. Kontrol Filter (Di Posisi Tengah)
+        tahun_sekarang = datetime.now().year
+        self.btn_tahun = QPushButton()
+        self.btn_tahun.setText(str(tahun_sekarang))
+        self.btn_tahun.setFixedSize(*BUKU_GUDANG_YEAR_BUTTON_SIZE)
+        self.menu_tahun = QMenu(self)
+        self.setup_menu_tahun(tahun_sekarang)
+        self.btn_tahun.setMenu(self.menu_tahun)
+        baris_utama.addWidget(self.btn_tahun)
+
+        self.btn_bulan = QPushButton()
+        self.btn_bulan.setFixedSize(*BUKU_GUDANG_MONTH_BUTTON_SIZE)
+        self.menu_bulan = QMenu(self)
+        self.setup_menu_bulan()
+        self.btn_bulan.setMenu(self.menu_bulan)
+        baris_utama.addWidget(self.btn_bulan)
+
+        self.btn_status_penagihan = QPushButton()
+        self.btn_status_penagihan.setText("Semua Tagihan")
+        self.btn_status_penagihan.setFixedSize(*BUKU_GUDANG_BILLING_STATUS_BUTTON_SIZE)
+        self.menu_status_penagihan = QMenu(self)
+        self.setup_menu_status_penagihan()
+        self.btn_status_penagihan.setMenu(self.menu_status_penagihan)
+        baris_utama.addWidget(self.btn_status_penagihan)
+
+        self.btn_reset_filter = QToolButton()
+        self.btn_reset_filter.setText("↺ Reset")
+        self.btn_reset_filter.setFixedSize(*BUKU_GUDANG_RESET_FILTER_BUTTON_SIZE)
+        self.btn_reset_filter.clicked.connect(self.reset_semua_filter)
+        baris_utama.addWidget(self.btn_reset_filter)
+
+        # Spacer Kanan (Menyeimbangkan Filter agar presisi di tengah)
+        baris_utama.addStretch()
+
+        # 3. Pencarian & Tombol Aksi di Kanan
         self.txt_cari = QLineEdit()
         self.txt_cari.setPlaceholderText("Cari resi, truk, pengirim, barang...")
         self.txt_cari.setFixedWidth(BUKU_GUDANG_SEARCH_WIDTH)
@@ -297,7 +367,7 @@ class TabBukuGudang(QWidget):
         baris_utama.addWidget(self.txt_cari)
 
         action_styles = konversi_style_font_ke_point(get_buku_gudang_action_styles())
-        self.btn_buat_invoice = QPushButton("🧾 Buat Invoice")
+        self.btn_buat_invoice = QPushButton("Buat Invoice")
         self.btn_buat_invoice.setStyleSheet(action_styles["btn_buat_invoice"])
         self.btn_simpan_inv = QPushButton("Simpan")
         self.btn_simpan_inv.setStyleSheet(action_styles["btn_simpan_inv"])
@@ -311,56 +381,9 @@ class TabBukuGudang(QWidget):
         self.btn_buat_invoice.clicked.connect(self.aktifkan_mode_invoice)
         self.btn_batal_inv.clicked.connect(self.batalkan_mode_invoice)
         self.btn_simpan_inv.clicked.connect(self.proses_simpan_ke_invoice)
-        layout_header.addLayout(baris_utama)
-
-        baris_filter = QHBoxLayout()
-        baris_filter.setSpacing(BUKU_GUDANG_FILTER_ROW_SPACING)
-
-        self.lbl_periode = QLabel("Periode")
-        baris_filter.addWidget(self.lbl_periode)
-
-        tahun_sekarang = datetime.now().year
-        self.btn_tahun = QToolButton()
-        self.btn_tahun.setText(str(tahun_sekarang))
-        self.btn_tahun.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.btn_tahun.setFixedSize(*BUKU_GUDANG_YEAR_BUTTON_SIZE)
-        self.menu_tahun = QMenu(self)
-        self.setup_menu_tahun(tahun_sekarang)
-        self.btn_tahun.setMenu(self.menu_tahun)
-        baris_filter.addWidget(self.btn_tahun)
-
-        self.btn_bulan = QToolButton()
-        self.btn_bulan.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.btn_bulan.setFixedSize(*BUKU_GUDANG_MONTH_BUTTON_SIZE)
-        self.menu_bulan = QMenu(self)
-        self.setup_menu_bulan()
-        self.btn_bulan.setMenu(self.menu_bulan)
-        baris_filter.addWidget(self.btn_bulan)
-
-        baris_filter.addSpacing(BUKU_GUDANG_FILTER_SECTION_GAP)
-        self.lbl_status_penagihan_filter = QLabel("Status Tagihan")
-        baris_filter.addWidget(self.lbl_status_penagihan_filter)
-
-        self.btn_status_penagihan = QToolButton()
-        self.btn_status_penagihan.setText("Semua Tagihan")
-        self.btn_status_penagihan.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup
-        )
-        self.btn_status_penagihan.setFixedSize(*BUKU_GUDANG_BILLING_STATUS_BUTTON_SIZE)
-        self.menu_status_penagihan = QMenu(self)
-        self.setup_menu_status_penagihan()
-        self.btn_status_penagihan.setMenu(self.menu_status_penagihan)
-        baris_filter.addWidget(self.btn_status_penagihan)
-
-        self.btn_reset_filter = QToolButton()
-        self.btn_reset_filter.setText("↺ Reset")
-        self.btn_reset_filter.setFixedSize(*BUKU_GUDANG_RESET_FILTER_BUTTON_SIZE)
-        self.btn_reset_filter.clicked.connect(self.reset_semua_filter)
-        baris_filter.addWidget(self.btn_reset_filter)
-        baris_filter.addStretch()
 
         self._perbarui_label_bulan()
-        layout_header.addLayout(baris_filter)
+        layout_header.addLayout(baris_utama)
         return layout_header
 
     def _bangun_tabs_wilayah(self):
@@ -746,7 +769,7 @@ class TabBukuGudang(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(*BUKU_GUDANG_TABLE_TAB_MARGINS)
 
-        tabel = FrozenTableWidget(frozen_cols=2)
+        tabel = FrozenTableWidget(frozen_cols=1)
         win = self.window()
         is_dark = bool(
             win and hasattr(win, "current_theme") and win.current_theme == "dark"
@@ -882,11 +905,7 @@ class TabBukuGudang(QWidget):
         self.inline_editor_style = styles_dinamis["inline_editor"]
 
         self.lbl_judul.setStyleSheet(styles_statis["lbl_judul"])
-        for label_filter in (
-                self.lbl_periode,
-                self.lbl_status_penagihan_filter,
-        ):
-            label_filter.setStyleSheet(styles_statis["lbl_filter"])
+
         for tombol_filter in (
                 self.btn_tahun,
                 self.btn_bulan,
@@ -917,19 +936,20 @@ class TabBukuGudang(QWidget):
             get_buku_gudang_menu_style(ukuran_menu_tahun)
         )
         self.menu_tahun.setStyleSheet(style_menu)
+
         for i in range(3):
             thn = str(tahun_sekarang - i)
-            self.menu_tahun.addAction(thn).triggered.connect(
-                lambda checked, t=thn: self.ubah_tahun(t)
-            )
+            action = self.menu_tahun.addAction(thn)
+            action.triggered.connect(lambda _, t=thn: self.ubah_tahun(t))
+
         self.menu_tahun.addSeparator()
         submenu_lainnya = self.menu_tahun.addMenu("Lainnya...")
         submenu_lainnya.setStyleSheet(style_menu)
+
         for i in range(3, 8):
             thn = str(tahun_sekarang - i)
-            submenu_lainnya.addAction(thn).triggered.connect(
-                lambda checked, t=thn: self.ubah_tahun(t)
-            )
+            action = submenu_lainnya.addAction(thn)
+            action.triggered.connect(lambda _, t=thn: self.ubah_tahun(t))
 
     def ubah_tahun(self, tahun_pilihan):
         self.btn_tahun.setText(tahun_pilihan)
@@ -966,7 +986,7 @@ class TabBukuGudang(QWidget):
             )
             self._checkbox_bulan[nomor] = checkbox
 
-        self.menu_bulan.aboutToHide.connect(self._terapkan_perubahan_filter_bulan)
+
         self._sinkronkan_checkbox_bulan()
         self._perbarui_label_bulan()
 
@@ -1007,9 +1027,9 @@ class TabBukuGudang(QWidget):
             if checked
             else {datetime.now().month}
         )
-        self._filter_bulan_kotor = True
         self._sinkronkan_checkbox_bulan()
         self._perbarui_label_bulan()
+        self.refresh_session_ui()
 
     def _on_checkbox_bulan_changed(self, nomor, checked):
         if self._sinkronisasi_checkbox_bulan:
@@ -1025,14 +1045,9 @@ class TabBukuGudang(QWidget):
             pilihan.add(int(nomor))
 
         self._bulan_terpilih = pilihan
-        self._filter_bulan_kotor = True
         self._sinkronkan_checkbox_bulan()
         self._perbarui_label_bulan()
 
-    def _terapkan_perubahan_filter_bulan(self):
-        if not self._filter_bulan_kotor:
-            return
-        self._filter_bulan_kotor = False
         self.refresh_session_ui()
 
     def ubah_bulan(self, bulan):
@@ -1055,7 +1070,6 @@ class TabBukuGudang(QWidget):
             pilihan = {datetime.now().month}
 
         self._bulan_terpilih = pilihan
-        self._filter_bulan_kotor = False
         self._sinkronkan_checkbox_bulan()
         self._perbarui_label_bulan()
         self.refresh_session_ui()
@@ -1064,15 +1078,16 @@ class TabBukuGudang(QWidget):
         self.menu_status_penagihan.clear()
         self.menu_status_penagihan.setStyleSheet(self._style_menu_filter_periode())
         pilihan = (
-            ("Semua Tagihan", "SEMUA"),
-            ("Belum Invoice", "BELUM INVOICE"),
-            ("Belum Lunas", "BELUM LUNAS"),
-            ("Lunas", "LUNAS"),
-            ("Macet", "MACET"),
+            ("Semua Tagihan", StatusTagihan.SEMUA),
+            ("Belum Invoice", StatusTagihan.BELUM_INVOICE),
+            ("Belum Lunas", StatusTagihan.BELUM_LUNAS),
+            ("Lunas", StatusTagihan.LUNAS),
+            ("Macet", StatusTagihan.MACET),
         )
         for label, nilai in pilihan:
-            self.menu_status_penagihan.addAction(label).triggered.connect(
-                lambda _checked=False, l=label, n=nilai: self.ubah_status_penagihan(l, n)
+            action = self.menu_status_penagihan.addAction(label)
+            action.triggered.connect(
+                lambda _, l=label, n=nilai: self.ubah_status_penagihan(l, n)
             )
 
     def ubah_status_penagihan(self, label, nilai):
@@ -1085,7 +1100,6 @@ class TabBukuGudang(QWidget):
         self.btn_tahun.setText(str(sekarang.year))
         self._bulan_terpilih = {sekarang.month}
         self._status_penagihan_terpilih = "SEMUA"
-        self._filter_bulan_kotor = False
         self.btn_status_penagihan.setText("Semua Tagihan")
         self._sinkronkan_checkbox_bulan()
         self._perbarui_label_bulan()
@@ -1155,8 +1169,6 @@ class TabBukuGudang(QWidget):
 
     def show_header_menu(self, pos, tabel):
         col = tabel.horizontalHeader().logicalIndexAt(pos)
-        if col == self.KOL_NO:
-            return
 
         menu = self._buat_menu_buku_gudang()
         container = QWidget()
@@ -1257,13 +1269,15 @@ class TabBukuGudang(QWidget):
         action_lunas = menu.addAction("✓ Tandai LUNAS")
         action_macet = menu.addAction("⚠ Tandai MACET")
         action_reset = menu.addAction("↺ Kembalikan ke Belum Lunas")
-        action_lunas.setEnabled(status != "LUNAS")
-        action_macet.setEnabled(status != "MACET")
-        action_reset.setEnabled(status in {"LUNAS", "MACET"})
+
+        action_lunas.setEnabled(status != StatusTagihan.LUNAS)
+        action_macet.setEnabled(status != StatusTagihan.MACET)
+        action_reset.setEnabled(status in {StatusTagihan.LUNAS, StatusTagihan.MACET})
+
         return {
-            action_lunas: (no_invoice, "LUNAS"),
-            action_macet: (no_invoice, "MACET"),
-            action_reset: (no_invoice, "BELUM LUNAS"),
+            action_lunas: (no_invoice, StatusTagihan.LUNAS),
+            action_macet: (no_invoice, StatusTagihan.MACET),
+            action_reset: (no_invoice, StatusTagihan.BELUM_LUNAS),
         }
 
     def _konfirmasi_status_penagihan(self, no_invoice, status_baru):
@@ -1531,70 +1545,53 @@ class TabBukuGudang(QWidget):
             return Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
         return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
-    def _isi_baris_tabel(self, tabel, wilayah, row, is_parent, nomor_urut=None):
+    def _isi_baris_tabel(self, tabel, wilayah, row, is_parent):
         pos = tabel.rowCount()
         tabel.insertRow(pos)
 
-        no_resi = str(row[0] or "").strip() if len(row) > 0 else ""
-        detail_id = row[16] if len(row) > 16 else None
-        urutan = int(row[17] or 1) if len(row) > 17 else 1
-        revision = int(row[18] or 0) if len(row) > 18 else 0
-        no_invoice = str(row[19] or "").strip().upper() if len(row) > 19 else ""
-        status_invoice = str(row[20] or "").strip().upper() if len(row) > 20 else ""
-        tanggal_invoice = str(row[21] or "").strip() if len(row) > 21 else ""
-        jumlah_invoice = int(row[22] or 0) if len(row) > 22 else 0
-        status_resi = str(row[3] or "").strip().upper() if len(row) > 3 else ""
+        def val(idx, default=""):
+            return row[idx] if len(row) > idx and row[idx] is not None else default
+
+        # Mapping indeks kolom DB agar kode bersih dari angka-angka tak jelas (magic numbers)
+        IDX_RESI = 0; IDX_MASUK = 1; IDX_KELUAR = 2; IDX_STAT_RESI = 3
+        IDX_TRUK = 4; IDX_PENGIRIM = 5; IDX_KOTA_ASAL = 6; IDX_PENERIMA = 7
+        IDX_KOTA_TUJUAN = 8; IDX_BRG = 9; IDX_KOLI = 10; IDX_BERAT = 11
+        IDX_CBM = 12; IDX_ONGKIR = 13; IDX_PAYMENT = 14; IDX_KET = 15
+        IDX_DET_ID = 16; IDX_URUT = 17; IDX_REV = 18
+        IDX_NO_INV = 19; IDX_STAT_INV = 20; IDX_TGL_INV = 21; IDX_JML_INV = 22
+
+        no_resi = str(val(IDX_RESI)).strip()
+        detail_id = val(IDX_DET_ID, None)
+        urutan = int(val(IDX_URUT, 1))
+        revision = int(val(IDX_REV, 0))
+        no_invoice = str(val(IDX_NO_INV)).strip().upper()
+        status_invoice = str(val(IDX_STAT_INV)).strip().upper()
+        tanggal_invoice = str(val(IDX_TGL_INV)).strip()
+        jumlah_invoice = int(val(IDX_JML_INV, 0))
+        status_resi = str(val(IDX_STAT_RESI)).strip().upper()
+
         status_penagihan = self._teks_status_penagihan(
             no_invoice, status_invoice, tanggal_invoice
         )
 
         values = [
-            row[0] if len(row) > 0 else "",
-            row[1] if len(row) > 1 else "",
-            row[2] if len(row) > 2 else "",
-            row[3] if len(row) > 3 else "",
+            val(IDX_RESI), val(IDX_MASUK), val(IDX_KELUAR), val(IDX_STAT_RESI),
             status_penagihan,
-            row[4] if len(row) > 4 else "",
-            row[5] if len(row) > 5 else "",
-            row[6] if len(row) > 6 else "",
-            row[7] if len(row) > 7 else "",
-            row[8] if len(row) > 8 else "",
-            row[9] if len(row) > 9 else "",
-            row[10] if len(row) > 10 else "",
-            row[11] if len(row) > 11 else "",
-            row[12] if len(row) > 12 else "",
-            row[13] if len(row) > 13 else "",
-            row[14] if len(row) > 14 else "",
-            row[15] if len(row) > 15 else "",
+            val(IDX_TRUK), val(IDX_PENGIRIM), val(IDX_KOTA_ASAL), val(IDX_PENERIMA), val(IDX_KOTA_TUJUAN),
+            val(IDX_BRG), val(IDX_KOLI), val(IDX_BERAT), val(IDX_CBM), val(IDX_ONGKIR), val(IDX_PAYMENT), val(IDX_KET)
         ]
 
-        # Nomor urut baris parent dihitung secara O(1) memakai counter yang
-        # dikirim oleh pemanggil (lihat _proses_hasil_data), bukan dengan
-        # memindai ulang seluruh baris sebelumnya setiap kali baris baru
-        # ditambahkan. Pemindaian ulang tersebut membuat pengisian tabel
-        # menjadi O(n^2) dan menjadi penyebab utama tabel terasa berat saat
-        # data berjumlah banyak.
-        nomor_resi = nomor_urut if nomor_urut is not None else 1
-        item_no = buat_tabel_item(
-            text=str(nomor_resi) if is_parent else "",
-            editable=False,
-            alignment=Qt.AlignmentFlag.AlignCenter,
-        )
-        tabel.setItem(pos, self.KOL_NO, item_no)
-
-        status_highlight = (
-            status_invoice if status_invoice in {"LUNAS", "MACET"} else ""
-        )
+        status_highlight = status_invoice if status_invoice in {"LUNAS", "MACET"} else ""
         highlight_value = f"{status_highlight}|{status_resi}"
 
-        for col, data in enumerate(values, start=1):
+        kolom_child_valid = {self.KOL_NAMA_BARANG, self.KOL_KOLI, self.KOL_BERAT, self.KOL_CBM}
+
+        for col, data in enumerate(values):
             tampil = data
             if not is_parent:
                 if col == self.KOL_RESI:
                     tampil = f"↳ ITEM {urutan}"
-                elif col not in (
-                        self.KOL_NAMA_BARANG, self.KOL_KOLI, self.KOL_BERAT, self.KOL_CBM
-                ):
+                elif col not in kolom_child_valid:
                     tampil = ""
 
             item = buat_tabel_item(
@@ -1602,6 +1599,8 @@ class TabBukuGudang(QWidget):
                 editable=False,
                 alignment=self._alignment_cell_buku_gudang(col),
             )
+
+            # Set User Roles
             item.setData(self.ROLE_NO_RESI, no_resi)
             item.setData(self.ROLE_DETAIL_ID, detail_id)
             item.setData(self.ROLE_IS_PARENT, is_parent)
@@ -1621,8 +1620,12 @@ class TabBukuGudang(QWidget):
         tabel = tab_widget.tabel
         wilayah = tab_widget.wilayah
         filters = dict(getattr(tab_widget, "filter_data", {}) or {})
-        if self._bulan_terpilih:
+
+        if self._bulan_terpilih and len(self._bulan_terpilih) < 12:
             filters["_bulan"] = tuple(sorted(self._bulan_terpilih))
+        else:
+            filters.pop("_bulan", None)
+
         if self._status_penagihan_terpilih != "SEMUA":
             filters["_status_penagihan"] = self._status_penagihan_terpilih
 
@@ -1641,19 +1644,36 @@ class TabBukuGudang(QWidget):
 
         tabel.setRowCount(0)
 
-        # Hentikan worker lama jika kebetulan user mengklik filter berulang kali dengan cepat
-        if hasattr(self, "_worker") and self._worker.isRunning():
-            self._worker.wait()
+        # Hentikan sinyal worker lama dengan penanganan RuntimeError (Shiboken)
+        if hasattr(self, "_worker") and self._worker is not None:
+            try:
+                # Cek apakah C++ object masih hidup dan sedang berjalan
+                if self._worker.isRunning():
+                    try:
+                        self._worker.data_ready.disconnect()
+                        self._worker.error_occurred.disconnect()
+                    except RuntimeError:
+                        pass
+            except RuntimeError:
+                # Jika muncul error libshiboken, artinya C++ object sudah sukses terhapus oleh deleteLater()
+                # Kita cukup mereset variabel Python-nya menjadi None
+                self._worker = None
 
-        # Eksekusi database di Thread terpisah
+        # Berikan "parent=self" agar thread tidak hilang di tengah jalan
         self._worker = DatabaseWorkerBukuGudang(
             self._kode_cabang_aktif(),
             wilayah,
             self.btn_tahun.text(),
             filters
         )
+        self._worker.setParent(self)
+
         self._worker.data_ready.connect(lambda rows: self._proses_hasil_data(rows, tab_widget))
         self._worker.error_occurred.connect(lambda err: self._tampilkan_error_db(err, tab_widget))
+
+        # Hapus objek worker dari memori C++ setelah selesai
+        self._worker.finished.connect(self._worker.deleteLater)
+
         self._worker.start()
 
     def _proses_hasil_data(self, rows, tab_widget):
@@ -1663,13 +1683,10 @@ class TabBukuGudang(QWidget):
 
         try:
             resi_terakhir = None
-            nomor_urut = 0
             for row in rows or []:
                 no_resi = str(row[0] or "").strip()
                 is_parent = no_resi != resi_terakhir
-                if is_parent:
-                    nomor_urut += 1
-                self._isi_baris_tabel(tabel, wilayah, row, is_parent, nomor_urut)
+                self._isi_baris_tabel(tabel, wilayah, row, is_parent)
                 resi_terakhir = no_resi
 
             if tabel.rowCount() > 0:
