@@ -10,13 +10,12 @@ Arsitektur saat ini:
 - geometry tabel menggabungkan responsive screen scale dengan zoom manual user,
   sedangkan font tabel tetap mengikuti level zoom manual.
 
-Style warna/tema tetap menjadi tanggung jawab themes/modules masing-masing tab.
 """
 
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from PySide6.QtCore import QSettings, QSignalBlocker, QSize, QTimer
+from PySide6.QtCore import QSettings, QSignalBlocker, QSize, QTimer, QEvent, Qt, QObject
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -55,6 +54,47 @@ MAX_ICON_RENDER_SIZE = 512
 _TABLE_VIEW_TYPES = (QTableView,)
 
 settings_ui = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
+
+
+class CtrlWheelZoomFilter(QObject):
+    """Menangkap Ctrl + mouse wheel agar tabel tidak ikut scroll.
+
+    Wheel normal tetap diteruskan ke QTableView.
+    Callback diberikan oleh aplikasi/tab yang mengetahui cara menerapkan zoom.
+    """
+
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                delta = event.angleDelta().y()
+                if callable(self.callback):
+                    self.callback(1 if delta > 0 else -1)
+                event.accept()
+                return True
+
+        return False
+
+
+def pasang_ctrl_scroll_zoom(table, callback):
+    """
+    Pasang Ctrl+Scroll zoom pada tabel.
+
+    Scroll biasa tetap berfungsi normal.
+    """
+    if table is None:
+        return
+
+    filter_zoom = CtrlWheelZoomFilter(callback)
+    table._ctrl_wheel_zoom_filter = filter_zoom
+    table.installEventFilter(filter_zoom)
+
+    viewport = getattr(table, "viewport", None)
+    if callable(viewport):
+        viewport().installEventFilter(filter_zoom)
 
 
 def _int_aman(

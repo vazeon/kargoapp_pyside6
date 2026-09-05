@@ -1040,7 +1040,7 @@ class TabManifest(QWidget):
 
         tanggal_ui = format_tanggal_ke_ui(tanggal_raw)
         bulan = tanggal_ui[3:5] if len(tanggal_ui) >= 5 else ""
-        title = f"📂 {self.NAMA_BULAN.get(bulan, 'Tidak Diketahui')}"
+        title = f"{self.NAMA_BULAN.get(bulan, 'Tidak Diketahui')}"
         if title not in parents:
             parents[title] = QTreeWidgetItem(self.list_histori)
             parents[title].setText(0, title)

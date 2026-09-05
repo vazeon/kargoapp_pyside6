@@ -244,13 +244,40 @@ def get_buku_gudang_styles(
     }
 
 
-def get_buku_gudang_menu_style(font_size: Optional[int] = None) -> str:
-    """Menghasilkan style menu Buku Gudang dengan ukuran font opsional."""
-    ukuran = f" font-size: {font_size}px;" if font_size is not None else ""
+def get_buku_gudang_menu_style(font_size: Optional[int] = None, is_dark: bool = False) -> str:
+    """Menghasilkan style menu Buku Gudang untuk mode terang/gelap."""
+    ukuran = f"font-size: {font_size}px;" if font_size is not None else ""
+    if is_dark:
+        background = "#252526"
+        text = "#f8fafc"
+        selected_bg = "#3b82f6"
+        selected_text = "#ffffff"
+        disabled = "#64748b"
+    else:
+        background = "#ffffff"
+        text = "#1f2937"
+        selected_bg = "#dbeafe"
+        selected_text = "#111827"
+        disabled = "#9ca3af"
+
     return f"""
         QMenu {{
+            background-color: {background};
+            color: {text};
             padding: 5px;
-            {ukuran} font-family: '{get_master_font()}';
+            {ukuran}
+            font-family: '{get_master_font()}';
+        }}
+        QMenu::item {{
+            color: {text};
+            padding: 6px 20px;
+        }}
+        QMenu::item:selected {{
+            background-color: {selected_bg};
+            color: {selected_text};
+        }}
+        QMenu::item:disabled {{
+            color: {disabled};
         }}
     """
 

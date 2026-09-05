@@ -11,10 +11,15 @@ import json
 import logging
 import re
 import uuid
+import time
 from contextlib import contextmanager
 from config import CURRENT_SESSION, DATA_CLIENT, CENTRAL_BRANCH_ROLES
 
 logger = logging.getLogger(__name__)
+
+# Performance cache (in-memory)
+_AUTOCOMPLETE_CACHE = {}
+_INVOICE_STATUS_CACHE = {}
 
 # CLOUD PLACEHOLDER: tetap False sampai adapter/sinkronisasi Supabase benar-benar tersedia.
 USE_CLOUD = False
@@ -47,6 +52,11 @@ def get_db_connection(db_name=None):
     target_db = db_name or CURRENT_SESSION.get("db_name", "database_cargo.db")
     conn = sqlite3.connect(str(target_db), timeout=20.0)
     conn.execute("PRAGMA foreign_keys = ON")
+    # SQLite performance tuning (safe for existing schema)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA busy_timeout = 20000")
     return conn
 
 @contextmanager
@@ -380,12 +390,17 @@ def ambil_data_autocomplete(kode_cabang):
         return [], []
 
     pengirim, penerima = [], []
-    conn = None
 
     kode_cabang = str(kode_cabang or CURRENT_SESSION.get(
         'kode_cabang',
         'PUSAT',
-    )).strip()
+    )).strip().upper()
+
+    cache_key = kode_cabang
+    if cache_key in _AUTOCOMPLETE_CACHE:
+        return _AUTOCOMPLETE_CACHE[cache_key]
+
+    conn = None
 
     try:
         conn = get_db_connection()
@@ -1364,7 +1379,9 @@ def _normalisasi_filter_bulan(value):
     return sorted(hasil)
 
 def _normalisasi_filter_status_penagihan(value):
-    return str(value or "").strip().upper().replace("_", " ")
+    return str(
+        getattr(value, "value", value) or ""
+    ).strip().upper().replace("_", " ")
 
 def _status_penagihan_cocok(info, filter_status):
     pilihan = _normalisasi_filter_status_penagihan(filter_status)
@@ -1386,7 +1403,7 @@ def _status_penagihan_cocok(info, filter_status):
     return True
 
 def _ambil_peta_status_penagihan_batch(no_resi_list):
-    """Map Resi aktif -> Invoice terbaru memakai invoice_resi, fallback snapshot legacy."""
+    """Map Resi -> invoice terbaru dengan query terbatas pada resi aktif."""
     daftar = [
         str(no_resi or "").strip().upper()
         for no_resi in (no_resi_list or [])
@@ -1395,97 +1412,56 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
     if not daftar:
         return {}
 
-    varian_ke_resi = {}
+    hasil = {}
+    belum_query = []
     for no_resi in daftar:
-        for varian in _varian_nomor_resi_pajak(no_resi):
-            varian_ke_resi.setdefault(varian, set()).add(no_resi)
+        if no_resi in _INVOICE_STATUS_CACHE:
+            hasil[no_resi] = _INVOICE_STATUS_CACHE[no_resi]
+        else:
+            belum_query.append(no_resi)
 
-    peta = {}
-    invoices_per_resi = {no_resi: set() for no_resi in daftar}
+    if not belum_query:
+        return hasil
+
     conn = None
     try:
         conn = get_db_connection()
+        placeholders = ",".join("?" for _ in belum_query)
 
-        # Jalur utama: relasi terstruktur, jauh lebih murah daripada parse seluruh JSON.
-        try:
-            relation_rows = conn.execute(
-                """
-                SELECT h.no_invoice, h.status, h.tanggal, h.created_at,
-                       h.updated_at, h.id, ir.no_resi
-                FROM invoice_header AS h
-                INNER JOIN invoice_resi AS ir ON ir.no_invoice = h.no_invoice
-                ORDER BY h.updated_at DESC, h.id DESC, ir.id ASC
-                """
-            ).fetchall()
-        except sqlite3.OperationalError:
-            relation_rows = []
+        rows = conn.execute(
+            f"""
+            SELECT h.no_invoice, h.status, h.tanggal, h.created_at, ir.no_resi
+            FROM invoice_resi ir
+            INNER JOIN invoice_header h ON h.no_invoice = ir.no_invoice
+            WHERE UPPER(ir.no_resi) IN ({placeholders})
+            ORDER BY h.updated_at DESC, h.id DESC
+            """,
+            [x.upper() for x in belum_query],
+        ).fetchall()
 
-        for no_invoice, status, tanggal, created_at, _updated_at, _id, nomor_relasi in relation_rows:
-            matched = varian_ke_resi.get(str(nomor_relasi or "").strip().upper(), set())
-            for no_resi in matched:
-                invoice = str(no_invoice or "").strip().upper()
-                if not invoice:
-                    continue
-                invoices_per_resi.setdefault(no_resi, set()).add(invoice)
-                peta.setdefault(no_resi, {
-                    "no_invoice": invoice,
+        for no_invoice, status, tanggal, created_at, no_resi in rows:
+            key = str(no_resi or "").strip().upper()
+            if key and key not in hasil:
+                hasil[key] = {
+                    "no_invoice": str(no_invoice or "").strip().upper(),
                     "status": str(status or "").strip().upper(),
                     "tanggal": str(tanggal or "").strip(),
                     "created_at": str(created_at or "").strip(),
-                    "jumlah_invoice": 0,
-                })
+                    "jumlah_invoice": 1,
+                }
 
-        # Fallback hanya untuk Resi yang belum berhasil dipetakan, agar invoice
-        # legacy/malformed lama tetap terdeteksi selama masa transisi.
-        belum = [no_resi for no_resi in daftar if no_resi not in peta]
-        if belum:
-            varian_legacy = {}
-            for no_resi in belum:
-                for varian in _varian_nomor_resi_pajak(no_resi):
-                    varian_legacy.setdefault(varian, set()).add(no_resi)
+        for key in belum_query:
+            value = hasil.get(key, {
+                "no_invoice": "",
+                "status": "",
+                "tanggal": "",
+                "created_at": "",
+                "jumlah_invoice": 0,
+            })
+            _INVOICE_STATUS_CACHE[key] = value
+            hasil[key] = value
 
-            rows = conn.execute(
-                """
-                SELECT h.no_invoice, h.status, h.tanggal, h.created_at,
-                       h.updated_at, h.id, d.data_kolom
-                FROM invoice_header AS h
-                INNER JOIN invoice_detail AS d ON d.no_invoice = h.no_invoice
-                ORDER BY h.updated_at DESC, h.id DESC, d.nomor_urut ASC
-                """
-            ).fetchall()
-
-            for no_invoice, status, tanggal, created_at, _updated_at, _id, data_kolom in rows:
-                raw = str(data_kolom or "")
-                matched = set()
-                try:
-                    parsed = json.loads(raw)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    parsed = None
-
-                if parsed is not None:
-                    for kandidat in _kumpulkan_nomor_resi_snapshot(parsed):
-                        matched.update(varian_legacy.get(kandidat, ()))
-                elif raw:
-                    for varian, resi_set in varian_legacy.items():
-                        if _teks_memuat_nomor_resi(raw, {varian}):
-                            matched.update(resi_set)
-
-                for no_resi in matched:
-                    invoice = str(no_invoice or "").strip().upper()
-                    if not invoice:
-                        continue
-                    invoices_per_resi.setdefault(no_resi, set()).add(invoice)
-                    peta.setdefault(no_resi, {
-                        "no_invoice": invoice,
-                        "status": str(status or "").strip().upper(),
-                        "tanggal": str(tanggal or "").strip(),
-                        "created_at": str(created_at or "").strip(),
-                        "jumlah_invoice": 0,
-                    })
-
-        for no_resi, info in peta.items():
-            info["jumlah_invoice"] = len(invoices_per_resi.get(no_resi, ()))
-        return peta
+        return hasil
     except sqlite3.Error as exc:
         logger.error("[Invoice] Gagal membangun status penagihan Buku Gudang: %s", exc)
         return {}
@@ -1784,6 +1760,60 @@ def _update_buku_gudang_cursor(
         snapshot_baru=snapshot_audit_baru,
     )
     return True
+
+def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
+    """Sinkronkan seluruh detail barang dari popup Buku Gudang ke data_resi_detail.
+
+    Buku Gudang hanya menjadi editor operasional; sumber detail tetap data_resi_detail.
+    """
+    if USE_CLOUD:
+        return False
+
+    no_resi = str(no_resi or "").strip().upper()
+    kode_cabang = str(kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")).strip().upper()
+
+    if not no_resi:
+        return False
+
+    try:
+        with _db_transaction(immediate=True) as (conn, cursor):
+            cursor.execute(
+                "DELETE FROM data_resi_detail WHERE no_resi = ?",
+                (no_resi,),
+            )
+
+            for idx, item in enumerate(detail_barang or [], start=1):
+                cursor.execute(
+                    """
+                    INSERT INTO data_resi_detail
+                    (no_resi, urutan, nama_barang, koli, berat, cbm, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        no_resi,
+                        idx,
+                        str(item.get("nama_barang", "") or "").strip().upper(),
+                        str(item.get("koli", "") or ""),
+                        item.get("berat", 0) or 0,
+                        item.get("cbm", 0) or 0,
+                    ),
+                )
+
+            _sinkronkan_ringkasan_resi_dari_detail(cursor, no_resi, kode_cabang)
+            cursor.execute(
+                """
+                UPDATE data_resi
+                SET revision = revision + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE no_resi = ? AND kode_cabang = ?
+                """,
+                (no_resi, kode_cabang),
+            )
+        return True
+    except Exception as exc:
+        logger.error("[Buku Gudang] Sinkron detail gagal: %s", exc)
+        return False
+
 
 def update_baris_buku_gudang(
     no_resi, kode_cabang, updates_dict, barang_payload=None, detail_id=None,
@@ -3876,3 +3906,68 @@ def simpan_semua_pengaturan_dan_cabang(settings_to_save, branches_to_save):
     except Exception as exc:
         logger.exception("[Setting] Gagal menyimpan pengaturan/cabang")
         return False, str(exc)
+# ==============================================================================
+# PERFORMANCE MONITORING & CACHE HELPERS
+# Internal optimization helpers. Public behavior preserved.
+# ==============================================================================
+
+_PERFORMANCE_REPORT = False
+
+_PERFORMANCE_CACHE = {
+    "invoice_status": {},
+    "autocomplete": {},
+}
+
+
+def set_performance_report(enabled=True):
+    """Enable/disable lightweight performance logging."""
+    global _PERFORMANCE_REPORT
+    _PERFORMANCE_REPORT = bool(enabled)
+
+
+@contextmanager
+def performance_timer(label, threshold=0.5):
+    """Monitoring ringan proses lambat."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        if _PERFORMANCE_REPORT and elapsed >= threshold:
+            logger.info("[PERF] %s : %.4fs", label, elapsed)
+
+
+def clear_performance_cache():
+    """Membersihkan seluruh cache runtime tanpa mengubah data database."""
+    for cache in _PERFORMANCE_CACHE.values():
+        cache.clear()
+
+
+def clear_invoice_cache():
+    """Membersihkan cache status invoice."""
+    _PERFORMANCE_CACHE["invoice_status"].clear()
+
+
+def get_performance_cache():
+    """Expose cache read-only untuk modul internal."""
+    return _PERFORMANCE_CACHE
+
+
+def get_cached_invoice_status(key):
+    """Internal getter status invoice."""
+    return _PERFORMANCE_CACHE["invoice_status"].get(str(key))
+
+
+def set_cached_invoice_status(key, value):
+    """Internal setter status invoice."""
+    _PERFORMANCE_CACHE["invoice_status"][str(key)] = value
+
+
+def get_cached_autocomplete(key):
+    """Internal getter autocomplete."""
+    return _PERFORMANCE_CACHE["autocomplete"].get(str(key))
+
+
+def set_cached_autocomplete(key, value):
+    """Internal setter autocomplete."""
+    _PERFORMANCE_CACHE["autocomplete"][str(key)] = value

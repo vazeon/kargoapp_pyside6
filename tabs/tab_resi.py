@@ -15,7 +15,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QComboBox,
     QCompleter,
     QDateEdit,
@@ -1328,9 +1327,9 @@ class TabResi(QWidget):
                         bulan_nama = ""
 
             parent_title = (
-                f"📂 {bulan_nama}"
+                f"{bulan_nama}"
                 if bulan_nama
-                else f"📂 {parent_default}"
+                else f"{parent_default}"
             )
             parent = parents.get(parent_title)
             if parent is None:
@@ -2613,6 +2612,13 @@ class TabResi(QWidget):
             cetak_resi_ke_printer(formatted_data, self)
         except Exception as exc:
             QMessageBox.critical(self, "Error Preview", f"Gagal memuat preview: {exc}")
+
+    def refresh_data(self):
+        """Force reload data dari database (dipanggil tombol Perbarui di main)."""
+        try:
+            self.load_data_resi()
+        except Exception:
+            logger.exception("Gagal refresh data Resi")
 
     def refresh_session_ui(self):
         self.kode_cabang = self._kode_cabang_aktif()

@@ -28,8 +28,6 @@ from utils.typography import (
     APPLICATION_NAME,
     ORGANIZATION_NAME,
     konfigurasi_font_aplikasi,
-    konversi_font_qss_ke_point,
-    konversi_style_font_ke_point,
 )
 from utils.splitter_helper import perbarui_semua_style_splitter
 from utils.ui_metrics import (
@@ -257,13 +255,22 @@ class MainWindow(QMainWindow):
         )
         self.btn_setting.setToolTip("Pengaturan")
 
+        # Force refresh manual seperti fitur Refresh pada Windows Explorer.
+        # Tidak menyimpan cache baru, hanya meminta setiap modul memuat ulang data.
+        self.btn_refresh_data = self._buat_tombol_top_right(
+            "🔄",
+            self.refresh_semua_data,
+            size=(40, TOP_RIGHT_CONTROL_HEIGHT),
+        )
+        self.btn_refresh_data.setToolTip("Perbarui data terbaru dari database")
+
         # Posisikan seluruh kontrol top-right tepat di tengah secara vertikal
         # terhadap tinggi MainTabBar.
         layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         for widget in (
                 self.lbl_info_cabang, self.cmb_cabang_aktif,
-                self.btn_theme, self.btn_setting,
+                self.btn_theme, self.btn_refresh_data, self.btn_setting,
         ):
             layout.addWidget(
                 widget,
@@ -460,6 +467,28 @@ class MainWindow(QMainWindow):
             self._konfigurasi_scrolling_widget(tab_aktif)
 
         self._terapkan_tema_lokal(tab_aktif)
+
+    def refresh_semua_data(self):
+        """
+        Force refresh manual seluruh modul yang sudah dimuat.
+        Konsepnya seperti klik kanan -> Refresh pada Windows:
+        database tetap menjadi sumber utama, tampilan hanya dimuat ulang.
+        """
+        for widget in self._iter_tab_utama():
+            try:
+                fungsi_refresh = getattr(widget, "refresh_data", None)
+                if callable(fungsi_refresh):
+                    fungsi_refresh()
+                else:
+                    # Kompatibilitas modul lama yang belum memiliki refresh_data.
+                    self._refresh_widget_session(widget)
+            except Exception as error:
+                print(
+                    "[Refresh] Gagal memperbarui "
+                    f"{widget.__class__.__name__}: "
+                    f"{type(error).__name__}: {error}"
+                )
+                traceback.print_exc()
 
     @staticmethod
     def _panggil_opsional(widget, nama_method):

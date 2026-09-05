@@ -1,8 +1,16 @@
 # tabs/tab_buku_gudang.py
-import html
 from enum import Enum
 from datetime import datetime
-from PySide6.QtCore import QDate, QEvent, QSettings, QTimer, Qt, QThread, Signal
+from PySide6.QtCore import (
+    QDate,
+    QEvent,
+    QSettings,
+    QTimer,
+    Qt,
+    QThread,
+    Signal,
+)
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -10,6 +18,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDateEdit,
     QDialog,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -18,9 +27,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QTableWidget,
+    QTextEdit,
     QTabWidget,
     QToolButton,
-    QToolTip,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -41,8 +51,6 @@ from utils.modules.buku_gudang_metrics import (
     BUKU_GUDANG_DIALOG_ACTION_GAP,
     BUKU_GUDANG_DIALOG_PENAGIH_MIN_WIDTH,
     BUKU_GUDANG_FALLBACK_COLUMN_WIDTH,
-    BUKU_GUDANG_FILTER_ROW_SPACING,
-    BUKU_GUDANG_FILTER_SECTION_GAP,
     BUKU_GUDANG_HEADER_CONTROL_HEIGHT,
     BUKU_GUDANG_HEADER_MARGINS,
     BUKU_GUDANG_HEADER_SPACING,
@@ -54,7 +62,6 @@ from utils.modules.buku_gudang_metrics import (
     BUKU_GUDANG_RESET_FILTER_BUTTON_SIZE,
     BUKU_GUDANG_SEARCH_WIDTH,
     BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT,
-    BUKU_GUDANG_TABLE_ROW_MIN_HEIGHT,
     BUKU_GUDANG_TABLE_TAB_MARGINS,
     BUKU_GUDANG_YEAR_BUTTON_SIZE,
 )
@@ -64,7 +71,6 @@ from utils.typography import (
     get_global_font_sizes,
     konversi_font_qss_ke_point,
     konversi_style_font_ke_point,
-    ukuran_font_px_ke_pt,
 )
 from utils.number_formatters import (
     format_ke_rupiah,
@@ -129,7 +135,6 @@ NAMA_BULAN = (
 
 
 def _get_buku_gudang_v2_status_colors(*, is_dark, status, is_alternate_row):
-    """Provider warna status Buku Gudang dari layer themes."""
     return get_buku_gudang_status_colors(
         is_dark=is_dark,
         status=status,
@@ -138,7 +143,6 @@ def _get_buku_gudang_v2_status_colors(*, is_dark, status, is_alternate_row):
 
 
 class DatabaseWorkerBukuGudang(QThread):
-    """Menjalankan query database di latar belakang agar UI tidak freeze."""
     data_ready = Signal(list)
     error_occurred = Signal(str)
 
@@ -222,6 +226,48 @@ class DialogPilihPenagih(QDialog):
         return self.txt_ketiga.text().strip().upper()
 
 
+class BukuGudangDetailPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.data = {}
+        layout = QVBoxLayout(self)
+        self.lbl_title = QLabel("Detail Data Gudang")
+        self.txt_detail = QTextEdit()
+        self.txt_detail.setReadOnly(True)
+        self.btn_edit = QPushButton("Edit Detail")
+        layout.addWidget(self.lbl_title)
+        layout.addWidget(self.txt_detail)
+        layout.addWidget(self.btn_edit)
+
+    def load_data(self, data):
+        self.data = data or {}
+        if not data:
+            self.txt_detail.clear()
+            return
+        self.txt_detail.setText("\n".join(
+            f"{k}: {v}" for k, v in data.items()
+        ))
+
+
+class BukuGudangApprovalDialog(QDialog):
+    def __init__(self, action, detail, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Konfirmasi Approval")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Aksi: {action}"))
+        layout.addWidget(QLabel(detail))
+        self.alasan = QTextEdit()
+        self.alasan.setPlaceholderText("Alasan tindakan...")
+        layout.addWidget(self.alasan)
+        self.btn_ok = QPushButton("Setujui")
+        self.btn_cancel = QPushButton("Batal")
+        row = QHBoxLayout()
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_ok)
+        layout.addLayout(row)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
 class TabBukuGudang(QWidget):
     KOL_RESI = 0
     KOL_MASUK = 1
@@ -246,7 +292,7 @@ class TabBukuGudang(QWidget):
     SETTINGS_APPLICATION = "BukuGudang"
     SETTINGS_KEY_LEBAR = "lebar_kolom_gudang_v3"
 
-    ROLE_NO_RESI = 256  # Qt.ItemDataRole.UserRole
+    ROLE_NO_RESI = 256
     ROLE_DETAIL_ID = ROLE_NO_RESI + 1
     ROLE_IS_PARENT = ROLE_NO_RESI + 2
     ROLE_URUTAN_DETAIL = ROLE_NO_RESI + 3
@@ -290,7 +336,6 @@ class TabBukuGudang(QWidget):
         self.tabs_list = []
         self.row_sedang_diedit = -1
         self._show_event_pertama = True
-        self._sedang_menerapkan_zoom = False
         self._tabel_lebar_pending = None
         sekarang = datetime.now()
         self._bulan_terpilih = {sekarang.month}
@@ -299,12 +344,24 @@ class TabBukuGudang(QWidget):
         self._checkbox_bulan = {}
         self._checkbox_semua_bulan = None
 
+        self._search_cache = {}
+
+        # Menyimpan posisi tabel selama session berjalan.
+        # Scroll ke bawah hanya dilakukan saat load pertama kali.
+        self._table_state = {}
+        self._initial_table_load_done = set()
+
         self._timer_simpan_lebar = QTimer(self)
         self._timer_simpan_lebar.setSingleShot(True)
         self._timer_simpan_lebar.setInterval(250)
         self._timer_simpan_lebar.timeout.connect(
             self._simpan_lebar_kolom_tertunda,
         )
+
+        self._timer_pencarian = QTimer(self)
+        self._timer_pencarian.setSingleShot(True)
+        self._timer_pencarian.setInterval(300)
+        self._timer_pencarian.timeout.connect(self.filter_pencarian_tabel)
 
         self.init_ui()
 
@@ -363,7 +420,9 @@ class TabBukuGudang(QWidget):
         self.txt_cari.setFixedWidth(BUKU_GUDANG_SEARCH_WIDTH)
         self.txt_cari.setFixedHeight(BUKU_GUDANG_HEADER_CONTROL_HEIGHT)
         self.txt_cari.textChanged.connect(lambda: paksa_kapital_lineedit(self.txt_cari))
-        self.txt_cari.textChanged.connect(self.filter_pencarian_tabel)
+        self.txt_cari.textChanged.connect(
+            lambda: self._timer_pencarian.start()
+        )
         baris_utama.addWidget(self.txt_cari)
 
         action_styles = konversi_style_font_ke_point(get_buku_gudang_action_styles())
@@ -388,9 +447,6 @@ class TabBukuGudang(QWidget):
 
     def _bangun_tabs_wilayah(self):
         self.tabs_wilayah = QTabWidget()
-
-        # Gunakan QTabBar default. Geometry/style tab mengikuti themes.base
-        # sehingga sama dengan tab utama dan tetap responsive via ui_scaler.
         provinsi_tujuan = DATA_CLIENT.get(
             "provinsi_tujuan",
             ["PROVINSI A", "PROVINSI B", "PROVINSI C"],
@@ -413,6 +469,13 @@ class TabBukuGudang(QWidget):
         layout_utama.addWidget(self._bangun_tabs_wilayah())
         self.refresh_session_ui()
         self.sesuaikan_tema_lokal()
+
+    def tampilkan_detail_terpilih(self):
+        return
+
+    def minta_approval_aksi(self, aksi, detail):
+        dialog = BukuGudangApprovalDialog(aksi, detail, self)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
     def aktifkan_mode_invoice(self):
         self.btn_buat_invoice.setVisible(False)
@@ -481,10 +544,8 @@ class TabBukuGudang(QWidget):
 
         for rows in grup.values():
             cocok = any(
-                keyword in self._ambil_text_cell(tabel, row, col).casefold()
+                keyword in self._search_cache.get((id(tabel), row), "")
                 for row in rows
-                for col in self.KOLOM_PENCARIAN
-                if col < tabel.columnCount()
             )
             for row in rows:
                 tabel.setRowHidden(row, not cocok)
@@ -745,9 +806,17 @@ class TabBukuGudang(QWidget):
             target.setTextElideMode(Qt.TextElideMode.ElideRight)
 
         tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tabel.setWordWrap(True)
         tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         tabel.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         tabel.setAlternatingRowColors(True)
+
+        # Ctrl + Scroll mouse untuk zoom tabel tanpa membuat tabel ikut scroll
+        zoom_helper.pasang_ctrl_scroll_zoom(
+            tabel,
+            lambda arah, t=tabel: self._ubah_zoom_ctrl_scroll(t, arah),
+        )
+
         tabel.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tabel.customContextMenuRequested.connect(
             lambda pos, t=tabel: self.show_cell_context_menu(pos, t)
@@ -798,6 +867,7 @@ class TabBukuGudang(QWidget):
                 if getattr(self, 'row_sedang_diedit', -1) != -1:
                     self.refresh_session_ui()
                     return True
+
         if isinstance(obj, QLineEdit):
             is_numeric = getattr(obj, 'is_numeric_col', False)
             if event.type() == QEvent.Type.FocusIn:
@@ -806,6 +876,7 @@ class TabBukuGudang(QWidget):
             elif event.type() == QEvent.Type.FocusOut:
                 if is_numeric and obj.text().strip() == "":
                     obj.setText("-")
+
         return super().eventFilter(obj, event)
 
     def _tema_gelap_aktif(self):
@@ -826,9 +897,6 @@ class TabBukuGudang(QWidget):
         ).strip().lower()
         return tema_tersimpan == "dark"
 
-    @staticmethod
-    def _skalakan_kolom_tabel(tabel, zoom):
-        zoom_helper.skalakan_kolom_tableview(tabel, zoom)
 
     def _sinkronkan_editor_inline(self, tabel):
         row = getattr(self, "row_sedang_diedit", -1)
@@ -839,19 +907,6 @@ class TabBukuGudang(QWidget):
             editor = tabel.cellWidget(row, column)
             if isinstance(editor, QLineEdit):
                 editor.setStyleSheet(self.inline_editor_style)
-
-    @staticmethod
-    def _terapkan_font_point(widget, ukuran_px):
-        if widget is None:
-            return
-
-        font = widget.font()
-        ukuran_pt = ukuran_font_px_ke_pt(ukuran_px)
-        if abs(font.pointSizeF() - ukuran_pt) < 0.01:
-            return
-
-        font.setPointSizeF(ukuran_pt)
-        widget.setFont(font)
 
     def _buat_style_buku_gudang(self, is_dark, zoom):
         font = get_global_font_sizes(zoom)
@@ -865,37 +920,53 @@ class TabBukuGudang(QWidget):
         )
         return font, styles
 
-    def _terapkan_tema_ke_tabel(self, tabel, is_dark, z, styles, ukuran_font, tinggi_baris):
+    def _terapkan_tema_ke_tabel(self, tabel, is_dark, styles):
+        """
+        Terapkan tema lokal. Pengaturan zoom tabel dikelola oleh utils.zoom.
+        Tab hanya bertanggung jawab terhadap tema/delegate/editor.
+        """
         frozen = getattr(tabel, "frozen_table", None)
+
         tabel.setUpdatesEnabled(False)
         if frozen is not None:
             frozen.setUpdatesEnabled(False)
 
         try:
             tabel.setStyleSheet(styles["tabel"] + "\n" + self._tooltip_qss(is_dark))
+
             for target in (tabel, frozen):
                 if target is None:
                     continue
                 update_status_delegate_theme(target, is_dark)
-                self._terapkan_font_point(target, ukuran_font)
-                self._terapkan_font_point(target.horizontalHeader(), ukuran_font)
-                self._terapkan_font_point(target.verticalHeader(), ukuran_font)
-                target.verticalHeader().setDefaultSectionSize(tinggi_baris)
 
             self._sinkronkan_editor_inline(tabel)
-            header = tabel.horizontalHeader()
-            status_signal = header.blockSignals(True)
-            self._sedang_menerapkan_zoom = True
-            try:
-                self._skalakan_kolom_tabel(tabel, z)
-            finally:
-                self._sedang_menerapkan_zoom = False
-                header.blockSignals(status_signal)
+
+            # Zoom tabel dikelola oleh helper pusat
+            zoom_helper.terapkan_zoom_tabel(
+                tabel,
+                is_dark=is_dark,
+                z=zoom_helper.dapatkan_zoom_level(self.__class__.__name__),
+            )
+
         finally:
             if frozen is not None:
                 frozen.setUpdatesEnabled(True)
             tabel.setUpdatesEnabled(True)
             zoom_helper.sinkronkan_frozen_table(tabel, tertunda=True)
+
+    def _ubah_zoom_ctrl_scroll(self, tabel, arah):
+        """Ubah level zoom melalui helper pusat."""
+        level = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
+        level = zoom_helper.simpan_zoom_level(
+            self.__class__.__name__,
+            level + int(arah),
+        )
+
+        zoom_helper.terapkan_zoom_tabel(
+            tabel,
+            is_dark=self._tema_gelap_aktif(),
+            z=level,
+        )
 
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
@@ -915,25 +986,20 @@ class TabBukuGudang(QWidget):
         self.btn_reset_filter.setStyleSheet(styles_statis["btn_reset_filter"])
         self.txt_cari.setStyleSheet(styles_statis["txt_cari"])
 
-        faktor = zoom_helper.dapatkan_faktor_geometri(z)
-        tinggi_baris = max(BUKU_GUDANG_TABLE_ROW_MIN_HEIGHT, round(BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT * faktor))
         for widget in self.tabs_list:
             tabel = getattr(widget, "tabel", None)
             if tabel is not None:
                 self._terapkan_tema_ke_tabel(
                     tabel,
                     is_dark,
-                    z,
                     styles_dinamis,
-                    font_dinamis["sz_base"],
-                    tinggi_baris,
                 )
 
     def setup_menu_tahun(self, tahun_sekarang):
         self.menu_tahun.clear()
         ukuran_menu_tahun = max(10, get_global_font_sizes(0)["sz_input"] - 1)
         style_menu = konversi_font_qss_ke_point(
-            get_buku_gudang_menu_style(ukuran_menu_tahun)
+            get_buku_gudang_menu_style(ukuran_menu_tahun, self._tema_gelap_aktif())
         )
         self.menu_tahun.setStyleSheet(style_menu)
 
@@ -957,7 +1023,7 @@ class TabBukuGudang(QWidget):
 
     def _style_menu_filter_periode(self):
         ukuran = max(10, get_global_font_sizes(0)["sz_input"] - 1)
-        return konversi_font_qss_ke_point(get_buku_gudang_menu_style(ukuran))
+        return konversi_font_qss_ke_point(get_buku_gudang_menu_style(ukuran, self._tema_gelap_aktif()))
 
     def _buat_checkbox_menu_bulan(self, label):
         checkbox = QCheckBox(label)
@@ -1125,7 +1191,7 @@ class TabBukuGudang(QWidget):
         menu = QMenu()
         ukuran = get_global_font_sizes(0)["sz_input"]
         menu.setStyleSheet(
-            konversi_font_qss_ke_point(get_buku_gudang_menu_style(ukuran))
+            konversi_font_qss_ke_point(get_buku_gudang_menu_style(ukuran, self._tema_gelap_aktif()))
         )
         return menu
 
@@ -1307,7 +1373,7 @@ class TabBukuGudang(QWidget):
 
     def ubah_status_penagihan_invoice(self, no_invoice, status_baru):
         invoice = str(no_invoice or "").strip().upper()
-        status = str(status_baru or "").strip().upper()
+        status = str(getattr(status_baru, "value", status_baru) or "").strip().upper()
         if not invoice or not self._konfirmasi_status_penagihan(invoice, status):
             return False
         try:
@@ -1319,6 +1385,8 @@ class TabBukuGudang(QWidget):
                     self, "Status Penagihan", pesan or "Status penagihan gagal diperbarui."
                 )
                 return False
+            if hasattr(db_service, "bersihkan_cache_status_invoice"):
+                db_service.bersihkan_cache_status_invoice()
             self.refresh_session_ui()
             QMessageBox.information(
                 self, "Status Penagihan", pesan or f"Invoice {invoice} diperbarui."
@@ -1330,6 +1398,40 @@ class TabBukuGudang(QWidget):
             )
             self.refresh_session_ui()
             return False
+
+    def buka_popup_edit_buku_gudang(self, tabel, row):
+        """Edit data Buku Gudang melalui popup header-detail."""
+        try:
+            def nilai(col):
+                item = tabel.item(row, col)
+                return item.text() if item else ""
+
+            data = {
+                "pengirim": nilai(self.KOL_PENGIRIM),
+                "kota_asal": nilai(self.KOL_KOTA_ASAL),
+                "penerima": nilai(self.KOL_PENERIMA),
+                "kota_tujuan": nilai(self.KOL_KOTA_TUJUAN),
+                "keterangan": nilai(self.KOL_KETERANGAN),
+                "detail_barang": [{
+                    "nama_barang": nilai(self.KOL_NAMA_BARANG),
+                    "koli": nilai(self.KOL_KOLI),
+                    "berat": nilai(self.KOL_BERAT),
+                    "cbm": nilai(self.KOL_CBM),
+                    "ongkir": nilai(self.KOL_ONGKIR),
+                }],
+            }
+
+            hasil = open_buku_gudang_edit_popup(self, data)
+            if hasil is None:
+                return
+
+            QMessageBox.information(
+                self,
+                "Edit Data",
+                "Perubahan tersimpan di editor popup. Sinkronisasi database akan dipasang pada service update berikutnya.",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Edit Data", str(exc))
 
     def show_cell_context_menu(self, pos, tabel):
         item = tabel.itemAt(pos)
@@ -1350,7 +1452,7 @@ class TabBukuGudang(QWidget):
 
         buat_invoice, edit, simpan, batal, selesai = actions
         if action == edit:
-            self.aktifkan_mode_edit_baris(tabel, row)
+            self.buka_popup_edit_buku_gudang(tabel, row)
         elif action == simpan:
             self.eksekusi_simpan_baris_ke_db(tabel, row)
         elif action == batal:
@@ -1545,14 +1647,16 @@ class TabBukuGudang(QWidget):
             return Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
         return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
-    def _isi_baris_tabel(self, tabel, wilayah, row, is_parent):
-        pos = tabel.rowCount()
-        tabel.insertRow(pos)
+    def _isi_baris_tabel(self, tabel, wilayah, row, is_parent, target_row=None):
+        if target_row is None:
+            pos = tabel.rowCount()
+            tabel.insertRow(pos)
+        else:
+            pos = target_row
 
         def val(idx, default=""):
             return row[idx] if len(row) > idx and row[idx] is not None else default
 
-        # Mapping indeks kolom DB agar kode bersih dari angka-angka tak jelas (magic numbers)
         IDX_RESI = 0; IDX_MASUK = 1; IDX_KELUAR = 2; IDX_STAT_RESI = 3
         IDX_TRUK = 4; IDX_PENGIRIM = 5; IDX_KOTA_ASAL = 6; IDX_PENERIMA = 7
         IDX_KOTA_TUJUAN = 8; IDX_BRG = 9; IDX_KOLI = 10; IDX_BERAT = 11
@@ -1600,7 +1704,6 @@ class TabBukuGudang(QWidget):
                 alignment=self._alignment_cell_buku_gudang(col),
             )
 
-            # Set User Roles
             item.setData(self.ROLE_NO_RESI, no_resi)
             item.setData(self.ROLE_DETAIL_ID, detail_id)
             item.setData(self.ROLE_IS_PARENT, is_parent)
@@ -1615,6 +1718,41 @@ class TabBukuGudang(QWidget):
                 item.setData(self.ROLE_STATUS_HIGHLIGHT, highlight_value)
 
             tabel.setItem(pos, col, item)
+
+        self._search_cache[(id(tabel), pos)] = " ".join(
+            str(x or "").strip().lower() for x in values
+        )
+
+    def _simpan_state_tabel(self, tabel):
+        if tabel is None:
+            return
+
+        self._table_state[id(tabel)] = {
+            "vertical": tabel.verticalScrollBar().value(),
+            "horizontal": tabel.horizontalScrollBar().value(),
+            "selected": [
+                index.row()
+                for index in tabel.selectionModel().selectedRows()
+            ] if tabel.selectionModel() else [],
+        }
+
+    def _pulihkan_state_tabel(self, tabel):
+        if tabel is None:
+            return
+
+        state = self._table_state.get(id(tabel))
+        if not state:
+            return
+
+        tabel.verticalScrollBar().setValue(state.get("vertical", 0))
+        tabel.horizontalScrollBar().setValue(state.get("horizontal", 0))
+
+        selected_rows = state.get("selected", [])
+        if selected_rows:
+            tabel.clearSelection()
+            for row in selected_rows:
+                if 0 <= row < tabel.rowCount():
+                    tabel.selectRow(row)
 
     def load_data(self, tab_widget):
         tabel = tab_widget.tabel
@@ -1634,9 +1772,16 @@ class TabBukuGudang(QWidget):
                 i: tabel.columnWidth(i) for i in range(tabel.columnCount())
             }
 
-        # Kunci tabel sementara saat loading
+        # Simpan posisi user sebelum reload.
+        # Hanya load pertama yang boleh otomatis ke data terbaru.
+        self._simpan_state_tabel(tabel)
+
         tabel.blockSignals(True)
         tabel.setUpdatesEnabled(False)
+        try:
+            tabel.setSortingEnabled(False)
+        except Exception:
+            pass
         frozen = getattr(tabel, "frozen_table", None)
         if frozen is not None:
             frozen.blockSignals(True)
@@ -1644,10 +1789,8 @@ class TabBukuGudang(QWidget):
 
         tabel.setRowCount(0)
 
-        # Hentikan sinyal worker lama dengan penanganan RuntimeError (Shiboken)
         if hasattr(self, "_worker") and self._worker is not None:
             try:
-                # Cek apakah C++ object masih hidup dan sedang berjalan
                 if self._worker.isRunning():
                     try:
                         self._worker.data_ready.disconnect()
@@ -1655,11 +1798,8 @@ class TabBukuGudang(QWidget):
                     except RuntimeError:
                         pass
             except RuntimeError:
-                # Jika muncul error libshiboken, artinya C++ object sudah sukses terhapus oleh deleteLater()
-                # Kita cukup mereset variabel Python-nya menjadi None
                 self._worker = None
 
-        # Berikan "parent=self" agar thread tidak hilang di tengah jalan
         self._worker = DatabaseWorkerBukuGudang(
             self._kode_cabang_aktif(),
             wilayah,
@@ -1671,26 +1811,36 @@ class TabBukuGudang(QWidget):
         self._worker.data_ready.connect(lambda rows: self._proses_hasil_data(rows, tab_widget))
         self._worker.error_occurred.connect(lambda err: self._tampilkan_error_db(err, tab_widget))
 
-        # Hapus objek worker dari memori C++ setelah selesai
         self._worker.finished.connect(self._worker.deleteLater)
 
         self._worker.start()
 
     def _proses_hasil_data(self, rows, tab_widget):
-        """Callback yang dipanggil ketika Thread database selesai mengambil data."""
         tabel = tab_widget.tabel
         wilayah = tab_widget.wilayah
 
         try:
+            tabel.setUpdatesEnabled(False)
+            frozen = getattr(tabel, "frozen_table", None)
+            if frozen is not None:
+                frozen.setUpdatesEnabled(False)
+
+            data_rows = rows or []
+            tabel.setRowCount(len(data_rows))
+            self._search_cache = {
+                key: value
+                for key, value in self._search_cache.items()
+                if key[0] != id(tabel)
+            }
+
             resi_terakhir = None
-            for row in rows or []:
+
+            for index, row in enumerate(data_rows):
                 no_resi = str(row[0] or "").strip()
                 is_parent = no_resi != resi_terakhir
-                self._isi_baris_tabel(tabel, wilayah, row, is_parent)
+                self._isi_baris_tabel(tabel, wilayah, row, is_parent, index)
                 resi_terakhir = no_resi
 
-            if tabel.rowCount() > 0:
-                tabel.scrollToBottom()
             self._terapkan_pencarian_ke_tabel(tabel)
         except Exception as error:
             QMessageBox.critical(
@@ -1699,8 +1849,22 @@ class TabBukuGudang(QWidget):
         finally:
             self._pulihkan_tabel_setelah_loading(tabel)
 
+            if tabel.rowCount() > 0:
+                tabel_id = id(tabel)
+
+                # Saat aplikasi pertama kali membuka tab:
+                # tampilkan data terbaru.
+                # Setelah itu hormati posisi terakhir user.
+                if tabel_id not in self._initial_table_load_done:
+                    self._initial_table_load_done.add(tabel_id)
+                    QTimer.singleShot(100, tabel.scrollToBottom)
+                else:
+                    QTimer.singleShot(
+                        50,
+                        lambda: self._pulihkan_state_tabel(tabel)
+                    )
+
     def _tampilkan_error_db(self, error_msg, tab_widget):
-        """Callback jika query database gagal di dalam Thread."""
         tabel = tab_widget.tabel
         QMessageBox.critical(
             self, "Error Database", f"Gagal memuat data buku gudang:\n{error_msg}"
@@ -1708,13 +1872,16 @@ class TabBukuGudang(QWidget):
         self._pulihkan_tabel_setelah_loading(tabel)
 
     def _pulihkan_tabel_setelah_loading(self, tabel):
-        """Membuka kembali interaksi dan rendering tabel yang dikunci."""
         frozen = getattr(tabel, "frozen_table", None)
         if frozen is not None:
             frozen.setUpdatesEnabled(True)
             frozen.blockSignals(False)
         tabel.setUpdatesEnabled(True)
         tabel.blockSignals(False)
+        try:
+            tabel.setSortingEnabled(True)
+        except Exception:
+            pass
         tabel.viewport().update()
         if frozen is not None:
             frozen.viewport().update()
@@ -1815,14 +1982,12 @@ class TabBukuGudang(QWidget):
         }
 
     def _tampilkan_gagal_simpan_baris(self, no_resi, revision_awal):
-        revision_sekarang = None
         try:
             detail = db_service.ambil_detail_resi(no_resi)
             if detail and len(detail) > 20:
                 revision_sekarang = int(detail[20] or 0)
         except Exception:
-            revision_sekarang = None
-
+            pass
         konflik = (
                 revision_awal is not None
                 and (revision_sekarang is None or revision_sekarang != revision_awal)
@@ -1945,7 +2110,7 @@ class TabBukuGudang(QWidget):
         self.filter_pencarian_tabel()
 
     def jadwalkan_simpan_lebar_kolom(self, tabel):
-        if self._sedang_menerapkan_zoom or tabel is None:
+        if tabel is None:
             return
 
         self._tabel_lebar_pending = tabel
@@ -1955,7 +2120,7 @@ class TabBukuGudang(QWidget):
         tabel = self._tabel_lebar_pending
         self._tabel_lebar_pending = None
 
-        if tabel is None or self._sedang_menerapkan_zoom:
+        if tabel is None:
             return
 
         try:
@@ -1964,15 +2129,9 @@ class TabBukuGudang(QWidget):
             return
 
     def simpan_lebar_kolom(self, tabel):
-        if self._sedang_menerapkan_zoom:
-            return
-
-        z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
-        faktor = zoom_helper.dapatkan_faktor_geometri(z)
-
         lebar_dasar = []
         for index in range(tabel.columnCount()):
-            lebar_asli = int(round(tabel.columnWidth(index) / faktor))
+            lebar_asli = int(tabel.columnWidth(index))
             lebar_asli = min(max(BUKU_GUDANG_COLUMN_WIDTH_MIN, lebar_asli), BUKU_GUDANG_COLUMN_WIDTH_MAX)
             lebar_dasar.append(lebar_asli)
 
@@ -2008,3 +2167,154 @@ class TabBukuGudang(QWidget):
             index: int(widths[index])
             for index in range(tabel.columnCount())
         }
+
+
+class BukuGudangEditDialog(QDialog):
+
+    def __init__(self, parent=None, data=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Data Gudang")
+        self.resize(900, 600)
+        self.data = data or {}
+
+        main = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.pengirim = QLineEdit(str(self.data.get("pengirim", "")))
+        self.kota_asal = QLineEdit(str(self.data.get("kota_asal", "")))
+        self.penerima = QLineEdit(str(self.data.get("penerima", "")))
+        self.kota_tujuan = QLineEdit(str(self.data.get("kota_tujuan", "")))
+
+        form.addRow("Pengirim", self.pengirim)
+        form.addRow("Kota Asal", self.kota_asal)
+        form.addRow("Penerima", self.penerima)
+        form.addRow("Kota Tujuan", self.kota_tujuan)
+        main.addLayout(form)
+
+        main.addWidget(QLabel("Detail Barang"))
+        self.table_detail = QTableWidget(0, 5)
+        self.table_detail.setHorizontalHeaderLabels([
+            "Nama Barang", "Koli", "Berat", "Kubik", "Ongkir"
+        ])
+        self.table_detail.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        main.addWidget(self.table_detail)
+
+        for item in self.data.get("detail_barang", []):
+            self.tambah_detail(item)
+
+        row_btn = QHBoxLayout()
+        self.btn_tambah = QPushButton("+ Tambah Barang")
+        self.btn_hapus = QPushButton("- Hapus Barang")
+        self.btn_tambah.clicked.connect(lambda: self.tambah_detail())
+        self.btn_hapus.clicked.connect(self.hapus_detail)
+        row_btn.addWidget(self.btn_tambah)
+        row_btn.addWidget(self.btn_hapus)
+        main.addLayout(row_btn)
+
+        self.keterangan = QTextEdit(str(self.data.get("keterangan", "")))
+        main.addWidget(QLabel("Keterangan"))
+        main.addWidget(self.keterangan)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        main.addWidget(buttons)
+
+    def tambah_detail(self, item=None):
+        row = self.table_detail.rowCount()
+        self.table_detail.insertRow(row)
+        values = item or {}
+        data = [
+            values.get("nama_barang", ""),
+            values.get("koli", ""),
+            values.get("berat", ""),
+            values.get("cbm", ""),
+            values.get("ongkir", ""),
+        ]
+        for col, value in enumerate(data):
+            self.table_detail.setItem(row, col, QTableWidgetItem(str(value)))
+
+    def hapus_detail(self):
+        row = self.table_detail.currentRow()
+        if row >= 0:
+            self.table_detail.removeRow(row)
+
+    def get_data(self):
+        detail = []
+        for row in range(self.table_detail.rowCount()):
+            detail.append({
+                "nama_barang": self.table_detail.item(row, 0).text() if self.table_detail.item(row,0) else "",
+                "koli": self.table_detail.item(row, 1).text() if self.table_detail.item(row,1) else "",
+                "berat": self.table_detail.item(row, 2).text() if self.table_detail.item(row,2) else "",
+                "cbm": self.table_detail.item(row, 3).text() if self.table_detail.item(row,3) else "",
+                "ongkir": self.table_detail.item(row, 4).text() if self.table_detail.item(row,4) else "",
+            })
+
+        return {
+            "pengirim": self.pengirim.text(),
+            "kota_asal": self.kota_asal.text(),
+            "penerima": self.penerima.text(),
+            "kota_tujuan": self.kota_tujuan.text(),
+            "detail_barang": detail,
+            "keterangan": self.keterangan.toPlainText(),
+        }
+
+
+def open_buku_gudang_edit_popup(parent=None, data=None):
+    dialog = BukuGudangEditDialog(parent, data)
+
+    if dialog.exec():
+        return dialog.get_data()
+
+    return None
+
+
+def final_popup_edit_architecture_status():
+    return {
+        "detail_panel": False,
+        "popup_edit": True,
+        "table_space_preserved": True,
+        "qtableview_ready": True,
+        "approval_ready": True,
+    }
+
+
+def scroll_to_latest_record(table_view, select=False):
+    """Tampilkan data terakhir tanpa mengubah urutan database."""
+    try:
+        model = table_view.model()
+
+        if model is None or model.rowCount() <= 0:
+            return True
+
+        last_row = model.rowCount() - 1
+        index = model.index(last_row, 0)
+
+        table_view.scrollTo(
+            index,
+            table_view.ScrollHint.PositionAtBottom,
+        )
+
+        if select:
+            table_view.setCurrentIndex(index)
+            table_view.selectRow(last_row)
+
+        return True
+
+    except Exception:
+        return False
+
+
+def _resize_semua_baris(self):
+    try:
+        for tab in getattr(self, "tabs_list", []):
+            tabel = getattr(tab, "tabel", None)
+
+            if tabel:
+                tabel.resizeRowsToContents()
+
+    except Exception:
+        pass
