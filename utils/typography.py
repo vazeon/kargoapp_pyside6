@@ -14,8 +14,6 @@ APPLICATION_NAME = "PengaturanUI"
 
 DEFAULT_FONT = "Roboto"
 DEFAULT_FONT_SIZE_PT = 9.0
-DEFAULT_FONT_SIZE = DEFAULT_FONT_SIZE_PT  # Alias kompatibilitas lama.
-
 MIN_FONT_SIZE = 8
 MIN_FONT_SIZE_PT = 7.5
 REFERENCE_DPI = 96.0
@@ -189,8 +187,8 @@ def konfigurasi_font_aplikasi(app: QApplication) -> str:
     return app.font().family()
 
 
-def get_global_font_sizes(z: int = 0) -> Dict[str, int]:
-    """Token ukuran desain lama dalam logical pixel untuk kompatibilitas theme."""
+def get_zoom_font_sizes(z: int = 0) -> Dict[str, int]:
+    """Ukuran font yang memang mengikuti level zoom modul/tabel."""
     try:
         zoom = int(z)
     except (TypeError, ValueError, OverflowError):
@@ -206,6 +204,29 @@ def get_global_font_sizes(z: int = 0) -> Dict[str, int]:
     }
 
 
-def get_global_font_sizes_pt(z: int = 0) -> Dict[str, float]:
-    """Ukuran font kanonis dalam point untuk QFont dan QSS baru."""
-    return {key: ukuran_font_px_ke_pt(value) for key, value in get_global_font_sizes(z).items()}
+def get_fixed_font_sizes() -> Dict[str, int]:
+    """Ukuran font tetap untuk UI yang tidak mengikuti zoom."""
+    return {
+        "sz_title": 18,
+        "sz_total": 15,
+        "sz_input": 13,
+        "sz_base": 12,
+        "sz_tag": 11,
+        "sz_sm": 10,
+    }
+
+
+def get_zoom_font_sizes_pt(z: int = 0) -> Dict[str, float]:
+    """Ukuran font berbasis zoom dalam point."""
+    return {
+        key: ukuran_font_px_ke_pt(value)
+        for key, value in get_zoom_font_sizes(z).items()
+    }
+
+
+def get_fixed_font_sizes_pt() -> Dict[str, float]:
+    """Ukuran font tetap dalam point untuk UI tanpa zoom."""
+    return {
+        key: ukuran_font_px_ke_pt(value)
+        for key, value in get_fixed_font_sizes().items()
+    }

@@ -65,7 +65,7 @@ def _buat_logo_gambar_html() -> str:
 
     return (
         f'<img src="data:{mime_type};base64,{encoded}" '
-        'height="34" alt="Logo Mahkota Kargo">'
+        'height="18" alt="Logo">'
     )
 
 
@@ -333,7 +333,7 @@ def _kota_penerima_html(data: dict) -> str:
         kota_db = str(data.get("kota_tujuan", "") or "").strip()
     if kota_db and kota_db.lower() != "none" and kota_db != "-":
         kota_penerima = kota_db.split(" - ")[-1].strip()
-        return "<br>KOTA: " f"<strong>{_esc(kota_penerima.upper())}</strong>"
+        return "<br>" f"{_esc(kota_penerima.upper())}"
     return ""
 
 
@@ -368,7 +368,7 @@ def cetak_resi_ke_printer(
                 padding: 0;
                 width: 100%;
                 font-family: "{font_dokumen}";
-                font-size: 9pt;
+                font-size: 8pt;
                 color: #000000;
             }}
             .header-table {{
@@ -383,19 +383,19 @@ def cetak_resi_ke_printer(
             .brand-table td {{
                 border: none;
                 padding: 0;
-                vertical-align: middle;
+                vertical-align: top;
             }}
             .brand-table .brand-logo-cell {{
                 padding-right: 7px;
             }}
             .logo-text {{
-                font-size: 15pt;
+                font-size: 10pt;
                 font-weight: bold;
                 color: #0d47a1;
                 white-space: nowrap;
             }}
             .comp-details {{
-                font-size: 8pt;
+                font-size: 7pt;
                 line-height: 1.2;
                 white-space: nowrap;
             }}
@@ -408,15 +408,15 @@ def cetak_resi_ke_printer(
                 border: 1px solid #000000;
                 padding: 3px;
                 font-size: 8pt;
-                font-weight: bold;
+                font-weight: normal;
                 background-color: #ffffff;
                 white-space: nowrap;
             }}
             .box-resi td {{
                 border: 1px solid #000000;
                 padding: 3px;
-                font-weight: bold;
-                font-size: 10pt;
+                font-weight: normal;
+                font-size: 8pt;
                 letter-spacing: 0.5px;
                 white-space: nowrap;
             }}
@@ -427,7 +427,7 @@ def cetak_resi_ke_printer(
             }}
             .info-title {{
                 font-weight: bold;
-                font-size: 8.5pt;
+                font-size: 8pt;
                 margin-bottom: 2px;
             }}
             .barang-table {{
@@ -439,7 +439,7 @@ def cetak_resi_ke_printer(
                 border: 1px solid #000000;
                 padding: 4px;
                 font-size: 8pt;
-                font-weight: bold;
+                font-weight: 600;
                 text-align: center;
                 background-color: #ffffff;
                 white-space: nowrap;
@@ -449,15 +449,15 @@ def cetak_resi_ke_printer(
                 border-right: 1px solid #000000;
                 border-top: none;
                 border-bottom: none;
-                padding: 4px;
-                font-size: 9pt;
+                padding: 2px;
+                font-size: 8pt;
             }}
             .barang-table .fixed-row td {{
                 height: 16px;
             }}
             .barang-table .total-row td {{
                 border: 1px solid #000000;
-                font-weight: bold;
+                font-weight: 600;
                 background-color: #ffffff;
             }}
             .footer-table {{
@@ -467,7 +467,7 @@ def cetak_resi_ke_printer(
             .ttd-cell {{
                 text-align: center;
                 vertical-align: top;
-                font-size: 8.5pt;
+                font-size: 8pt;
                 white-space: nowrap;
                 padding-top: 5px;
             }}
@@ -475,26 +475,26 @@ def cetak_resi_ke_printer(
                 vertical-align: top;
                 padding-left: 15px;
                 padding-top: 5px;
-                font-size: 8.5pt;
+                font-size: 8pt;
                 border-left: 1px dashed #cccccc;
             }}
             .pembayaran-box {{
                 vertical-align: top;
-                font-size: 8.5pt;
+                font-size: 8pt;
                 line-height: 1.3;
                 padding-left: 15px;
                 padding-top: 5px;
                 white-space: nowrap;
             }}
             .total-tagihan {{
-                font-size: 13pt;
-                font-weight: bold;
+                font-size: 8pt;
+                font-weight: normal;
                 color: #000000;
                 display: block;
                 margin-top: 2px;
             }}
             .tarif-satuan {{
-                font-size: 8.5pt;
+                font-size: 8pt;
                 color: #475569;
                 margin-top: 5px;
                 font-weight: normal;
@@ -505,6 +505,15 @@ def cetak_resi_ke_printer(
     <body>
         <table class="header-table">
             <tr>
+                
+                <td width="37%" class="comp-details"
+                    valign="middle">
+                    <strong>{_esc(comp_name)}</strong><br>
+                    📍 {_esc(comp_address)}<br>
+                    📞 {_esc(comp_phone)}
+                </td>
+            
+            
                 <td width="38%" valign="middle"
                     style="white-space: nowrap;">
                     <table class="brand-table" cellpadding="0" cellspacing="0">
@@ -518,12 +527,7 @@ def cetak_resi_ke_printer(
                         </tr>
                     </table>
                 </td>
-                <td width="37%" class="comp-details"
-                    valign="middle">
-                    <strong>{_esc(comp_name)}</strong><br>
-                    📍 {_esc(comp_address)}<br>
-                    📞 {_esc(comp_phone)}
-                </td>
+                
                 <td width="25%" valign="middle">
                     <table class="box-resi" width="100%">
                         <tr>
@@ -555,7 +559,7 @@ def cetak_resi_ke_printer(
                     {_esc(data.get('pengirim_alamat', ''))}
                 </td>
                 <td width="50%" valign="top"
-                    style="padding-left: 10px;">
+                    style="padding-left: 1px;">
                     <div class="info-title">PENERIMA :</div>
                     <strong>
                         {_esc(data.get('penerima_nama', ''))}
@@ -581,7 +585,11 @@ def cetak_resi_ke_printer(
                 {''.join(baris_tabel)}
                 <tr class="total-row">
                     <td colspan="2"
-                        style="padding: 0; border: 1px solid #000000;">
+                        style="padding: 0;
+                        border-top: 1px solid #000000;
+                        border-right: 1px solid #000000;
+                        border-bottom: none;
+                        border-left: none;">
                         <table width="100%" cellpadding="0"
                             cellspacing="0" style="border: none;">
                             <tr>

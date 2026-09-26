@@ -29,7 +29,6 @@ from utils.typography import (
     ORGANIZATION_NAME,
     konfigurasi_font_aplikasi,
 )
-from utils.splitter_helper import perbarui_semua_style_splitter
 from utils.ui_metrics import (
     TOP_RIGHT_CONTROL_HEIGHT,
     dapatkan_ui_scale,
@@ -46,15 +45,13 @@ from config import (
 
 from themes.theme_manager import ThemeManager
 from themes.palette import get_theme_palette
-from themes.scrollbar import GlobalScrollbarManager
 
 from login import LoginWindow
 from database_manager import init_db
+from services.sync_service import AutoSyncController
 
 from tabs.tab_resi import TabResi
 from tabs.tab_setting import TabSettingSistem
-
-ENABLE_GLOBAL_SCROLLBAR_STYLE = False
 
 
 class _LazyTabPage(QWidget):
@@ -90,8 +87,6 @@ class _LazyTabPage(QWidget):
         finally:
             self._loading = False
 
-    # Kompatibilitas khusus alur Buku Gudang -> Invoice.
-    # Method ini membuat Invoice on-demand tanpa mengubah kode TabBukuGudang.
     def terima_data_baru(self, *args, **kwargs):
         widget = self.ensure_loaded()
         if widget is None:
@@ -110,8 +105,6 @@ class MainWindow(QMainWindow):
     SETTINGS_APPLICATION = APPLICATION_NAME
     THEME_LIGHT = "light"
     THEME_DARK = "dark"
-    ZOOM_MIN = -4
-    ZOOM_MAX = 10
 
     def __init__(self):
         super().__init__()
@@ -129,11 +122,8 @@ class MainWindow(QMainWindow):
 
         app = QApplication.instance()
         self._siapkan_tema_aplikasi(app)
-        self._siapkan_scrollbar_global(app)
         self.init_ui()
 
-        # Responsive geometry adalah layer otomatis berbasis screen. Zoom user
-        # tetap terpisah dan hanya berlaku untuk tabel.
         self._ui_scaler = ResponsiveUIScaler(
             self,
             on_scale_changed=self._saat_ui_scale_berubah,
@@ -141,6 +131,7 @@ class MainWindow(QMainWindow):
         self._ui_scaler.apply_now()
 
         self._session_signature_terakhir = self._buat_signature_session()
+        self._auto_sync = AutoSyncController(self, interval_ms=15_000)
 
     def _muat_tema_tersimpan(self):
         tema = str(
@@ -154,23 +145,14 @@ class MainWindow(QMainWindow):
             return
         if not bool(app.property("_base_style_terpasang")):
             is_dark = self.current_theme == self.THEME_DARK
-            # Ambil scale saat ini
             try:
                 scale = dapatkan_ui_scale()
             except Exception:
                 scale = 1.0
 
-            # Panggil Manager Global
             ThemeManager.apply_theme(app, is_dark, scale)
 
         app.setPalette(get_theme_palette(self.current_theme == self.THEME_DARK))
-
-    def _siapkan_scrollbar_global(self, app):
-        self.scrollbar_manager = None
-        if ENABLE_GLOBAL_SCROLLBAR_STYLE and app is not None:
-            self.scrollbar_manager = GlobalScrollbarManager(root_widget=self)
-            self.scrollbar_manager.install(app)
-
 
     def _saat_ui_scale_berubah(self, scale):
         """Sinkronkan stylesheet/theme saat window berpindah screen/density."""
@@ -181,7 +163,6 @@ class MainWindow(QMainWindow):
         self._cache_tema_tab.clear()
         if hasattr(self, "tabs"):
             self.apply_theme(force=True)
-
 
     def init_ui(self):
         self._bangun_shell_utama()
@@ -201,7 +182,7 @@ class MainWindow(QMainWindow):
         self.main_layout.setSpacing(0)
 
         self.tabs = QTabWidget(self)
-        self.tabs_utama = self.tabs  # Alias kompatibilitas modul lama.
+        self.tabs_utama = self.tabs
         self.tabs.setObjectName("MainTabs")
         self.custom_tab_bar = QTabBar(self)
         self.custom_tab_bar.setObjectName("MainTabBar")
@@ -212,8 +193,6 @@ class MainWindow(QMainWindow):
 
     def _buat_tombol_top_right(self, text, slot, *, size=None, width=None):
         button = QPushButton(text) if text else QPushButton(self)
-
-        # Tanda pengenal class untuk QSS Global
         button.setProperty("class", "TopRightButton")
 
         if size is not None:
@@ -226,16 +205,14 @@ class MainWindow(QMainWindow):
 
     def _bangun_kontrol_kanan(self):
         self.container_top_right = QWidget(self)
-        self.container_top_right.setObjectName("ContainerTopRight")  # Pengenal CSS
+        self.container_top_right.setObjectName("ContainerTopRight")
 
         layout = QHBoxLayout(self.container_top_right)
-        # Corner widget berbagi tinggi dengan MainTabBar. Margin vertikal 0
-        # mencegah total tinggi kontrol melebihi tinggi bar tab.
         layout.setContentsMargins(0, 0, 8, 5)
         layout.setSpacing(6)
 
         self.lbl_info_cabang = QLabel("")
-        self.lbl_info_cabang.setObjectName("LabelCabang")  # Pengenal CSS
+        self.lbl_info_cabang.setObjectName("LabelCabang")
 
         self.cmb_cabang_aktif = QComboBox(self)
         self.cmb_cabang_aktif.setMinimumWidth(180)
@@ -255,8 +232,6 @@ class MainWindow(QMainWindow):
         )
         self.btn_setting.setToolTip("Pengaturan")
 
-        # Force refresh manual seperti fitur Refresh pada Windows Explorer.
-        # Tidak menyimpan cache baru, hanya meminta setiap modul memuat ulang data.
         self.btn_refresh_data = self._buat_tombol_top_right(
             "🔄",
             self.refresh_semua_data,
@@ -264,8 +239,6 @@ class MainWindow(QMainWindow):
         )
         self.btn_refresh_data.setToolTip("Perbarui data terbaru dari database")
 
-        # Posisikan seluruh kontrol top-right tepat di tengah secara vertikal
-        # terhadap tinggi MainTabBar.
         layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         for widget in (
@@ -281,9 +254,6 @@ class MainWindow(QMainWindow):
         self.tabs.setCornerWidget(self.container_top_right, Qt.Corner.TopRightCorner)
 
     def _bangun_tab_utama(self):
-        # Resi adalah landing page sehingga tetap dibuat langsung. Tab lain
-        # dibuat on-demand agar pergantian theme global tidak perlu memproses
-        # seluruh widget tree aplikasi sejak startup.
         self.tab_resi_widget = TabResi()
         self.tabs.addTab(self.tab_resi_widget, "Data Resi")
 
@@ -347,8 +317,6 @@ class MainWindow(QMainWindow):
             table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
             table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
-        # QScroller desktop dinonaktifkan karena native event filter dapat
-        # membuat penghancuran banyak viewport tidak stabil saat shutdown.
         if not self._touch_scroll_aktif:
             return
 
@@ -360,26 +328,12 @@ class MainWindow(QMainWindow):
             )
             self._viewport_scroller.append(viewport)
 
-
     def _signature_tema_tab(self, tab_widget):
         if tab_widget is None:
             return None
 
-        nama_kelas = tab_widget.__class__.__name__
-
-        try:
-            zoom = int(
-                self.settings.value(
-                    f"zoom_{nama_kelas}",
-                    0,
-                )
-            )
-        except (TypeError, ValueError):
-            zoom = 0
-
         return (
             self.current_theme,
-            zoom,
             round(dapatkan_ui_scale(), 4),
         )
 
@@ -388,7 +342,6 @@ class MainWindow(QMainWindow):
         tab_widget,
         force=False,
     ):
-
         if tab_widget is None:
             return
 
@@ -448,7 +401,6 @@ class MainWindow(QMainWindow):
                 tab_widget.update()
 
         except RuntimeError:
-            # Widget mungkin sudah dihancurkan saat aplikasi ditutup.
             self._cache_tema_tab.pop(cache_key, None)
 
         finally:
@@ -469,18 +421,12 @@ class MainWindow(QMainWindow):
         self._terapkan_tema_lokal(tab_aktif)
 
     def refresh_semua_data(self):
-        """
-        Force refresh manual seluruh modul yang sudah dimuat.
-        Konsepnya seperti klik kanan -> Refresh pada Windows:
-        database tetap menjadi sumber utama, tampilan hanya dimuat ulang.
-        """
         for widget in self._iter_tab_utama():
             try:
                 fungsi_refresh = getattr(widget, "refresh_data", None)
                 if callable(fungsi_refresh):
                     fungsi_refresh()
                 else:
-                    # Kompatibilitas modul lama yang belum memiliki refresh_data.
                     self._refresh_widget_session(widget)
             except Exception as error:
                 print(
@@ -496,10 +442,8 @@ class MainWindow(QMainWindow):
         if callable(fungsi):
             fungsi()
 
-
     @staticmethod
     def _buat_signature_session():
-        """Identitas minimum untuk mendeteksi perpindahan akun/cabang."""
         return (
             str(CURRENT_SESSION.get("db_name", "") or "").strip(),
             str(CURRENT_SESSION.get("kode_cabang", "") or "").strip().upper(),
@@ -511,7 +455,6 @@ class MainWindow(QMainWindow):
         )
 
     def _iter_tab_utama(self):
-        """Menghasilkan hanya isi tab utama yang sudah benar-benar dibuat."""
         hasil = []
         for index in range(self.tabs.count()):
             widget = self._konten_tab(self.tabs.widget(index), muat=False)
@@ -520,7 +463,6 @@ class MainWindow(QMainWindow):
         return tuple(hasil)
 
     def _refresh_widget_session(self, widget):
-        """Menyegarkan widget saat cabang atau sesi aktif berubah."""
         refresh_session = getattr(widget, "refresh_session_ui", None)
         if callable(refresh_session):
             refresh_session()
@@ -530,9 +472,7 @@ class MainWindow(QMainWindow):
         elif widget.__class__.__name__ == "TabManifest":
             self._panggil_opsional(widget, "setup_autocomplete_truk")
 
-
     def _sinkronkan_pemilih_cabang(self):
-        """Isi pemilih cabang dari scope session tanpa memicu branch switch ulang."""
         branches = CURRENT_SESSION.get("allowed_branches") or []
         current = str(CURRENT_SESSION.get("kode_cabang") or "PUSAT").strip().upper()
 
@@ -558,7 +498,6 @@ class MainWindow(QMainWindow):
             self._sedang_sinkron_cabang = False
 
     def _ganti_cabang_aktif(self, _index=None):
-        """Ganti data scope cabang tanpa logout lalu refresh seluruh tab utama."""
         if self._sedang_sinkron_cabang:
             return
         kode = str(self.cmb_cabang_aktif.currentData() or "").strip().upper()
@@ -650,8 +589,6 @@ class MainWindow(QMainWindow):
 
             self.apply_theme(force=True)
 
-            # ThemeManager memasang QSS baseline theme baru.
-            # ResponsiveUIScaler menerapkan geometry final satu kali.
             scaler = getattr(self, "_ui_scaler", None)
             if scaler is not None:
                 scaler.apply_now()
@@ -662,15 +599,11 @@ class MainWindow(QMainWindow):
     def apply_theme(self, force=False):
         is_dark = self.current_theme == self.THEME_DARK
 
-        # Shell dan tab aktif di-refresh secara terpisah. Jangan membekukan
-        # MainWindow penuh karena itu mencakup seluruh tab yang sudah dibuat.
         self._terapkan_tema_shell(is_dark)
 
         tab_aktif = self._konten_tab(self.tabs.currentWidget(), muat=True)
         if tab_aktif is not None:
             self._terapkan_tema_lokal(tab_aktif, force=force)
-            # Splitter hanya perlu mengikuti subtree yang sedang terlihat.
-            perbarui_semua_style_splitter(tab_aktif, is_dark)
 
     def _terapkan_tema_shell(self, is_dark):
         app = QApplication.instance()
@@ -680,8 +613,6 @@ class MainWindow(QMainWindow):
         except Exception:
             scale = 1.0
 
-        # QApplication hanya menyimpan state/palette. QSS pyqtdarktheme tidak
-        # dipasang global agar tab tersembunyi tidak ikut di-repolish.
         ThemeManager.apply_theme(app, is_dark, scale)
 
         if app is not None:
@@ -696,7 +627,6 @@ class MainWindow(QMainWindow):
         )
 
         self.btn_theme.setText("Mode Terang" if is_dark else "Mode Gelap")
-
 
     def buka_dasbor_pengaturan(self):
         if self._aktifkan_dialog_setting_lama():
@@ -776,29 +706,22 @@ class MainWindow(QMainWindow):
             widget_setting.btn_simpan_all.setEnabled(False)
             widget_setting.btn_simpan_all.setText("❌ AKSES DITOLAK")
 
-
     def closeEvent(self, event):
-        """Melepas resource native sebelum MainWindow dihancurkan."""
         try:
             self._lepas_resource_native()
         finally:
             super().closeEvent(event)
 
     def _lepas_resource_native(self):
+        auto_sync = getattr(self, "_auto_sync", None)
+        if auto_sync is not None:
+            auto_sync.stop()
         for viewport in getattr(self, "_viewport_scroller", []):
             try:
                 QScroller.ungrabGesture(viewport)
             except (RuntimeError, TypeError):
                 pass
         self._viewport_scroller = []
-
-        manager = getattr(self, "scrollbar_manager", None)
-        uninstall = getattr(manager, "uninstall", None)
-        if callable(uninstall):
-            try:
-                uninstall()
-            except (RuntimeError, TypeError):
-                pass
 
         dialog = getattr(self, "dialog_setting", None)
         if dialog is not None:
@@ -812,7 +735,6 @@ class MainWindow(QMainWindow):
         self._sedang_sinkron_cabang = False
         self._cache_tema_tab.clear()
         self._tema_tab_sedang_diterapkan.clear()
-
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -830,53 +752,6 @@ class MainWindow(QMainWindow):
             self.dialog_setting = None
             self._setting_access_overlay = None
 
-    def _zoom_tab_aktif(self, active_tab=None):
-        """Ambil zoom tersimpan untuk tab aktif tanpa mengubah UI."""
-        if active_tab is None:
-            active_tab = self._konten_tab(self.tabs.currentWidget(), muat=True)
-        if active_tab is None:
-            return 0
-
-        key = f"zoom_{active_tab.__class__.__name__}"
-        try:
-            value = int(self.settings.value(key, 0))
-        except (TypeError, ValueError):
-            value = 0
-        return max(self.ZOOM_MIN, min(value, self.ZOOM_MAX))
-
-    def ubah_zoom(self, step):
-        active_tab = self._konten_tab(self.tabs.currentWidget(), muat=True)
-        if active_tab is None:
-            return
-        try:
-            step = int(step)
-        except (TypeError, ValueError):
-            return
-        if step == 0:
-            return
-
-        current_z = self._zoom_tab_aktif(active_tab)
-        new_z = max(self.ZOOM_MIN, min(current_z + step, self.ZOOM_MAX))
-        if new_z == current_z:
-            return
-
-        key = f"zoom_{active_tab.__class__.__name__}"
-        self.settings.setValue(key, new_z)
-        self.settings.sync()
-        self._terapkan_tema_lokal(active_tab, force=True)
-
-
-    def wheelEvent(self, event):
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            if event.angleDelta().y() > 0:
-                self.ubah_zoom(1)
-            else:
-                self.ubah_zoom(-1)
-            event.accept()
-        else:
-            super().wheelEvent(event)
-
-
 def penangkap_error_gaib(error_type, value, traceback_obj):
     traceback.print_exception(
         error_type,
@@ -888,7 +763,6 @@ sys.excepthook = penangkap_error_gaib
 
 
 def jalankan_aplikasi():
-    """Menyiapkan database, login, dan dashboard aplikasi."""
     nama_db = CURRENT_SESSION.get(
         "db_name",
         "database_cargo.db",
@@ -907,15 +781,8 @@ def jalankan_aplikasi():
     )
 
     app = QApplication(sys.argv)
-
     app.setWindowIcon(QIcon("assets/logo/logo_mahkota_kargo.png"))
 
-    # app.setStyle("Fusion")
-
-    # --- DEBUG SEMENTARA: lacak bug "input aktif sendiri saat hover" ---
-    # Aktifkan dengan menjalankan: set DEBUG_FOCUS=1 (cmd) / $env:DEBUG_FOCUS=1 (PowerShell)
-    # lalu jalankan app seperti biasa. Tidak berpengaruh apa pun bila env var
-    # tidak diset (default off), aman ditinggal atau dihapus kapan saja.
     if os.environ.get("DEBUG_FOCUS") == "1":
         def _debug_focus_changed(old, new):
             def _label(w):
@@ -927,18 +794,13 @@ def jalankan_aplikasi():
                 f"\n[DEBUG_FOCUS] {_label(old)} -> {_label(new)}",
                 flush=True,
             )
-            # Cetak hanya frame milik project ini (skip internal Qt/PySide/stdlib)
             for frame in traceback.format_stack()[:-1]:
                 if "/site-packages/" not in frame and "\\site-packages\\" not in frame:
                     print(frame, end="", flush=True)
 
         app.focusChanged.connect(_debug_focus_changed)
         print("[DEBUG_FOCUS] Aktif - hover ke cell yang bermasalah lalu lihat console", flush=True)
-    # --- AKHIR DEBUG SEMENTARA ---
 
-    # Terapkan palette global sebelum widget apa pun dibuat, termasuk LoginWindow.
-    # Dengan demikian QPalette.PlaceholderText dari themes/palette.py menjadi
-    # sumber warna placeholder untuk seluruh aplikasi sejak awal.
     settings_awal = QSettings(
         MainWindow.SETTINGS_ORGANIZATION,
         MainWindow.SETTINGS_APPLICATION,
@@ -973,8 +835,6 @@ def jalankan_aplikasi():
     }
 
     def buka_dashboard_kargo():
-        # Jangan mengembalikan sesi ke database awal. Login dapat memilih
-        # database/cabang lain dan path aktif tersebut harus dipertahankan.
         nama_db_aktif = str(
             CURRENT_SESSION.get("db_name", db_path)
             or db_path
@@ -982,7 +842,6 @@ def jalankan_aplikasi():
         db_path_aktif = init_db(nama_db_aktif)
         CURRENT_SESSION["db_name"] = db_path_aktif
 
-        # Muat ulang identitas perusahaan dari database sesi yang aktif.
         DATA_CLIENT.update(muat_pengaturan_sistem())
 
         main_window = window_holder["main"]

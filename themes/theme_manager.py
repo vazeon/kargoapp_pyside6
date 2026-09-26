@@ -1,11 +1,4 @@
-
-"""Manajemen theme berbasis scope widget.
-
-QSS pyqtdarktheme sengaja TIDAK dipasang ulang ke QApplication saat toggle.
-Global QApplication hanya menyimpan state theme/palette, sedangkan stylesheet
-berat diterapkan pada widget yang sedang terlihat. Dengan begitu tab yang sudah
-pernah dibuat tetapi sedang tersembunyi tidak ikut di-repolish oleh Qt.
-"""
+# themes/theme_manager.py
 
 from __future__ import annotations
 
@@ -148,12 +141,7 @@ class ThemeManager:
         is_dark: bool,
         scale: float = 1.0,
     ) -> None:
-        """Sinkronkan state theme aplikasi tanpa global ``setStyleSheet``.
 
-        Nama method dipertahankan agar kompatibel dengan caller lama. Dalam mode
-        scoped, QSS berat diterapkan lewat :meth:`apply_widget_theme` dan
-        :meth:`apply_shell_theme`.
-        """
         if app is None:
             return
 

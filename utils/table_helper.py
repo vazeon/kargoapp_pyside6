@@ -6,9 +6,28 @@ from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
+    QLineEdit,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
 )
+
+
+def atur_editor_sel(widget: QLineEdit) -> None:
+    """Lepaskan tinggi formulir agar editor mengikuti ruang sel tabel.
+
+    Panggil untuk QLineEdit yang akan dipasang lewat setCellWidget().
+    Fungsi ini tidak mengubah warna, validator, isi, signal, atau fokus.
+    """
+    widget.setProperty("_ui_scaler_explicit_geometry", False)
+    widget.setProperty("_ui_base_min_height", None)
+    widget.setProperty("_ui_base_max_height", None)
+    widget.setMinimumHeight(0)
+    widget.setMaximumHeight(16_777_215)
+    widget.setSizePolicy(
+        QSizePolicy.Policy.Expanding,
+        QSizePolicy.Policy.Expanding,
+    )
 
 
 def _warna_valid(warna: Optional[str]) -> Optional[QColor]:

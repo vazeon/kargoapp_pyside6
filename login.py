@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from config import DATA_CLIENT, CURRENT_SESSION
 from database_manager import init_db
-from utils.typography import get_global_font_sizes_pt
+from utils.typography import get_fixed_font_sizes_pt
 from utils.ui_scaler import ResponsiveUIScaler
 
 
@@ -170,7 +170,7 @@ class LoginWindow(QWidget):
 
     def init_ui(self):
         self.setObjectName("LoginWidgetRoot")
-        font_sizes = get_global_font_sizes_pt(0)
+        font_sizes = get_fixed_font_sizes_pt()
         self.setStyleSheet(self._style_login(font_sizes))
 
         main_layout = QVBoxLayout()

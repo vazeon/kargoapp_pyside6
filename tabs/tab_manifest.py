@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
@@ -30,17 +31,21 @@ from delegates.status_delegate import (
 )
 
 import services.database_service as db_service
+from utils.input_style_helper import (
+    atur_tinggi_input,
+    paksa_kapital_lineedit,
+    terapkan_style_input_global,
+)
 from themes.modules.manifest import (
     get_manifest_history_date_appearance,
     get_manifest_row_highlight,
     get_manifest_styles,
 )
 
-from utils.splitter_helper import buat_splitter
 from utils.printer.print_manifest import cetak_manifest_ke_printer
 from utils.frozen_table_helper import FrozenTableWidget
 from utils.typography import (
-    get_global_font_sizes,
+    get_fixed_font_sizes,
     konversi_style_font_ke_point,
     ukuran_font_px_ke_pt,
 )
@@ -52,7 +57,6 @@ from utils.modules.manifest_metrics import (
     MANIFEST_CARD_GRID_MARGINS,
     MANIFEST_CARD_HEIGHT,
     MANIFEST_CARD_HORIZONTAL_SPACING,
-    MANIFEST_CHECK_COLUMN_WIDTH,
     MANIFEST_COLUMN_WIDTH_MAX,
     MANIFEST_COLUMN_WIDTH_MIN,
     MANIFEST_DEFAULT_COLUMN_WIDTHS,
@@ -71,8 +75,6 @@ from utils.modules.manifest_metrics import (
     MANIFEST_ROUTE_FIELD_MIN_WIDTH,
     MANIFEST_SPACING,
     MANIFEST_SPLITTER_INITIAL_SIZES,
-    MANIFEST_TABLE_ROW_BASE_HEIGHT,
-    MANIFEST_TABLE_ROW_MIN_HEIGHT,
     MANIFEST_TRUCK_DETAIL_MIN_WIDTH,
     MANIFEST_TRUCK_ROW_STRETCH,
     MANIFEST_TRUCK_TYPE_MIN_WIDTH,
@@ -81,8 +83,7 @@ from utils.number_formatters import (
     format_angka_indonesia,
     format_ke_rupiah,
 )
-from utils.table_helper import buat_tabel_item
-from utils.widget_helpers import atur_tinggi_input, paksa_kapital_lineedit
+from utils.table_helper import atur_editor_sel, buat_tabel_item
 from utils.date_ind_format import format_tanggal_ke_ui
 
 
@@ -96,6 +97,22 @@ def _get_manifest_delegate_colors(
     belong = str(status or "").strip().upper() == "BELONG"
     return get_manifest_row_highlight(is_dark, belong), None
 
+class EditableOnDoubleClickLineEdit(QLineEdit):
+    """QLineEdit yang tidak mengambil fokus saat hover/klik tunggal,
+    tetapi aktif untuk diedit saat double click."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def mouseDoubleClickEvent(self, event):
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.setFocus()
+        self.selectAll()
+        super().mouseDoubleClickEvent(event)
+
+    def focusOutEvent(self, event):
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        super().focusOutEvent(event)
 
 class TabManifest(QWidget):
     KOL_CHECK = 0
@@ -146,6 +163,19 @@ class TabManifest(QWidget):
         # Cache master Kapal untuk autocomplete, autofill, dan pencegahan duplikat.
         self._kapal_master_by_key = {}
 
+        # Perf: alignment per kolom tabel resi konstan (tidak bergantung data
+        # baris), jadi dihitung sekali di sini, bukan dihitung ulang untuk
+        # tiap sel setiap kali tabel resi dirender. Hasilnya identik dengan
+        # pemanggilan _alignment_cell_resi_manifest(column) yang lama.
+        self._ALIGNMENT_RESI_MANIFEST = tuple(
+            (Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if col in (self.KOL_KOLI, self.KOL_BERAT, self.KOL_CBM)
+            else (Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            if col == self.KOL_TGL_MASUK
+            else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            for col in range(self.KOL_KET + 1)
+        )
+
         self.init_ui()
 
     @staticmethod
@@ -162,14 +192,13 @@ class TabManifest(QWidget):
         self._bangun_tabel_manifest(layout_kiri)
         self._bangun_panel_histori()
 
-        self.splitter = buat_splitter(
-            self.panel_kiri,
-            self.panel_kanan,
-            orientation=Qt.Orientation.Horizontal,
-            ukuran_awal=MANIFEST_SPLITTER_INITIAL_SIZES,
-            bisa_diciutkan=False,
-            parent=self,
-        )
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.addWidget(self.panel_kiri)
+        self.splitter.addWidget(self.panel_kanan)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setSizes(MANIFEST_SPLITTER_INITIAL_SIZES)
+        self.splitter.setHandleWidth(1)
+
         layout_utama.addWidget(self.splitter)
 
         self.btn_proses.clicked.connect(self.update_truk_ke_manifest)
@@ -207,7 +236,6 @@ class TabManifest(QWidget):
         grid.setColumnStretch(1, 1)
         return grid
 
-    @staticmethod
     @staticmethod
     def _buat_label_input_manifest(teks):
         label = QLabel(teks)
@@ -448,13 +476,16 @@ class TabManifest(QWidget):
             status_role=Qt.ItemDataRole.UserRole,
             color_provider=_get_manifest_delegate_colors,
             is_dark=is_dark,
+            selected_checkbox_color="#ffffff",
         )
 
     def _bangun_tabel_manifest(self, layout_kiri):
+        lebar_ceklis = self.DEFAULT_COLUMN_WIDTHS[0]  # Ambil langsung dari tuple index 0
+
         self.tabel_manifest = FrozenTableWidget(
             frozen_cols=3,
             fixed_cols=[0],
-            fixed_widths={0: MANIFEST_CHECK_COLUMN_WIDTH},
+            fixed_widths={0: lebar_ceklis},
         )
         self.tabel_manifest.setColumnCount(13)
         self.tabel_manifest.setHorizontalHeaderLabels([
@@ -468,13 +499,22 @@ class TabManifest(QWidget):
         self.tabel_manifest.verticalHeader().setVisible(False)
         self.tabel_manifest.setAlternatingRowColors(True)
 
+        # 1. Ambil status tema aktif terlebih dahulu
         is_dark = self._tema_gelap_aktif()
+
+        # 2. Pasang delegate pada tabel utama
         self._pasang_delegate_manifest(self.tabel_manifest, is_dark)
+
+        # 3. Hilangkan focus border & pasang delegate pada frozen_table
         frozen_table = getattr(self.tabel_manifest, "frozen_table", None)
         if frozen_table is not None:
+            frozen_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self._pasang_delegate_manifest(frozen_table, is_dark)
 
         self.load_lebar_kolom(self.tabel_manifest)
+        zoom_helper.pasang_ctrl_scroll_zoom(
+            self.tabel_manifest, self._ubah_zoom_tabel_manifest,
+        )
         self.tabel_manifest.horizontalHeader().sectionResized.connect(
             lambda: self.simpan_lebar_kolom(self.tabel_manifest)
         )
@@ -917,15 +957,16 @@ class TabManifest(QWidget):
         return value
 
     def _alignment_cell_resi_manifest(self, column):
-        if column in (self.KOL_KOLI, self.KOL_BERAT, self.KOL_CBM):
-            return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        if column == self.KOL_TGL_MASUK:
-            return Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-        return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        try:
+            return self._ALIGNMENT_RESI_MANIFEST[column]
+        except IndexError:
+            return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+
 
     @staticmethod
     def _buat_editor_keterangan_manifest(teks=""):
-        editor = QLineEdit()
+        editor = EditableOnDoubleClickLineEdit()
         editor.setObjectName("manifestKetCell")
         editor.setFrame(False)
         editor.setPlaceholderText("Ket...")
@@ -934,7 +975,7 @@ class TabManifest(QWidget):
         )
         if teks:
             editor.setText(str(teks).strip().upper())
-        atur_tinggi_input(editor)
+        atur_editor_sel(editor)
         return editor
 
     def _isi_baris_resi_manifest(self, row):
@@ -1029,7 +1070,19 @@ class TabManifest(QWidget):
             tabel.viewport().update()
             self._sedang_memuat_tabel = False
 
-    def _buat_item_histori_manifest(self, row, parents, is_dark):
+    def _judul_grup_histori_manifest(self, tanggal_raw, tahun_terpilih):
+        """Menentukan judul grup bulan histori tanpa mencampur antar tahun."""
+        raw = str(tanggal_raw or "").strip()
+        match = re.match(r"^(\d{4})-(\d{2})", raw)
+        tahun = match.group(1) if match else ""
+        bulan = match.group(2) if match else ""
+        nama_bulan = self.NAMA_BULAN.get(bulan, "Tidak Diketahui")
+
+        if str(tahun_terpilih or "").strip() == "Semua" and tahun:
+            return f"{nama_bulan} {tahun}"
+        return nama_bulan
+
+    def _buat_item_histori_manifest(self, row, parents, is_dark, tahun_terpilih):
         row = tuple(row or ())
         tanggal_raw = str(row[0] or "") if len(row) > 0 else ""
         manifest_id = str(row[1] or "") if len(row) > 1 else ""
@@ -1039,8 +1092,7 @@ class TabManifest(QWidget):
         note_manifest = str(row[5] or "") if len(row) > 5 else ""
 
         tanggal_ui = format_tanggal_ke_ui(tanggal_raw)
-        bulan = tanggal_ui[3:5] if len(tanggal_ui) >= 5 else ""
-        title = f"{self.NAMA_BULAN.get(bulan, 'Tidak Diketahui')}"
+        title = self._judul_grup_histori_manifest(tanggal_raw, tahun_terpilih)
         if title not in parents:
             parents[title] = QTreeWidgetItem(self.list_histori)
             parents[title].setText(0, title)
@@ -1092,10 +1144,35 @@ class TabManifest(QWidget):
                 self.cb_tahun_filter.currentText(),
             ) or []
             parents = {}
+            tahun_terpilih = self.cb_tahun_filter.currentText()
             for row in rows:
-                self._buat_item_histori_manifest(row, parents, is_dark)
+                self._buat_item_histori_manifest(
+                    row,
+                    parents,
+                    is_dark,
+                    tahun_terpilih,
+                )
 
-            self.list_histori.expandAll()
+            # Default UX: bulan berjalan terbuka, bulan lainnya tertutup.
+            # Saat filter "Semua" dipakai, pastikan yang terbuka adalah
+            # bulan berjalan pada tahun berjalan, bukan bulan yang sama
+            # dari tahun sebelumnya.
+            tahun_sekarang = str(QDate.currentDate().year())
+            bulan_sekarang = f"{QDate.currentDate().month():02d}"
+            if tahun_terpilih == "Semua":
+                judul_bulan_berjalan = self._judul_grup_histori_manifest(
+                    f"{tahun_sekarang}-{bulan_sekarang}-01",
+                    tahun_terpilih,
+                )
+            else:
+                judul_bulan_berjalan = self.NAMA_BULAN.get(
+                    bulan_sekarang,
+                    "Tidak Diketahui",
+                )
+
+            for parent in parents.values():
+                parent.setExpanded(parent.text(0) == judul_bulan_berjalan)
+
             self.filter_histori(self.txt_cari_histori.text())
         except Exception as exc:
             QMessageBox.critical(
@@ -1117,7 +1194,7 @@ class TabManifest(QWidget):
 
         ukuran_pixel = font_histori.pixelSize()
         if ukuran_pixel <= 0:
-            return ukuran_font_px_ke_pt(get_global_font_sizes(0)["sz_base"])
+            return ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
 
         dpi_y = max(1, self.list_histori.logicalDpiY())
         return max(1.0, ukuran_pixel * 72.0 / dpi_y)
@@ -1297,10 +1374,10 @@ class TabManifest(QWidget):
             self._tanggal_manifest_aktif(),
         )
         if not sukses:
-            QMessageBox.critical(
+            QMessageBox.warning(
                 self,
-                "Error",
-                f"Gagal memproses manifest:\n{pesan}",
+                "Manifest Tidak Disimpan",
+                f"Manifest belum tersimpan:\n{pesan}",
             )
             return False
         return True
@@ -1474,29 +1551,20 @@ class TabManifest(QWidget):
             # Tab sekarang mengelola refresh-nya sendiri agar tidak terjadi
             # pemanggilan ganda pada perpindahan tab berikutnya.
             self.setup_autocomplete_truk()
-            return
+        else:
+            self.refresh_session_ui()
 
-        self.refresh_session_ui()
+        # Sinkronkan tabel utama/frozen setelah ukuran tab tersedia, termasuk
+        # pada tampilan pertama yang tidak menjalankan refresh_session_ui.
+        zoom_helper.sinkronkan_frozen_table(self.tabel_manifest, tertunda=True)
 
     def _terapkan_style_form_manifest(self, styles_statis):
+        """Hanya menerapkan style form, card, dan input (Tabel dikelola oleh table.py)."""
         self.panel_kiri.setStyleSheet(styles_statis["panel_kiri"])
         self.panel_kanan.setStyleSheet(styles_statis["panel_kanan"])
         self.lbl_title.setStyleSheet(styles_statis["lbl_title"])
         self.btn_proses.setStyleSheet(styles_statis["btn_proses"])
 
-        input_widgets = (
-            self.txt_jenis_truk_lain, self.txt_no_pol, self.txt_sopir,
-            self.txt_keterangan, self.txt_nama_kapal, self.txt_note_manifest,
-            self.txt_cari_histori,
-        )
-        for widget in input_widgets:
-            widget.setStyleSheet(styles_statis["style_input"])
-
-        comboboxes = (
-            self.cb_filter_wilayah,
-            self.cb_jenis_truk,
-            self.cb_tahun_filter,
-        )
         atur_tinggi_input((
             self.cb_filter_wilayah, self.txt_nama_kapal, self.txt_note_manifest,
             self.cb_jenis_truk, self.txt_jenis_truk_lain, self.txt_no_pol,
@@ -1514,63 +1582,33 @@ class TabManifest(QWidget):
 
         self.lbl_tanggal_manifest.setStyleSheet(styles_statis["label_header"])
         self.lbl_no_manifest.setStyleSheet(styles_statis["label_header"])
+        # Kedua display ini QLabel, bukan input form.
         self.txt_tanggal_manifest.setStyleSheet(styles_statis["txt_tanggal_manifest"])
         self.txt_no_manifest.setStyleSheet(styles_statis["txt_no_manifest"])
 
-    def _terapkan_zoom_tabel_manifest(self, styles_dinamis, font_dinamis, is_dark, z):
+    def _terapkan_zoom_tabel_manifest(self, is_dark, z):
+        """Zoom/font/geometri dari helper pusat; tab hanya mengatur status modul."""
         tabel = self.tabel_manifest
-        frozen_table = getattr(tabel, "frozen_table", None)
-        tabel.setUpdatesEnabled(False)
-        if frozen_table is not None:
-            frozen_table.setUpdatesEnabled(False)
-
+        zoom_sebelumnya = self._sedang_menerapkan_zoom
+        self._sedang_menerapkan_zoom = True
         try:
-            tabel.setStyleSheet(styles_dinamis["style_tabel"])
-            update_status_delegate_theme(tabel, is_dark)
-            if frozen_table is not None:
-                update_status_delegate_theme(frozen_table, is_dark)
-
-            ukuran_pt = ukuran_font_px_ke_pt(font_dinamis["sz_base"])
-            font = tabel.font()
-            font.setPointSizeF(ukuran_pt)
-            tabel.setFont(font)
-
-            header_font = tabel.horizontalHeader().font()
-            header_font.setPointSizeF(ukuran_pt)
-            tabel.horizontalHeader().setFont(header_font)
-            tabel.verticalHeader().setFont(header_font)
-
-            faktor = zoom_helper.dapatkan_faktor_geometri(z)
-            tinggi_baris = max(MANIFEST_TABLE_ROW_MIN_HEIGHT, round(MANIFEST_TABLE_ROW_BASE_HEIGHT * faktor))
-            tabel.verticalHeader().setDefaultSectionSize(tinggi_baris)
-
-            if frozen_table is not None:
-                frozen_font = frozen_table.font()
-                frozen_font.setPointSizeF(ukuran_pt)
-                frozen_table.setFont(frozen_font)
-                frozen_table.horizontalHeader().setFont(header_font)
-                frozen_table.verticalHeader().setFont(header_font)
-                frozen_table.verticalHeader().setDefaultSectionSize(tinggi_baris)
-
-            header = tabel.horizontalHeader()
-            status_signal_sebelumnya = header.blockSignals(True)
-            self._sedang_menerapkan_zoom = True
-            try:
-                zoom_helper.skalakan_kolom_tableview(tabel, z)
-            finally:
-                self._sedang_menerapkan_zoom = False
-                header.blockSignals(status_signal_sebelumnya)
+            for target in (tabel, getattr(tabel, "frozen_table", None)):
+                if target is not None:
+                    update_status_delegate_theme(target, is_dark)
+            zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=z)
         finally:
-            if frozen_table is not None:
-                frozen_table.setUpdatesEnabled(True)
-            tabel.setUpdatesEnabled(True)
-            zoom_helper.sinkronkan_frozen_table(tabel, tertunda=True)
+            self._sedang_menerapkan_zoom = zoom_sebelumnya
+
+    def _ubah_zoom_tabel_manifest(self, arah):
+        z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
+        z = zoom_helper.simpan_zoom_level(self.__class__.__name__, z + int(arah))
+        self._terapkan_zoom_tabel_manifest(self._tema_gelap_aktif(), z)
 
     def _terapkan_style_histori_manifest(self, styles_statis, is_dark):
         self.list_histori.setStyleSheet(styles_statis["list_histori"])
         font_histori = self.list_histori.font()
         font_histori.setPointSizeF(
-            ukuran_font_px_ke_pt(get_global_font_sizes(0)["sz_base"])
+            ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
         )
         self.list_histori.setFont(font_histori)
         self._sinkronkan_font_item_histori(is_dark)
@@ -1578,22 +1616,14 @@ class TabManifest(QWidget):
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
         z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
-        font_dinamis = get_global_font_sizes(z)
         styles_statis = konversi_style_font_ke_point(
-            get_manifest_styles(is_dark, self.is_edit_mode, 0)
-        )
-        styles_dinamis = konversi_style_font_ke_point(
-            get_manifest_styles(is_dark, self.is_edit_mode, z)
+            get_manifest_styles(is_dark, self.is_edit_mode)
         )
 
         self._terapkan_style_form_manifest(styles_statis)
-        self._terapkan_zoom_tabel_manifest(
-            styles_dinamis,
-            font_dinamis,
-            is_dark,
-            z,
-        )
+        self._terapkan_zoom_tabel_manifest(is_dark, z)
         self._terapkan_style_histori_manifest(styles_statis, is_dark)
+        terapkan_style_input_global(self, is_dark)
 
     def _settings_kolom(self):
         return QSettings(
@@ -1630,7 +1660,7 @@ class TabManifest(QWidget):
                 MANIFEST_COLUMN_WIDTH_MAX,
             )
             if index == self.KOL_CHECK:
-                lebar_asli = MANIFEST_CHECK_COLUMN_WIDTH
+                lebar_asli = self.DEFAULT_COLUMN_WIDTHS[0]
             lebar_dasar.append(lebar_asli)
 
             if hasattr(tabel, "_zoom_base_column_widths"):
@@ -1664,7 +1694,7 @@ class TabManifest(QWidget):
         try:
             for index in range(tabel.columnCount()):
                 width = (
-                    MANIFEST_CHECK_COLUMN_WIDTH
+                    self.DEFAULT_COLUMN_WIDTHS[0]
                     if index == self.KOL_CHECK
                     else base_widths[index]
                 )
@@ -1672,7 +1702,7 @@ class TabManifest(QWidget):
 
             tabel._zoom_base_column_widths = {
                 index: int(
-                    MANIFEST_CHECK_COLUMN_WIDTH
+                    self.DEFAULT_COLUMN_WIDTHS[0]
                     if index == self.KOL_CHECK
                     else base_widths[index]
                 )
@@ -1706,6 +1736,8 @@ class TabManifest(QWidget):
                 parent_visible = parent_visible or match
 
             parent.setHidden(not parent_visible)
+            if keyword and parent_visible:
+                parent.setExpanded(True)
 
     def buka_menu_klik_kanan_histori(self, pos):
         item = self.list_histori.itemAt(pos)

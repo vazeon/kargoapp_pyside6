@@ -21,12 +21,16 @@ from PySide6.QtWidgets import (
 import services.database_service as db_service
 
 from themes.modules.kontak_armada import get_armada_styles
+from utils.input_style_helper import (
+    atur_tinggi_input,
+    paksa_kapital_lineedit as helper_paksa_kapital_lineedit,
+    terapkan_style_input_global,
+)
 
-from utils.typography import get_master_font, get_global_font_sizes_pt
+from utils.typography import get_master_font, get_fixed_font_sizes_pt
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 import utils.zoom as zoom_helper
-from utils.widget_helpers import atur_tinggi_input, paksa_kapital_lineedit as helper_paksa_kapital_lineedit
 from utils.modules.armada_metrics import (
     ARMADA_ACTION_BUTTON_INITIAL_HEIGHT,
     ARMADA_ACTION_BUTTON_MIN_HEIGHT,
@@ -87,10 +91,14 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self._sedang_menerapkan_zoom = False
         self._sedang_menerapkan_tema = False
         self._identitas_terpilih = ""
-        self._lewati_refresh_show_pertama = False
 
-        # Menunda penyimpanan sampai pengguna selesai menggeser header.
-        # Ini mencegah QSettings ditulis berkali-kali selama proses drag.
+        # Debounce Timer untuk Pencarian (250ms)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(lambda: self.filter_tabel_truk(self.input_cari.text()))
+
+        # Debounce Timer untuk Lebar Kolom
         self._timer_simpan_lebar = QTimer(self)
         self._timer_simpan_lebar.setSingleShot(True)
         self._timer_simpan_lebar.setInterval(250)
@@ -109,9 +117,13 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self._bangun_panel_editor_truk()
         self._konfigurasi_panel()
 
+        zoom_helper.pasang_ctrl_scroll_zoom(
+            self.tabel_truk,
+            self._ubah_zoom_ctrl_scroll,
+        )
+
         self.atur_mode("IDLE")
         self.refresh_session_ui()
-        self._lewati_refresh_show_pertama = True
 
     def _buat_input_kapital(self, placeholder):
         widget = QLineEdit()
@@ -142,14 +154,14 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         header_layout = QHBoxLayout()
         self.label_judul = QLabel("List Data Truk")
         self.label_judul.setFont(
-            _buat_font_pt(get_global_font_sizes_pt(0)["sz_title"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["sz_title"], tebal=True)
         )
         header_layout.addWidget(self.label_judul)
         header_layout.addStretch()
 
         self.input_cari = self._buat_input_kapital("Cari truk...")
         self.input_cari.setFixedWidth(ARMADA_SEARCH_WIDTH)
-        self.input_cari.textChanged.connect(self.filter_tabel_truk)
+        self.input_cari.textChanged.connect(lambda: self._search_timer.start())
         header_layout.addWidget(self.input_cari)
         layout.addLayout(header_layout)
 
@@ -240,7 +252,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
 
         self.lbl_judul_kanan = QLabel("Detail / Editor truk")
         self.lbl_judul_kanan.setFont(
-            _buat_font_pt(get_global_font_sizes_pt(0)["sz_total"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["sz_total"], tebal=True)
         )
         self.lbl_judul_kanan.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_judul_kanan)
@@ -255,7 +267,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
     # --- LIFECYCLE & REFRESH ---
 
     def refresh_session_ui(self):
-        """Memuat ulang tabel tanpa menghilangkan filter dan state editor aktif."""
+        """Memuat ulang data sesuai session/cabang aktif tanpa menghapus state editor."""
         self.refresh_tabel()
 
         if self.mode == "PREVIEW" and self._identitas_terpilih:
@@ -263,14 +275,8 @@ class SubTabTruk(QWidget, ZoomTableMixin):
                 self.atur_mode("IDLE")
 
     def showEvent(self, event):
+        """Lifecycle UI saja; refresh data dikelola oleh coordinator TabArmada."""
         super().showEvent(event)
-
-        # init_ui sudah memuat data. Hindari query kedua pada show pertama.
-        if self._lewati_refresh_show_pertama:
-            self._lewati_refresh_show_pertama = False
-            return
-
-        self.refresh_session_ui()
 
     # --- MODE STATE & FORM ---
 
@@ -313,7 +319,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self.on_jenis_truk_changed(self.combo_jenis.currentIndex())
 
     def on_jenis_truk_changed(self, _index=None):
-        """Menampilkan input khusus hanya ketika pilihan Lainnya digunakan."""
         pilih_lainnya = self.combo_jenis.currentText().strip() == "Lainnya..."
         self.lbl_jenis_lain.setVisible(pilih_lainnya)
         self.input_jenis_lain.setVisible(pilih_lainnya)
@@ -322,7 +327,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             self.input_jenis_lain.clear()
 
     def ambil_jenis_truk_final(self):
-        """Menghasilkan nama jenis truk yang siap disimpan ke database."""
         pilihan = self.combo_jenis.currentText().strip()
         if pilihan == "Lainnya...":
             return self.input_jenis_lain.text().strip().upper()
@@ -331,7 +335,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         return pilihan
 
     def set_jenis_truk_form(self, jenis):
-        """Memilih jenis baku atau mengalihkan jenis tidak umum ke Lainnya."""
         jenis_bersih = str(jenis or "").strip()
         if not jenis_bersih:
             self.combo_jenis.setCurrentIndex(0)
@@ -409,31 +412,19 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         )
 
     def jadwalkan_simpan_lebar_kolom(self, *_args):
-        """
-        Menyimpan lebar setelah proses drag selesai.
-
-        Resize yang berasal dari proses zoom tidak boleh dianggap sebagai
-        perubahan manual pengguna.
-        """
         if self._sedang_menerapkan_zoom:
             return
-
         self._timer_simpan_lebar.start()
 
     def _simpan_lebar_kolom_sekarang(self):
         if not hasattr(self, "tabel_truk"):
             return
-
         self.simpan_lebar_kolom(self.tabel_truk)
 
     def simpan_lebar_kolom(self, tabel):
         if self._sedang_menerapkan_zoom:
             return
 
-        # Penting: zoom SubTabTruk mengikuti key TabArmada.
-        # Dengan key yang sama, lebar tampilan dikembalikan dahulu ke
-        # ukuran dasar sebelum disimpan, sehingga tidak membesar/mengecil
-        # berulang kali ketika tab dibuka kembali.
         widths = self._lebar_dasar_tabel(
             tabel,
             zoom_key="TabArmada",
@@ -555,6 +546,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
 
     def refresh_tabel(self):
         tabel = self.tabel_truk
+        tabel.setUpdatesEnabled(False)
         tabel.blockSignals(True)
         tabel.setRowCount(0)
         try:
@@ -565,6 +557,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             print(f"Error Load Tabel truk: {exc}")
         finally:
             tabel.blockSignals(False)
+            tabel.setUpdatesEnabled(True)
 
     def _data_baris_truk(self, row):
         return (
@@ -700,8 +693,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         )
         for widget in input_form:
             widget.setFont(font_input)
-            key = "input_locked" if widget.isReadOnly() or not widget.isEnabled() else "input_normal"
-            widget.setStyleSheet(st[key])
         self.input_cari.setFont(font_input)
         self.input_cari.setFixedWidth(ARMADA_SEARCH_WIDTH)
         self.combo_jenis.setFont(font_input)
@@ -722,15 +713,13 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self.btn_pilih_foto.setStyleSheet(st["btn_foto"])
 
     def _terapkan_tema_statis_armada(self, st):
-        """Terapkan tema statis form Armada; hanya tabel yang mengikuti zoom."""
-        ukuran = get_global_font_sizes_pt(0)
+        ukuran = get_fixed_font_sizes_pt()
         self.layout().setContentsMargins(*ARMADA_PAGE_MARGINS)
         self.panel_kiri.layout().setContentsMargins(*ARMADA_MASTER_PANEL_MARGINS)
         self.panel_kanan.layout().setContentsMargins(*ARMADA_EDITOR_PANEL_MARGINS)
         for widget, key in (
             (self.panel_kanan, "panel_kanan"),
             (self.label_judul, "label_judul"),
-            (self.input_cari, "input_normal"),
             (self.lbl_judul_kanan, "label_judul_kanan"),
             (self.lbl_preview_foto, "preview_foto"),
         ):
@@ -739,6 +728,12 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         self.lbl_judul_kanan.setFont(_buat_font_pt(ukuran["sz_total"], tebal=True))
         font_base = self._terapkan_font_form_truk(st, ukuran)
         self._terapkan_style_tombol_truk(st, ukuran, font_base)
+
+    def _ubah_zoom_ctrl_scroll(self, arah):
+        nama_zoom = "TabArmada"
+        z = zoom_helper.dapatkan_zoom_level(nama_zoom)
+        z = zoom_helper.simpan_zoom_level(nama_zoom, z + int(arah))
+        self.sesuaikan_tema_lokal()
 
     def sesuaikan_tema_lokal(self):
         if self._sedang_menerapkan_tema:
@@ -756,8 +751,8 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             st = get_armada_styles(is_dark, self.mode)
 
             self._terapkan_tema_statis_armada(st)
+            terapkan_style_input_global(self, is_dark)
 
-            # Hanya tabel Truk yang mengikuti level zoom TabArmada.
             self._sedang_menerapkan_zoom = True
             try:
                 zoom_helper.terapkan_zoom_tabel(

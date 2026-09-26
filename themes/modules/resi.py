@@ -1,6 +1,6 @@
 # themes/modules/resi.py
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font, get_global_font_sizes
+from utils.typography import get_master_font, get_fixed_font_sizes
 
 # Caller ukuran font khusus Tab Resi.
 # Ubah nilai di sini untuk menyesuaikan tipografi tanpa menyentuh kode widget.
@@ -17,41 +17,38 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
 
 
 def get_resi_static_styles(is_dark: bool) -> dict:
-    """Style awal yang dapat dipakai sebelum proses refresh tema lengkap."""
-    ui = get_theme_colors(is_dark)["ui"]
+    """Style statis Tab Resi yang aman dipakai sebelum refresh tema."""
     return {
-        "scroll_kiri": f"""
-            QScrollArea {{
+        "scroll_kiri": """
+            QScrollArea {
                 background-color: transparent;
                 border: none;
-            }}
-        """,
-        "rekening_card": f"""
-            background-color: {_warna_tema(is_dark, "#1d2024", "#f8fafc")};
-            border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
-            border-radius: 6px;
+            }
         """,
     }
 
 
-def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
-    """Style dinamis kartu dan kelompok rekening pada TabResi."""
-    ui = get_theme_colors(is_dark)["ui"]
+def get_resi_rekening_styles(is_dark: bool) -> dict:
+    """Style khusus kelompok dan isi kartu rekening pada Tab Resi."""
+    border = _warna_tema(is_dark, "#3f434d", "#cbd5e1")
+    font = get_master_font()
 
     return {
         "group_box": f"""
             QGroupBox {{
-                font-weight: 500;
+                font-family: '{font}';
                 font-size: {UKURAN_FONT_LABEL}px;
-                font-family: '{get_master_font()}';
+                font-weight: 500;
                 color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
-                border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
+
+                border: 1px solid {border};
                 border-radius: 8px;
                 margin-top: 3px;
                 padding-top: 20px;
-                background-color: {_warna_tema(is_dark, "#181a1e", "#ffffff")};
             }}
+
             QGroupBox::title {{
+                font-family: '{font}';
                 font-size: {UKURAN_FONT_LABEL}px;
                 font-weight: 500;
                 subcontrol-origin: margin;
@@ -66,7 +63,7 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
             font-size: {UKURAN_FONT_CARD_REKENING_BANK}px;
             border: none;
             background: transparent;
-            font-family: '{get_master_font()}';
+            font-family: '{font}';
         """,
         "label_bottom": f"""
             color: {_warna_tema(is_dark, "#a8b3c5", "#64748b")};
@@ -74,11 +71,11 @@ def get_resi_rekening_styles(is_dark: bool, z: int = 0) -> dict:
             font-weight: normal;
             border: none;
             background: transparent;
-            font-family: '{get_master_font()}';
+            font-family: '{font}';
         """,
         "card": f"""
             background-color: {_warna_tema(is_dark, "#1d2024", "#f8fafc")};
-            border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
+            border: 1px solid {border};
             border-radius: 6px;
         """,
     }
@@ -90,7 +87,6 @@ def get_resi_detail_barang_theme(
 ) -> dict:
     """Warna dan style khusus tabel Detail Barang tanpa mengubah scrollbar."""
     ui = get_theme_colors(is_dark)["ui"]
-    placeholder = ui["placeholder_text"]
 
     return {
         "background": ui["field_background"],
@@ -129,15 +125,12 @@ def get_btn_simpan_cetak_style() -> str:
 
 def get_resi_styles(
         is_dark: bool,
-        z: int = 0,
 ) -> dict:
     """Menghasilkan seluruh style UI untuk TabResi."""
-    sizes = get_global_font_sizes(z)
+    sizes = get_fixed_font_sizes()
     sz_title = sizes["sz_title"]
-    sz_tag = sizes["sz_tag"]
     sz_sm = sizes["sz_sm"]
     sz_base = sizes["sz_base"]
-    sz_input = sizes["sz_input"]
     sz_total = sizes["sz_total"]
 
     ui = get_theme_colors(is_dark)["ui"]
@@ -209,7 +202,7 @@ def get_resi_styles(
         }}
     """
 
-    rekening_styles = get_resi_rekening_styles(is_dark, z)
+    rekening_styles = get_resi_rekening_styles(is_dark)
     static_styles = get_resi_static_styles(is_dark)
 
     return {

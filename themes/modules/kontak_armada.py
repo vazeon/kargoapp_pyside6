@@ -62,7 +62,7 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
     styles = {
         "panel_kanan": f"""
             QFrame#panelEditor {{
-                background-color: {ui["panel_background"]};
+                background-color: {ui["main_background"]};
                 border-radius: 8px;
                 border: 1px solid {ui["panel_border"]};
             }}

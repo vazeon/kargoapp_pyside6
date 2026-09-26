@@ -18,6 +18,7 @@ class FrozenTableWidget(QTableWidget):
         self.frozen_cols = frozen_cols
         self.fixed_cols = fixed_cols or []
         self.fixed_widths = fixed_widths or {}
+        self._syncing_frozen_geometry = False
 
         self.frozen_table = QTableView(self)
         self._konfigurasi_frozen_table()
@@ -26,6 +27,8 @@ class FrozenTableWidget(QTableWidget):
 
     def _konfigurasi_frozen_table(self):
         frozen = self.frozen_table
+        # Penanda agar lapisan tema mengenali view kolom beku.
+        frozen.setProperty("tableFrozenView", True)
         frozen.setFrameShape(QFrame.Shape.NoFrame)
         frozen.setModel(self.model())
         frozen.setSelectionModel(self.selectionModel())
@@ -69,6 +72,7 @@ class FrozenTableWidget(QTableWidget):
         frozen_scroll = frozen.verticalScrollBar()
 
         main_header.geometriesChanged.connect(self._sinkronkan_tinggi_header)
+        frozen_header.geometriesChanged.connect(self._sinkronkan_tinggi_header)
         main_header.sectionResized.connect(self.update_section_width)
         frozen_header.sectionResized.connect(self.update_main_section_width)
 
@@ -80,7 +84,7 @@ class FrozenTableWidget(QTableWidget):
         self.horizontalScrollBar().valueChanged.connect(self.update_shadow)
 
     def _sinkronkan_tinggi_header(self):
-        self.frozen_table.horizontalHeader().setFixedHeight(self.horizontalHeader().height())
+        self.update_frozen_geometry()
 
     def _sinkronkan_tinggi_baris_ke_frozen(self, logical_index, _old_size, new_size):
         frozen_vheader = self.frozen_table.verticalHeader()
@@ -123,19 +127,56 @@ class FrozenTableWidget(QTableWidget):
         self.update_frozen_geometry()
 
     def update_frozen_geometry(self):
-        total_w = sum(
-            self.columnWidth(col)
-            for col in range(self.frozen_cols)
-            if not self.isColumnHidden(col)
-        )
-        header_height = self.horizontalHeader().height()
-        self.frozen_table.horizontalHeader().setFixedHeight(header_height)
-        self.frozen_table.setGeometry(
-            self.verticalHeader().width() + self.frameWidth(),
-            self.frameWidth(),
-            total_w,
-            self.viewport().height() + header_height,
-        )
+        """Sejajarkan viewport kedua view, termasuk inset nyata dari style Qt."""
+        frozen = getattr(self, "frozen_table", None)
+        if frozen is None or self._syncing_frozen_geometry:
+            return
+
+        self._syncing_frozen_geometry = True
+        try:
+            total_w = sum(
+                self.columnWidth(col)
+                for col in range(min(self.frozen_cols, self.columnCount()))
+                if not self.isColumnHidden(col)
+            )
+
+            header = self.horizontalHeader()
+            frozen_header = frozen.horizontalHeader()
+            header_height = 0 if header.isHidden() else header.height()
+            frozen_header.setVisible(not header.isHidden())
+            frozen_header.setFixedHeight(header_height)
+            frozen_header.setHighlightSections(header.highlightSections())
+            frozen_header.setSectionsClickable(header.sectionsClickable())
+
+            # QSS/tema dapat memberi inset di luar tinggi header. Ukur viewport
+            # view beku sendiri; jangan menganggap offset-nya (0, header_height).
+            # Ulangi terbatas karena perubahan ukuran dapat memicu layout Qt lagi.
+            for _ in range(3):
+                frozen.updateGeometries()
+                main_rect = self.viewport().geometry()
+                frozen_rect = frozen.viewport().geometry()
+                left = frozen_rect.x()
+                top = frozen_rect.y()
+                right = max(0, frozen.width() - left - frozen_rect.width())
+                bottom = max(0, frozen.height() - top - frozen_rect.height())
+                target = (
+                    main_rect.x() - left,
+                    main_rect.y() - top,
+                    total_w + left + right,
+                    main_rect.height() + top + bottom,
+                )
+                current = (frozen.x(), frozen.y(), frozen.width(), frozen.height())
+                if current == target:
+                    break
+                frozen.setGeometry(*target)
+
+            frozen.raise_()
+        finally:
+            self._syncing_frozen_geometry = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self.update_frozen_geometry)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -151,6 +192,7 @@ class FrozenTableWidget(QTableWidget):
             self.frozen_table.setColumnHidden(col, True)
 
         if count <= 0:
+            self.update_frozen_geometry()
             return
         for col in self.fixed_cols:
             if col >= count:
@@ -164,6 +206,8 @@ class FrozenTableWidget(QTableWidget):
                 self.setColumnWidth(col, width)
                 self.frozen_table.setColumnWidth(col, width)
 
+        self.update_frozen_geometry()
+
     def setColumnWidth(self, column, width):
         super().setColumnWidth(column, width)
         if column < self.frozen_cols:
@@ -174,18 +218,34 @@ class FrozenTableWidget(QTableWidget):
         super().setRowHidden(row, hide)
         self.frozen_table.setRowHidden(row, hide)
 
+    def setColumnHidden(self, column, hide):
+        super().setColumnHidden(column, hide)
+        frozen = getattr(self, "frozen_table", None)
+        if frozen is not None:
+            frozen.setColumnHidden(column, hide or column >= self.frozen_cols)
+            self.update_frozen_geometry()
+
+    def setWordWrap(self, enabled):
+        super().setWordWrap(enabled)
+        frozen = getattr(self, "frozen_table", None)
+        if frozen is not None:
+            frozen.setWordWrap(enabled)
+
+    def setEditTriggers(self, triggers):
+        super().setEditTriggers(triggers)
+        frozen = getattr(self, "frozen_table", None)
+        if frozen is not None:
+            frozen.setEditTriggers(triggers)
+
     def setStyleSheet(self, styleSheet):
-        style_frozen = styleSheet.replace("QTableWidget", "QTableView")
-        css_center_checkbox = """
-            QTableWidget::indicator, QTableView::indicator {{
-                subcontrol-origin: padding;
-                subcontrol-position: center;
-            }}
-        """
-        self.frozen_table.setStyleSheet(style_frozen + css_center_checkbox)
-        self.frozen_table.setPalette(self.palette())
-        self.frozen_table.setGridStyle(self.gridStyle())
-        super().setStyleSheet(styleSheet + css_center_checkbox)
+        # Helper hanya menyinkronkan; isi QSS sepenuhnya milik lapisan tema.
+        super().setStyleSheet(styleSheet)
+        frozen = getattr(self, "frozen_table", None)
+        if frozen is not None:
+            frozen.setStyleSheet(styleSheet)
+            frozen.setPalette(self.palette())
+            frozen.setGridStyle(self.gridStyle())
+            self.update_frozen_geometry()
 
     def setSelectionMode(self, mode):
         super().setSelectionMode(mode)

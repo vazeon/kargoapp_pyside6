@@ -52,7 +52,7 @@ THEME_COLORS = {
             "table_text": "#0f172a",
             "table_grid": "#e2e8f0",
             "table_header_background": "#243752",
-            "selection_background": "#2563eb",
+            "selection_background": "#0081db",
             "selection_text": "#ffffff",
         },
         "buku_gudang": {
@@ -99,7 +99,7 @@ THEME_COLORS = {
             "disabled_text": "#94a3b8",
         },
         "ui": {
-            "main_background": "#202124",
+            "main_background": "#191a1c",
             "text_primary": "#ffffff",
             "text_body": "#f8fafc",
             "text_muted": "#94a3b8",
@@ -123,7 +123,7 @@ THEME_COLORS = {
             "table_text": "#f8fafc",
             "table_grid": "#334155",
             "table_header_background": "#1e293b",
-            "selection_background": "#3b82f6",
+            "selection_background": "#0081db",
             "selection_text": "#ffffff",
         },
         "buku_gudang": {

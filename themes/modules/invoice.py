@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Dict
 
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font
+from themes.components.table import get_table_styles, TableMetrics
+from utils.typography import get_master_font, ukuran_font_px_ke_pt
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
@@ -12,9 +13,10 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     return gelap if is_dark else terang
 
 
-def get_invoice_dialog_styles(size_total: int) -> Dict[str, str]:
+def get_invoice_dialog_styles(size_total: int, is_dark: bool = False) -> Dict[str, str]:
     """Menghasilkan QSS khusus dialog pengaturan kolom Invoice."""
     return {
+        "table": get_table_styles(is_dark),
         "title": f"""
             font-size:{size_total}px;
             font-weight:bold;
@@ -33,55 +35,16 @@ def get_invoice_styles(
     """Menghasilkan seluruh style UI Invoice berdasarkan tema dan zoom."""
     ui = get_theme_colors(is_dark)["ui"]
 
-    history_qss = f"""
-        QTableWidget {{
-            background:{ui["table_background"]};
-            alternate-background-color:{ui["table_alternate_background"]};
-            color:{ui["table_text"]};
-            gridline-color:{ui["table_grid"]};
-            font-size:{size_base}px;
-            font-family:'{get_master_font()}';
-        }}
-        QHeaderView::section {{
-            background:{ui["table_header_background"]};
-            color:{_warna_tema(is_dark, "#f8fafc", "#ffffff")};
-            border:1px solid {_warna_tema(is_dark, "#334155", "#cbd5e1")};
-            font-weight:bold;
-            padding:7px;
-        }}
-        QTableWidget::item:selected {{
-            background:{ui["selection_background"]};
-            color:{ui["selection_text"]};
-        }}
-        QTableWidget::item:hover:!selected {{
-            background: transparent;
-        }}
-    """
-
-    editor_qss = f"""
-        QTableWidget {{
-            background:{ui["field_background"]};
-            alternate-background-color:{_warna_tema(is_dark, "#25282e", "#f8fafc")};
-            color:{ui["table_text"]};
-            gridline-color:{ui["field_border"]};
-            font-size:{size_base}px;
-            font-family:'{get_master_font()}';
-        }}
-        QHeaderView::section {{
-            background:#2563eb;
-            color:white;
-            border:1px solid #1d4ed8;
-            font-weight:bold;
-            padding:7px;
-        }}
-        QTableWidget::item:selected {{
-            background:{_warna_tema(is_dark, "#0ea5e9", "#bfdbfe")};
-            color:{_warna_tema(is_dark, "#ffffff", "#0f172a")};
-        }}
-        QTableWidget::item:hover:!selected {{
-            background: transparent;
-        }}
-    """
+    # InvoiceSheet memakai seleksi sel biasa (copy/paste), bukan mode formulir.
+    # Semua aturan tabel bersumber dari komponen bersama.
+    table_qss = get_table_styles(
+        is_dark,
+        metrics=TableMetrics(
+            font_family=get_master_font(),
+            font_size_pt=ukuran_font_px_ke_pt(size_base),
+        ),
+    )
+    history_qss = editor_qss = table_qss
 
     button_qss = f"""
         QPushButton {{

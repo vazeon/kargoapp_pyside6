@@ -1,4 +1,4 @@
-# utils/ui_scaler.py
+
 """Penerapan responsive geometry ke tree QWidget secara aman.
 
 Layer ini menangani geometry umum (constraint widget, layout, spacer, icon,
@@ -294,7 +294,10 @@ class ResponsiveUIScaler(QObject):
             QEvent.Type.ChildAdded,
             QEvent.Type.Show,
             QEvent.Type.ParentChange,
-        }:
+        } or (
+            event_type == QEvent.Type.StyleChange
+            and bool(watched.property(_EXPLICIT_GEOMETRY))
+        ):
             if watched is self._root and event_type == QEvent.Type.Show:
                 self._ensure_screen_connection()
             self.schedule_apply()
@@ -327,11 +330,9 @@ class ResponsiveUIScaler(QObject):
         self._ensure_screen_connection()
 
     def _scale_widget_constraints(self, widget: QWidget, scale: float) -> None:
-        # OPTIMASI: FAST EXIT! Jika sudah di-scale pada ukuran ini, lewati
+        # QSS/theme dapat mengubah constraint walaupun scale belum berubah.
+        # Periksa geometry aktual sebelum fast-exit untuk icon/effect.
         last_scale = _property_text(widget, "_ui_scaler_last_scale")
-        if last_scale == str(scale):
-            return
-        _set_property(widget, "_ui_scaler_last_scale", str(scale))
 
         if _dalam_message_box(widget):
             return
@@ -368,10 +369,31 @@ class ResponsiveUIScaler(QObject):
                 else skalakan_px(max_h, scale=scale, minimum=max(1, target_min_h))
             )
 
-            widget.setMinimumSize(target_min_w, target_min_h)
-            widget.setMaximumSize(target_max_w, target_max_h)
+            if min_w == max_w and max_w < QT_GEOMETRY_MAX:
+                if (widget.minimumWidth() != target_min_w
+                        or widget.maximumWidth() != target_min_w):
+                    widget.setFixedWidth(target_min_w)
+            else:
+                if widget.minimumWidth() != target_min_w:
+                    widget.setMinimumWidth(target_min_w)
+                if widget.maximumWidth() != target_max_w:
+                    widget.setMaximumWidth(target_max_w)
+
+            if min_h == max_h and max_h < QT_GEOMETRY_MAX:
+                if (widget.minimumHeight() != target_min_h
+                        or widget.maximumHeight() != target_min_h):
+                    widget.setFixedHeight(target_min_h)
+            else:
+                if widget.minimumHeight() != target_min_h:
+                    widget.setMinimumHeight(target_min_h)
+                if widget.maximumHeight() != target_max_h:
+                    widget.setMaximumHeight(target_max_h)
         except RuntimeError:
             return
+
+        if last_scale == str(scale):
+            return
+        _set_property(widget, "_ui_scaler_last_scale", str(scale))
 
         if isinstance(widget, QSplitter):
             try:
@@ -598,8 +620,13 @@ class ResponsiveUIScaler(QObject):
                 pass
 
             for widget in widgets:
-                self._scale_widget_constraints(widget, self._scale)
                 self._scale_widget_stylesheet(widget, self._scale)
+                # Polish dapat menimpa min/max dari QSS tema. Constraint dari
+                # baseline eksplisit diterapkan sesudahnya, termasuk pada
+                # widget tersembunyi yang belum pernah di-polish.
+                if bool(widget.property(_EXPLICIT_GEOMETRY)):
+                    widget.ensurePolished()
+                self._scale_widget_constraints(widget, self._scale)
 
             for layout in self._iter_layouts():
                 self._scale_layout(layout, self._scale)

@@ -1,4 +1,4 @@
-# utils/printer/common.py
+
 """Komponen bersama untuk preview, cetak, dan ekspor dokumen."""
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 
 from config import DATA_CLIENT
 from utils.typography import get_master_font
-from utils.widget_helpers import atur_tinggi_input
+from utils.input_style_helper import atur_tinggi_input
 
 JENIS_RESI = "resi"
 JENIS_MANIFEST = "manifest"
@@ -214,8 +214,8 @@ class JendelaPreviewCustom(QDialog):
         sinkronkan_ukuran_dokumen(self.doc_terikat, self.printer_terikat)
         self._konfigurasi_jendela()
         layout_utama = QVBoxLayout(self)
-        layout_utama.setContentsMargins(15, 15, 15, 15)
-        layout_utama.setSpacing(10)
+        layout_utama.setContentsMargins(8, 8, 8, 8)
+        layout_utama.setSpacing(8)
         layout_utama.addLayout(self._buat_toolbar())
         self._buat_widget_preview(layout_utama)
         self.btn_cetak_sekarang.clicked.connect(self.aksi_cetak_fisik)
@@ -240,7 +240,8 @@ class JendelaPreviewCustom(QDialog):
 
     def _buat_toolbar(self):
         toolbar_layout = QHBoxLayout()
-        lbl_info = QLabel("✨ PREVIEW DOKUMEN")
+        self.lbl_info = QLabel(self._teks_judul_preview())
+        lbl_info = self.lbl_info
         lbl_info.setStyleSheet(
             f"""
                 font-weight: bold;
@@ -425,6 +426,16 @@ class JendelaPreviewCustom(QDialog):
         konfigurasi_printer(printer, self.jenis_dokumen, self.tipe_kertas)
         sinkronkan_ukuran_dokumen(self.doc_terikat, printer)
 
+    def _teks_judul_preview(self) -> str:
+        """Menghasilkan judul preview sesuai jenis dan nomor dokumen."""
+        label_jenis = {
+            JENIS_RESI: "Resi",
+            JENIS_INVOICE: "Invoice",
+            JENIS_MANIFEST: "Manifest",
+        }.get(self.jenis_dokumen, "Dokumen")
+        nomor = self.nomor_dokumen or "-"
+        return f"{label_jenis}: {nomor}"
+
     def set_identitas_dokumen(
         self,
         nomor_dokumen: str,
@@ -437,6 +448,8 @@ class JendelaPreviewCustom(QDialog):
             self.jenis_dokumen = str(jenis_dokumen).strip().lower()
         if tipe_kertas:
             self.tipe_kertas = str(tipe_kertas).strip().upper()
+        if hasattr(self, "lbl_info"):
+            self.lbl_info.setText(self._teks_judul_preview())
 
     def set_nama_resi_export(self, no_resi: str) -> None:
         """Kompatibilitas dengan pemanggilan versi lama."""
@@ -523,17 +536,41 @@ class JendelaPreviewCustom(QDialog):
 
         try:
             ukuran_dokumen = self.doc_terikat.size()
-            lebar_point = max(1.0, float(ukuran_dokumen.width()))
-            tinggi_point = max(1.0, float(ukuran_dokumen.height()))
-            skala = max(0.25, min(2.0, 12000.0 / lebar_point, 12000.0 / tinggi_point))
-            lebar = max(1, int(round(lebar_point * skala)))
-            tinggi = max(1, int(round(tinggi_point * skala)))
+            lebar_konten = max(1.0, float(ukuran_dokumen.width()))
+            tinggi_konten = max(1.0, float(ukuran_dokumen.height()))
+
+            # QTextDocument sudah memakai paintRect printer (area di dalam margin).
+            # Saat diekspor ke PNG, margin printer tidak ikut terbawa karena
+            # drawContents() menggambar langsung dari koordinat (0, 0).
+            # Tambahkan kembali margin halaman agar PNG memiliki tepi putih
+            # yang konsisten dengan preview/cetak.
+            margins = self.printer_terikat.pageLayout().margins(QPageLayout.Unit.Point)
+            margin_kiri = max(0.0, float(margins.left()))
+            margin_atas = max(0.0, float(margins.top()))
+            margin_kanan = max(0.0, float(margins.right()))
+            margin_bawah = max(0.0, float(margins.bottom()))
+
+            lebar_halaman = max(1.0, lebar_konten + margin_kiri + margin_kanan)
+            tinggi_halaman = max(1.0, tinggi_konten + margin_atas + margin_bawah)
+
+            skala = max(
+                0.25,
+                min(2.0, 12000.0 / lebar_halaman, 12000.0 / tinggi_halaman),
+            )
+            lebar = max(1, int(round(lebar_halaman * skala)))
+            tinggi = max(1, int(round(tinggi_halaman * skala)))
+
             gambar = QImage(lebar, tinggi, QImage.Format.Format_ARGB32)
             gambar.fill(Qt.GlobalColor.white)
+
             painter = QPainter(gambar)
-            painter.scale(skala, skala)
-            self.doc_terikat.drawContents(painter)
-            painter.end()
+            try:
+                painter.scale(skala, skala)
+                painter.translate(margin_kiri, margin_atas)
+                self.doc_terikat.drawContents(painter)
+            finally:
+                painter.end()
+
             if not gambar.save(file_path, "PNG"):
                 raise RuntimeError("Gambar tidak dapat disimpan pada lokasi tersebut.")
             QMessageBox.information(self, "Sukses", "Gambar berhasil disimpan di:\n" f"{file_path}")

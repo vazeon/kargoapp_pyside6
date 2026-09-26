@@ -1,5 +1,4 @@
-# tabs/tab_kontak/subtab_pengirim.py
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QTimer  # Tambahkan QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -13,6 +12,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -21,13 +21,16 @@ from PySide6.QtWidgets import (
 from config import CURRENT_SESSION
 import services.database_service as db_service
 from themes.modules.kontak_armada import get_kontak_riwayat_styles
-from utils.typography import get_global_font_sizes_pt, get_master_font
-from utils.widget_helpers import atur_tinggi_input, paksa_kapital_lineedit as helper_paksa_kapital_lineedit
+from utils.input_style_helper import (
+    atur_tinggi_input,
+    paksa_kapital_lineedit as helper_paksa_kapital_lineedit,
+    terapkan_style_input_global,
+)
+from utils.typography import get_fixed_font_sizes_pt, get_master_font
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import buat_tabel_item
 from utils.date_ind_format import format_tanggal_ke_ui
-from utils.splitter_helper import buat_splitter, perbarui_semua_style_splitter
 from utils.modules.kontak_metrics import (
     KONTAK_ADD_BUTTON_HEIGHT,
     KONTAK_ADD_DIALOG_MARGINS,
@@ -50,7 +53,6 @@ from utils.modules.kontak_metrics import (
 
 
 def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
-    """Membuat QFont berbasis point agar konsisten lintas-DPI."""
     font = QFont(get_master_font())
     font.setPointSizeF(float(ukuran_pt))
     font.setBold(tebal)
@@ -77,6 +79,18 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     def __init__(self):
         super().__init__()
         self._sedang_menerapkan_zoom = False
+        self._data_loaded = False
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self.filter_pencarian_tabel)
+
+        self._history_search_timer = QTimer(self)
+        self._history_search_timer.setSingleShot(True)
+        self._history_search_timer.setInterval(250)
+        self._history_search_timer.timeout.connect(self.filter_pencarian_histori)
+
         self.init_ui()
 
     def init_ui(self):
@@ -88,12 +102,21 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         self.panel_kiri = self._bangun_panel_pengirim()
         self.panel_kanan = self._bangun_panel_histori()
 
-        self.splitter = buat_splitter(
-            self.panel_kiri,
-            self.panel_kanan,
-            ukuran_awal=KONTAK_SPLITTER_INITIAL_SIZES,
-            parent=self,
+        zoom_helper.pasang_ctrl_scroll_zoom(
+            self.tabel_pengirim,
+            self._ubah_zoom_ctrl_scroll,
         )
+        zoom_helper.pasang_ctrl_scroll_zoom(
+            self.tabel_histori,
+            self._ubah_zoom_ctrl_scroll,
+        )
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.addWidget(self.panel_kiri)
+        self.splitter.addWidget(self.panel_kanan)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setSizes(KONTAK_SPLITTER_INITIAL_SIZES)
+        self.splitter.setHandleWidth(1)
         self.splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout_utama.addWidget(self.splitter)
 
@@ -110,10 +133,10 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
         self.lbl_judul = QLabel("List Pengirim")
         self.lbl_judul.setFont(
-            _buat_font_pt(get_global_font_sizes_pt(0)["sz_title"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["sz_title"], tebal=True)
         )
         self.txt_cari = self._buat_input_cari(
-            "Cari pengirim...", KONTAK_SEARCH_WIDTH, self.filter_pencarian_tabel
+            "Cari pengirim...", KONTAK_SEARCH_WIDTH, self._search_timer
         )
         self.btn_tambah_pengirim = QPushButton("+ Tambah Pengirim")
         self.btn_tambah_pengirim.setFixedHeight(KONTAK_ADD_BUTTON_HEIGHT)
@@ -150,10 +173,10 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
         self.lbl_judul_histori = QLabel("Riwayat Pengiriman")
         self.lbl_judul_histori.setFont(
-            _buat_font_pt(get_global_font_sizes_pt(0)["sz_total"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["sz_total"], tebal=True)
         )
         self.txt_cari_histori = self._buat_input_cari(
-            "Cari di histori ini...", KONTAK_HISTORY_SEARCH_WIDTH, self.filter_pencarian_histori
+            "Cari di histori ini...", KONTAK_HISTORY_SEARCH_WIDTH, self._history_search_timer
         )
         layout.addLayout(self._buat_header(self.lbl_judul_histori, self.txt_cari_histori))
 
@@ -174,15 +197,17 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         layout.addWidget(input_cari)
         return layout
 
-    def _buat_input_cari(self, placeholder, lebar, callback):
+    def _buat_input_cari(self, placeholder, lebar, timer_obj):
         widget = QLineEdit()
         widget.setPlaceholderText(placeholder)
         widget.setFixedWidth(lebar)
+        widget.setObjectName("globalSearchInput")
         atur_tinggi_input(widget)
+
         widget.textChanged.connect(
             lambda _text, w=widget: helper_paksa_kapital_lineedit(w)
         )
-        widget.textChanged.connect(callback)
+        widget.textChanged.connect(lambda: timer_obj.start())
         return widget
 
     @staticmethod
@@ -210,10 +235,12 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     def refresh_session_ui(self):
         self.load_data_pengirim()
         self.filter_pencarian_tabel()
+        self._data_loaded = True
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.refresh_session_ui()
+        if not self._data_loaded:
+            self.refresh_session_ui()
 
     def _tema_gelap_aktif(self):
         win = self.window()
@@ -272,6 +299,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def _buat_form_tambah_pengirim(self):
         dialog = QDialog(self)
+        terapkan_style_input_global(dialog, self._tema_gelap_aktif())
         dialog.setWindowTitle("Tambah Pengirim")
         dialog.setModal(True)
         dialog.setMinimumWidth(KONTAK_ADD_DIALOG_MIN_WIDTH)
@@ -343,6 +371,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         dialog.exec()
 
     def load_data_pengirim(self):
+        self.tabel_pengirim.setUpdatesEnabled(False)
         self.tabel_pengirim.blockSignals(True)
         self.tabel_pengirim.setRowCount(0)
         self.tabel_histori.setRowCount(0)
@@ -357,6 +386,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             print(f"Error Load Pengirim: {e}")
         finally:
             self.tabel_pengirim.blockSignals(False)
+            self.tabel_pengirim.setUpdatesEnabled(True)
 
     def _ambil_data_edit_pengirim(self, row):
         tabel = self.tabel_pengirim
@@ -417,12 +447,15 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             )
 
     def pilih_pengirim_tampilkan_histori(self, row, column):
-        self.tabel_histori.setRowCount(0)
         item_nama = self.tabel_pengirim.item(row, self.KOL_NAMA_PENGIRIM)
         if not item_nama:
             return
 
         nama_pengirim = item_nama.text()
+        self.tabel_histori.setUpdatesEnabled(False)
+        self.tabel_histori.blockSignals(True)
+        self.tabel_histori.setRowCount(0)
+
         try:
             histori_rows = db_service.ambil_histori_transaksi_by_pengirim(
                 nama_pengirim,
@@ -435,6 +468,9 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             self.filter_pencarian_histori()
         except Exception as e:
             print(f"Error Load Histori Pengirim: {e}")
+        finally:
+            self.tabel_histori.blockSignals(False)
+            self.tabel_histori.setUpdatesEnabled(True)
 
     def _settings_kolom(self):
         return QSettings(self.SETTINGS_ORGANIZATION, self.SETTINGS_APPLICATION)
@@ -478,7 +514,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         self._muat_lebar(t, "lebar_kolom_histori_pengirim", self.LEBAR_HISTORI)
 
     def _terapkan_font_dasar(self):
-        ukuran = get_global_font_sizes_pt(0)
+        ukuran = get_fixed_font_sizes_pt()
         for widget, token, tebal in (
             (self.lbl_judul, "sz_title", True),
             (self.lbl_judul_histori, "sz_total", True),
@@ -489,6 +525,12 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             widget.setFont(_buat_font_pt(ukuran[token], tebal=tebal))
         atur_tinggi_input((self.txt_cari, self.txt_cari_histori))
 
+    def _ubah_zoom_ctrl_scroll(self, arah):
+        nama_zoom = "TabKontak"
+        z = zoom_helper.dapatkan_zoom_level(nama_zoom)
+        z = zoom_helper.simpan_zoom_level(nama_zoom, z + int(arah))
+        self.sesuaikan_tema_lokal()
+
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
         z = zoom_helper.dapatkan_zoom_level("TabKontak")
@@ -497,14 +539,12 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         for widget, key in (
             (self.lbl_judul, "judul"),
             (self.lbl_judul_histori, "judul_histori"),
-            (self.txt_cari, "input"),
-            (self.txt_cari_histori, "input"),
             (self.panel_kanan, "panel"),
         ):
             widget.setStyleSheet(style[key])
 
-        perbarui_semua_style_splitter(self, is_dark)
         self._terapkan_font_dasar()
+        terapkan_style_input_global(self, is_dark)
 
         self._sedang_menerapkan_zoom = True
         try:

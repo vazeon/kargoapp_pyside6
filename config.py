@@ -3,6 +3,7 @@ import copy
 import hmac
 import json
 import sqlite3
+from supabase_client import supabase
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,6 +44,7 @@ db_aktif = _normalisasi_path_database(
 def _session_default(database_path: str) -> Dict[str, Any]:
     return {
         "username": "",
+        "auth_email": "",
         "role": "",
         "kode_cabang": "PUSAT",
         "nama_cabang": "KANTOR PUSAT",
@@ -80,7 +82,13 @@ DEV_PREFIX_RULES = {
     "DEFAULT": "SYS",
 }
 
-CENTRAL_BRANCH_ROLES = {"SUPER_ADMIN", "OWNER", "ADMIN_PUSAT", "FINANCE"}
+CENTRAL_BRANCH_ROLES = {"SUPER_ADMIN"}
+
+# Model role final: SUPER (database/RLS) dan SUPER_ADMIN (legacy UI internal).
+# ADMIN mencakup semua role non-SUPER dari data lama.
+ROLE_SUPER_DB = "SUPER"
+ROLE_SUPER_APP = "SUPER_ADMIN"
+ROLE_ADMIN_APP = "ADMIN"
 
 
 def _password_sama(password_input: Any, password_tersimpan: Any) -> bool:
@@ -90,6 +98,128 @@ def _password_sama(password_input: Any, password_tersimpan: Any) -> bool:
         str(password_tersimpan or ""),
     )
 
+def _verifikasi_login_supabase(
+    email: str,
+    password: str,
+) -> Optional[Tuple[bool, str, str]]:
+    """
+    Login melalui Supabase Auth.
+
+    Untuk tahap awal, email digunakan langsung.
+    UI tetap boleh memakai kolom "Username".
+    """
+    try:
+        response = supabase.auth.sign_in_with_password({
+            "email": str(email).strip(),
+            "password": str(password),
+        })
+
+        user = getattr(response, "user", None)
+        if user is None:
+            return False, None, None
+
+        user_id = str(getattr(user, "id", "") or "").strip()
+        if not user_id:
+            return False, None, None
+
+        profile_response = (
+            supabase
+            .table("user_profiles")
+            .select(
+                "id, username, role, nama_lengkap, kode_cabang, "
+                "status_user, auth_email"
+            )
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+
+        profile = profile_response.data
+        if not isinstance(profile, dict):
+            supabase.auth.sign_out()
+            return False, None, None
+
+        status_user = str(
+            profile.get("status_user") or "AKTIF"
+        ).strip().upper()
+
+        if status_user != "AKTIF":
+            supabase.auth.sign_out()
+            return False, None, None
+
+        kode_cabang = str(
+            profile.get("kode_cabang") or "PUSAT"
+        ).strip().upper()
+
+        role_db = str(
+            profile.get("role") or "ADMIN"
+        ).strip().upper()
+        # RLS Supabase memakai role SUPER/ADMIN.
+        # UI aplikasi lama memakai SUPER_ADMIN, jadi kita pertahankan
+        # SUPER_ADMIN secara internal agar modul-modul yang ada tetap bekerja.
+        role = ROLE_SUPER_APP if role_db == ROLE_SUPER_DB else ROLE_ADMIN_APP
+
+        username = str(
+            profile.get("username") or email
+        ).strip()
+
+        nama_lengkap = str(
+            profile.get("nama_lengkap") or username
+        ).strip()
+
+        auth_email = str(
+            profile.get("auth_email") or email
+        ).strip()
+
+        # Ambil informasi cabang dari Supabase.
+        cabang_response = (
+            supabase
+            .table("data_cabang")
+            .select(
+                "kode_cabang, nama_cabang, resi_prefix, aturan_prefix"
+            )
+            .eq("kode_cabang", kode_cabang)
+            .single()
+            .execute()
+        )
+
+        cabang = cabang_response.data or {}
+
+        nama_cabang = str(
+            cabang.get("nama_cabang") or kode_cabang
+        ).strip()
+
+        resi_prefix = str(
+            cabang.get("resi_prefix") or "INV"
+        ).strip().upper() or "INV"
+
+        aturan_prefix = _parse_prefix_rules(
+            cabang.get("aturan_prefix"),
+            resi_prefix,
+        )
+
+        CURRENT_SESSION.update({
+            "id_user": user_id,
+            "username": username,
+            "auth_email": auth_email,
+            "role": role,
+            "kode_cabang": kode_cabang,
+            "nama_cabang": nama_cabang,
+            "home_kode_cabang": kode_cabang,
+            "home_nama_cabang": nama_cabang,
+            "resi_prefix": resi_prefix,
+            "aturan_prefix": aturan_prefix,
+            "is_developer": False,
+        })
+        # Semua user aktif boleh melihat semua cabang.
+        # Role menentukan kemampuan edit, bukan cakupan cabang.
+        refresh_akses_cabang_session()
+
+        return True, role, nama_lengkap
+
+    except Exception as exc:
+        print(f"⚠️ Login Supabase gagal: {exc}")
+        return False, None, None
 
 def _verifikasi_login_developer(
     username: str,
@@ -163,50 +293,28 @@ def _ambil_cabang_diizinkan(
     home_kode_cabang: str,
     is_developer: bool = False,
 ):
-    """Ambil branch scope user. Role pusat melihat semua cabang bisnis."""
+    """Ambil seluruh cabang bisnis yang boleh ditampilkan oleh user.
+
+    Model final Kargo:
+      - ADMIN: view semua cabang, read-only.
+      - SUPER_ADMIN: view + edit semua cabang.
+      - Ganti cabang hanya mengubah cabang aktif/filter tampilan.
+
+    Hak tulis tetap ditegakkan oleh RLS Supabase (role SUPER).
+    """
     home = str(home_kode_cabang or "PUSAT").strip().upper() or "PUSAT"
-    role = str(role or "ADMIN").strip().upper() or "ADMIN"
-    user_id = str(id_user or "").strip()
 
     with sqlite3.connect(database_path, timeout=20.0) as conn:
-        if is_developer:
-            rows = conn.execute(
-                """
-                SELECT kode_cabang, nama_cabang, resi_prefix, aturan_prefix
-                FROM data_cabang
-                ORDER BY CASE WHEN kode_cabang = ? THEN 0 ELSE 1 END,
-                         nama_cabang COLLATE NOCASE, kode_cabang
-                """,
-                (home,),
-            ).fetchall()
-        elif role in CENTRAL_BRANCH_ROLES or home == "PUSAT":
-            rows = conn.execute(
-                """
-                SELECT kode_cabang, nama_cabang, resi_prefix, aturan_prefix
-                FROM data_cabang
-                WHERE UPPER(kode_cabang) <> 'DEV_SYS'
-                ORDER BY CASE WHEN kode_cabang = ? THEN 0 ELSE 1 END,
-                         nama_cabang COLLATE NOCASE, kode_cabang
-                """,
-                (home,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT c.kode_cabang, c.nama_cabang, c.resi_prefix, c.aturan_prefix
-                FROM data_cabang AS c
-                WHERE c.kode_cabang = ?
-                   OR EXISTS (
-                        SELECT 1
-                        FROM user_cabang_access AS a
-                        WHERE a.id_user = ?
-                          AND a.kode_cabang = c.kode_cabang
-                   )
-                ORDER BY CASE WHEN c.kode_cabang = ? THEN 0 ELSE 1 END,
-                         c.nama_cabang COLLATE NOCASE, c.kode_cabang
-                """,
-                (home, user_id, home),
-            ).fetchall()
+        rows = conn.execute(
+            """
+            SELECT kode_cabang, nama_cabang, resi_prefix, aturan_prefix
+            FROM data_cabang
+            WHERE UPPER(kode_cabang) <> 'DEV_SYS'
+            ORDER BY CASE WHEN UPPER(kode_cabang) = ? THEN 0 ELSE 1 END,
+                     nama_cabang COLLATE NOCASE, kode_cabang
+            """,
+            (home,),
+        ).fetchall()
 
     hasil = []
     for kode, nama, prefix, aturan in rows:
@@ -294,10 +402,13 @@ def _terapkan_session_user(username: str, row) -> str:
     resolved_prefix = str(resi_prefix or "INV").strip().upper() or "INV"
     kode_home = str(kode_cabang or "PUSAT").strip().upper()
     nama_home = str(nama_cabang or "KANTOR PUSAT").strip()
+    db_role_bersih = str(db_role or "ADMIN").strip().upper()
+    role_app = ROLE_SUPER_APP if db_role_bersih in {"SUPER", "SUPER_ADMIN"} else ROLE_ADMIN_APP
+
     CURRENT_SESSION.update({
         "id_user": str(id_user or "").strip(),
         "username": username,
-        "role": str(db_role or "").strip().upper(),
+        "role": role_app,
         "kode_cabang": kode_home,
         "nama_cabang": nama_home,
         "home_kode_cabang": kode_home,
@@ -315,10 +426,19 @@ def verifikasi_login_sistem(
     password_input: Any,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """Memverifikasi developer lebih dahulu, lalu user multi-cabang database."""
-    username = str(username_input or "").strip().upper()
+    login_identifier = str(username_input or "").strip()
+    username = login_identifier.upper()
     password = str(password_input or "").strip()
     if not username or not password:
         return False, None, None
+
+    # Login Supabase jika input berupa email.
+    # Untuk tahap pengujian, kolom Username boleh diisi email.
+    if "@" in login_identifier:
+        return _verifikasi_login_supabase(
+            login_identifier,
+            password,
+        )
 
     hasil_developer = _verifikasi_login_developer(username, password)
     if hasil_developer is not None:

@@ -1,11 +1,5 @@
 # services/database_service.py
 
-# ==============================================================================
-# DATABASE SERVICE — CLEAN MONOLITHIC / SUPABASE-READY BASELINE
-# Sections: Core | Resi | Buku Gudang | Manifest | Invoice | Master | Setting
-# Public API, SQL, return contract, and business flow are intentionally preserved.
-# ==============================================================================
-
 import sqlite3
 import json
 import logging
@@ -19,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 # Performance cache (in-memory)
 _AUTOCOMPLETE_CACHE = {}
-_INVOICE_STATUS_CACHE = {}
 
 # CLOUD PLACEHOLDER: tetap False sampai adapter/sinkronisasi Supabase benar-benar tersedia.
 USE_CLOUD = False
@@ -180,6 +173,86 @@ def sesuaikan_nomor_resi_dengan_pajak(no_resi, jenis_pajak):
         return nomor_dasar or nomor
     return nomor
 
+def _sinkronkan_metadata_invoice_resi_cursor(
+    cursor, no_resi_lama, no_resi_baru, kode_cabang
+):
+    """Perbarui referensi source_resi Invoice setelah suffix Resi berubah.
+
+    Detail Invoice sengaja tetap menjadi snapshot historis. Metadata sumber
+    harus menunjuk ke nomor aktif agar Invoice lama masih dapat dibuka dan
+    validasi revision berikutnya tidak menganggap Resi menghilang.
+    """
+    lama = str(no_resi_lama or "").strip().upper()
+    baru = str(no_resi_baru or "").strip().upper()
+    cabang = str(kode_cabang or "").strip().upper()
+    if not lama or not baru or lama == baru:
+        return 0
+
+    try:
+        rows = cursor.execute(
+            """
+            SELECT DISTINCT h.no_invoice, h.metadata_json
+            FROM invoice_header AS h
+            INNER JOIN invoice_resi AS ir ON ir.no_invoice = h.no_invoice
+            WHERE UPPER(ir.no_resi) = UPPER(?)
+              AND (ir.kode_cabang IS NULL OR UPPER(ir.kode_cabang) = ?)
+            """,
+            (lama, cabang),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table: invoice_resi" not in str(exc).lower():
+            raise
+        return 0
+
+    diperbarui = 0
+    for no_invoice, metadata_json in rows:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logger.warning(
+                "[Invoice] Metadata %s tidak valid; referensi Resi tidak diubah.",
+                no_invoice,
+            )
+            continue
+        if not isinstance(metadata, dict):
+            continue
+
+        sumber = metadata.get("source_resi")
+        if not isinstance(sumber, list):
+            continue
+
+        berubah = False
+        for item in sumber:
+            if not isinstance(item, dict):
+                continue
+            nomor_key = next(
+                (
+                    key for key in ("no_resi", "resi", "nomor_resi")
+                    if str(item.get(key) or "").strip()
+                ),
+                None,
+            )
+            if not nomor_key or str(item[nomor_key]).strip().upper() != lama:
+                continue
+            item[nomor_key] = baru
+            if "kode_cabang" in item and not item.get("kode_cabang"):
+                item["kode_cabang"] = cabang
+            berubah = True
+
+        if not berubah:
+            continue
+        cursor.execute(
+            """
+            UPDATE invoice_header
+            SET metadata_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE no_invoice = ?
+            """,
+            (json.dumps(metadata, ensure_ascii=False), no_invoice),
+        )
+        diperbarui += cursor.rowcount
+    return diperbarui
+
+
 def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
     """Ganti primary key resi sambil menjaga seluruh FK internal tetap valid.
 
@@ -213,7 +286,7 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
 
     quoted_columns = ", ".join(f'"{column}"' for column in columns)
     select_parts = [
-        "?" if column == "no_resi" else f'"{column}"'
+        "?" if column == "no_resi" else ("?" if column == "sync_id" else f'"{column}"')
         for column in columns
     ]
     cursor.execute(
@@ -223,7 +296,7 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
         FROM data_resi
         WHERE no_resi = ? AND kode_cabang = ?
         """,
-        (baru, lama, cabang),
+        (baru, str(uuid.uuid4()), lama, cabang),
     )
     if cursor.rowcount != 1:
         raise KesalahanTransaksiResi(
@@ -250,6 +323,12 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
         (baru, id_gudang_lama, id_gudang_baru, lama, cabang),
     )
 
+    # Metadata Invoice masih menunjuk nomor lama pada titik ini; perbarui
+    # sebelum relasi invoice_resi dipindahkan ke nomor baru.
+    _sinkronkan_metadata_invoice_resi_cursor(
+        cursor, lama, baru, cabang
+    )
+
     # invoice_detail tetap menjadi snapshot historis. invoice_resi adalah relasi
     # operasional ke nomor Resi aktif, sehingga ikut bergerak saat nomor berubah.
     try:
@@ -273,9 +352,11 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
             """,
             (baru, cabang, lama),
         )
-    except sqlite3.OperationalError:
-        # Kompatibilitas bila service dipakai sebelum migration v2 dijalankan.
-        pass
+    except sqlite3.OperationalError as exc:
+        # Kompatibilitas hanya untuk database legacy yang memang belum
+        # memiliki tabel relasi. Error SQL lain harus membatalkan transaksi.
+        if "no such table: invoice_resi" not in str(exc).lower():
+            raise
 
     cursor.execute(
         "DELETE FROM data_resi WHERE no_resi = ? AND kode_cabang = ?",
@@ -330,6 +411,51 @@ def ambil_histori_resi_by_tanggal(tgl_pilih, kode_cabang):
         "SELECT no_resi, penerima FROM data_resi WHERE tanggal_masuk = ? AND kode_cabang = ? ORDER BY rowid ASC",
         (tgl_pilih, kode_cabang),
     )
+
+def ambil_histori_resi_by_rentang(
+    tanggal_awal, tanggal_akhir, keyword="", kode_cabang=None
+):
+    """Ambil histori Resi dalam satu rentang tanggal, opsional berdasarkan keyword.
+
+    Filter periode dan pencarian dikerjakan langsung di SQLite agar caller tidak
+    perlu mengambil data di luar rentang lalu memfilternya di Python. Tanggal
+    disertakan pada hasil untuk kebutuhan grouping bulan di panel histori.
+    """
+    if USE_CLOUD:
+        return []
+
+    tanggal_awal = str(tanggal_awal or "").strip()
+    tanggal_akhir = str(tanggal_akhir or "").strip()
+    cabang = _kode_cabang_aktif(kode_cabang)
+    keyword = str(keyword or "").strip().casefold()
+
+    if not tanggal_awal or not tanggal_akhir or tanggal_awal > tanggal_akhir:
+        return []
+
+    query = [
+        "SELECT no_resi, penerima, tanggal_masuk",
+        "FROM data_resi",
+        "WHERE kode_cabang = ?",
+        "  AND tanggal_masuk BETWEEN ? AND ?",
+    ]
+    params = [cabang, tanggal_awal, tanggal_akhir]
+
+    if keyword:
+        pola = f"%{keyword}%"
+        query.append(
+            "  AND (LOWER(COALESCE(no_resi, '')) LIKE ? "
+            "OR LOWER(COALESCE(pengirim, '')) LIKE ? "
+            "OR LOWER(COALESCE(penerima, '')) LIKE ?)"
+        )
+        params.extend((pola, pola, pola))
+
+    query.append("ORDER BY tanggal_masuk ASC, rowid ASC")
+
+    try:
+        return _fetchall("\n".join(query), tuple(params))
+    except sqlite3.Error as exc:
+        logger.error("[Resi] Gagal mengambil histori rentang: %s", exc)
+        return []
 
 def ambil_detail_resi(no_resi):
     """Mengambil data lengkap satu resi untuk keperluan Cetak / Preview Nota.
@@ -573,10 +699,10 @@ def _insert_resi_baru(cursor, data, no_resi, kode_cabang):
             penerima, hp_penerima, alamat_penerima, kota_tujuan,
             nama_barang, berat, koli, cbm,
             ongkir_per_kg, ongkir_per_cbm, subtotal_ongkir, jenis_pajak, total_ongkir,
-            pembayaran, status_resi, foto_bukti, rincian_json, updated_at
+            pembayaran, status_resi, foto_bukti, rincian_json, sync_id, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                'DI GUDANG', 'BELUM', ?, CURRENT_TIMESTAMP)
+                'DI GUDANG', 'BELUM', ?, ?, CURRENT_TIMESTAMP)
         """,
         (
             no_resi, kode_cabang, data.get("tanggal_masuk"),
@@ -596,6 +722,7 @@ def _insert_resi_baru(cursor, data, no_resi, kode_cabang):
             data.get("total_ongkir", 0),
             str(data.get("pembayaran", "")).strip().upper(),
             data.get("rincian_json", "[]"),
+            str(data.get("sync_id") or uuid.uuid4()),
         ),
     )
 
@@ -823,12 +950,12 @@ def _ganti_rincian_resi(cursor, no_resi, data):
         cursor.execute(
             """
             INSERT INTO data_resi_detail (
-                no_resi, urutan, nama_barang, koli, berat, cbm, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                no_resi, urutan, nama_barang, koli, berat, cbm, sync_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 no_resi, urutan, item["nama"], item["qty"],
-                item["berat"], item["cbm"],
+                item["berat"], item["cbm"], str(uuid.uuid4()),
             ),
         )
     return rincian
@@ -1403,30 +1530,20 @@ def _status_penagihan_cocok(info, filter_status):
     return True
 
 def _ambil_peta_status_penagihan_batch(no_resi_list):
-    """Map Resi -> invoice terbaru dengan query terbatas pada resi aktif."""
-    daftar = [
+    """Baca status terbaru secara batch setiap reload, tanpa cache lintas edit."""
+    daftar = list(dict.fromkeys(
         str(no_resi or "").strip().upper()
         for no_resi in (no_resi_list or [])
         if str(no_resi or "").strip()
-    ]
+    ))
     if not daftar:
         return {}
 
     hasil = {}
-    belum_query = []
-    for no_resi in daftar:
-        if no_resi in _INVOICE_STATUS_CACHE:
-            hasil[no_resi] = _INVOICE_STATUS_CACHE[no_resi]
-        else:
-            belum_query.append(no_resi)
-
-    if not belum_query:
-        return hasil
-
     conn = None
     try:
         conn = get_db_connection()
-        placeholders = ",".join("?" for _ in belum_query)
+        placeholders = ",".join("?" for _ in daftar)
 
         rows = conn.execute(
             f"""
@@ -1436,7 +1553,7 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
             WHERE UPPER(ir.no_resi) IN ({placeholders})
             ORDER BY h.updated_at DESC, h.id DESC
             """,
-            [x.upper() for x in belum_query],
+            daftar,
         ).fetchall()
 
         for no_invoice, status, tanggal, created_at, no_resi in rows:
@@ -1450,7 +1567,7 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
                     "jumlah_invoice": 1,
                 }
 
-        for key in belum_query:
+        for key in daftar:
             value = hasil.get(key, {
                 "no_invoice": "",
                 "status": "",
@@ -1458,7 +1575,6 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
                 "created_at": "",
                 "jumlah_invoice": 0,
             })
-            _INVOICE_STATUS_CACHE[key] = value
             hasil[key] = value
 
         return hasil
@@ -1626,6 +1742,7 @@ def _update_detail_buku_gudang(
                 str(item_updates.get("koli", "") or "").strip(),
                 item_updates.get("berat", 0) or 0,
                 item_updates.get("cbm", 0) or 0,
+                str(uuid.uuid4()),
             ),
         )
     else:
@@ -1653,6 +1770,7 @@ def _update_buku_gudang_cursor(
     item_updates,
     detail_id,
     expected_revision,
+    detail_barang=None,
 ):
     """Jalankan isi transaksi edit Buku Gudang memakai cursor aktif."""
     row_lama = cursor.execute(
@@ -1707,6 +1825,18 @@ def _update_buku_gudang_cursor(
         cursor, no_resi, kode_cabang, item_updates, detail_id
     ):
         return False
+
+    if detail_barang is not None:
+        rincian = _ganti_rincian_resi(cursor, no_resi, {"rincian": detail_barang})
+        if rincian:
+            _sinkronkan_ringkasan_resi_dari_detail(cursor, no_resi, kode_cabang)
+        else:
+            cursor.execute(
+                """UPDATE data_resi SET nama_barang = '', koli = '', berat = 0,
+                   cbm = 0, rincian_json = '[]', is_synced = 0
+                   WHERE no_resi = ? AND kode_cabang = ?""",
+                (no_resi, kode_cabang),
+            )
 
     cursor.execute(
         """
@@ -1777,6 +1907,19 @@ def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
 
     try:
         with _db_transaction(immediate=True) as (conn, cursor):
+            row_resi = cursor.execute(
+                """
+                SELECT revision
+                FROM data_resi
+                WHERE no_resi = ? AND kode_cabang = ?
+                LIMIT 1
+                """,
+                (no_resi, kode_cabang),
+            ).fetchone()
+            if row_resi is None:
+                return False
+
+            revision_lama = int(row_resi[0] or 0)
             cursor.execute(
                 "DELETE FROM data_resi_detail WHERE no_resi = ?",
                 (no_resi,),
@@ -1796,6 +1939,7 @@ def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
                         str(item.get("koli", "") or ""),
                         item.get("berat", 0) or 0,
                         item.get("cbm", 0) or 0,
+                        str(uuid.uuid4()),
                     ),
                 )
 
@@ -1805,21 +1949,64 @@ def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
                 UPDATE data_resi
                 SET revision = revision + 1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE no_resi = ? AND kode_cabang = ?
+                WHERE no_resi = ? AND kode_cabang = ? AND revision = ?
                 """,
-                (no_resi, kode_cabang),
+                (no_resi, kode_cabang, revision_lama),
             )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError("Revision Resi berubah saat detail disimpan.")
         return True
     except Exception as exc:
         logger.error("[Buku Gudang] Sinkron detail gagal: %s", exc)
         return False
 
 
+def ambil_data_edit_buku_gudang(no_resi, kode_cabang):
+    """Baca header dan seluruh detail dalam satu snapshot, tanpa filter tabel."""
+    if USE_CLOUD:
+        return None
+    with _db_transaction() as (_, cursor):
+        cursor.execute("BEGIN")
+        snapshot = _snapshot_resi_untuk_audit(cursor, no_resi, kode_cabang)
+        if snapshot is not None and not snapshot["barang"]:
+            row = cursor.execute(
+                """SELECT nama_barang, koli, berat, cbm FROM data_resi
+                   WHERE no_resi = ? AND kode_cabang = ?""",
+                (no_resi, kode_cabang),
+            ).fetchone()
+            if row and any(row):
+                snapshot["barang"] = [dict(zip(
+                    ("nama_barang", "koli", "berat", "cbm"), row
+                ))]
+        return snapshot
+
+
+def _siapkan_daftar_detail_buku_gudang(detail_barang):
+    """API menerima angka kanonik; format lokal ditangani editor."""
+    from math import isfinite
+    hasil = []
+    for detail in detail_barang:
+        koli = str(detail.get("koli", "") or "").strip()
+        if koli and (not koli.isascii() or not koli.isdecimal()):
+            raise ValueError("Koli harus angka bulat positif atau kosong.")
+        berat = float(detail.get("berat", 0) or 0)
+        cbm = float(detail.get("cbm", 0) or 0)
+        if any(not isfinite(value) or value < 0 for value in (berat, cbm)):
+            raise ValueError("Berat dan kubik harus angka nonnegatif.")
+        hasil.append({
+            "nama_barang": str(detail.get("nama_barang", "") or "").strip().upper(),
+            "koli": koli,
+            "berat": berat,
+            "cbm": cbm,
+        })
+    return hasil
+
+
 def update_baris_buku_gudang(
     no_resi, kode_cabang, updates_dict, barang_payload=None, detail_id=None,
-    expected_revision=None,
+    expected_revision=None, *, detail_barang=None,
 ):
-    """Perbarui header Resi dan/atau satu detail barang dari Buku Gudang."""
+    """Simpan header dan detail secara atomic, dengan pemeriksaan revision."""
     if USE_CLOUD:
         return False
 
@@ -1830,7 +2017,14 @@ def update_baris_buku_gudang(
     safe_updates, item_updates = _siapkan_update_buku_gudang(
         updates_dict, barang_payload
     )
-    if not safe_updates and not item_updates:
+    if detail_barang is not None:
+        if item_updates or detail_id is not None or not isinstance(detail_barang, list):
+            return False
+        try:
+            detail_barang = _siapkan_daftar_detail_buku_gudang(detail_barang)
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            return False
+    if not safe_updates and not item_updates and detail_barang is None:
         return True
 
     conn = None
@@ -1846,6 +2040,7 @@ def update_baris_buku_gudang(
             item_updates,
             detail_id,
             expected_revision,
+            detail_barang,
         )
         if not berhasil:
             conn.rollback()
@@ -1863,26 +2058,26 @@ def tandai_resi_selesai_massal(resi_terpilih, kode_cabang):
     if USE_CLOUD:
         return False
 
-    daftar_resi = [
-        str(no_resi).strip()
+    daftar_resi = list(dict.fromkeys(
+        str(no_resi).strip().upper()
         for no_resi in (resi_terpilih or [])
         if str(no_resi).strip()
-    ]
+    ))
     if not daftar_resi:
         return True
 
     conn = None
     try:
         conn = get_db_connection()
-        conn.executemany(
-            """
-            UPDATE data_resi
-            SET status_resi = 'SELESAI',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE no_resi = ? AND kode_cabang = ?
-            """,
-            [(no_resi, kode_cabang) for no_resi in daftar_resi],
-        )
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        cabang = str(kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")).strip().upper()
+        for no_resi in daftar_resi:
+            if not _update_buku_gudang_cursor(
+                cursor, no_resi, cabang, {"status_resi": "SELESAI"}, {}, None, None
+            ):
+                conn.rollback()
+                return False
         conn.commit()
         return True
     except sqlite3.Error as exc:
@@ -2448,24 +2643,31 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
                 # snapshot legacy, fallback varian PAJAK/NONPAJAK tetap dipertahankan.
                 cursor.execute(
                     """
-                    UPDATE data_resi
-                    SET status_resi = 'SELESAI', updated_at = CURRENT_TIMESTAMP
+                    SELECT no_resi, kode_cabang FROM data_resi
                     WHERE UPPER(no_resi) = UPPER(?)
                     """,
                     (nomor,),
                 )
-                if cursor.rowcount == 0:
+                targets = cursor.fetchall()
+                if not targets:
                     kandidat = sorted(_varian_nomor_resi_pajak(nomor))
                     if kandidat:
                         placeholders = ",".join("?" for _ in kandidat)
                         cursor.execute(
                             f"""
-                            UPDATE data_resi
-                            SET status_resi = 'SELESAI', updated_at = CURRENT_TIMESTAMP
+                            SELECT no_resi, kode_cabang FROM data_resi
                             WHERE UPPER(no_resi) IN ({placeholders})
                             """,
                             kandidat,
                         )
+                        targets = cursor.fetchall()
+                for nomor_aktif, cabang_aktif in targets:
+                    if not _update_buku_gudang_cursor(
+                        cursor, nomor_aktif, cabang_aktif,
+                        {"status_resi": "SELESAI"}, {}, None, None,
+                    ):
+                        conn.rollback()
+                        return False, f"Status Resi {nomor_aktif} gagal diperbarui."
 
         conn.commit()
         return True, f"Invoice {invoice} berhasil ditandai {status}."
@@ -2554,6 +2756,41 @@ def ambil_daftar_cabang_billing():
         return []
 
 
+def cek_revision_resi(no_resi, expected_revision, kode_cabang=None):
+    """Memastikan Resi masih pada revision yang dilihat saat dipilih untuk Invoice."""
+    nomor = str(no_resi or "").strip().upper()
+    if not nomor:
+        return False, None
+    try:
+        revision_diharapkan = int(expected_revision)
+    except (TypeError, ValueError):
+        return False, None
+
+    cabang = str(
+        kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT") or "PUSAT"
+    ).strip().upper()
+    try:
+        conn = get_db_connection()
+        row = conn.execute(
+            """
+            SELECT revision
+            FROM data_resi
+            WHERE UPPER(no_resi) = UPPER(?) AND kode_cabang = ?
+            LIMIT 1
+            """,
+            (nomor, cabang),
+        ).fetchone()
+        if row is None:
+            return False, None
+        revision_sekarang = int(row[0] or 0)
+        return revision_sekarang == revision_diharapkan, revision_sekarang
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        logger.error("[Invoice] Gagal cek revision Resi %s: %s", nomor, exc)
+        return False, None
+    finally:
+        _close(locals().get("conn"))
+
+
 def ambil_resi_belum_ditagihkan(
     kode_cabang=None,
     *,
@@ -2633,8 +2870,12 @@ def ambil_resi_belum_ditagihkan(
                    COALESCE(r.pengirim, ''), COALESCE(r.penerima, ''),
                    COALESCE(r.kota_tujuan, ''), COALESCE(r.nama_barang, ''),
                    COALESCE(r.koli, 0), COALESCE(r.berat, 0),
-                   COALESCE(r.cbm, 0), COALESCE(r.total_ongkir, 0),
-                   COALESCE(r.status_resi, '')
+                   COALESCE(r.cbm, 0),
+                   COALESCE(r.total_ongkir, 0),
+                   COALESCE(r.jenis_pajak, 'NONPAJAK'),
+                   COALESCE(r.subtotal_ongkir, r.total_ongkir, 0),
+                   COALESCE(r.status_resi, ''),
+                   COALESCE(r.revision, 0)
             FROM data_resi AS r
             WHERE {' AND '.join(where)}
             ORDER BY DATE(r.tanggal_masuk) DESC, r.no_resi DESC
@@ -2654,8 +2895,15 @@ def ambil_resi_belum_ditagihkan(
                 "koli": str(row[7] if row[7] is not None else "0"),
                 "berat": str(row[8] if row[8] is not None else "0"),
                 "kubik": str(row[9] if row[9] is not None else "0"),
+                # Tetap expose total untuk kebutuhan tampilan Billing Queue,
+                # tetapi Invoice akan memakai subtotal_ongkir sebagai dasar pajak.
                 "ongkir": str(row[10] if row[10] is not None else "0"),
-                "status_resi": str(row[11] or "").strip().upper(),
+                "jenis_pajak": str(row[11] or "NONPAJAK").strip().upper(),
+                "subtotal_ongkir": str(
+                    row[12] if row[12] is not None else row[10] if row[10] is not None else "0"
+                ),
+                "status_resi": str(row[13] or "").strip().upper(),
+                "revision": int(row[14] or 0),
             }
             for row in rows
         ]
@@ -2693,24 +2941,45 @@ def _resolve_resi_aktif_cursor(cursor, nomor_resi):
     return nomor, None
 
 
-def _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items):
-    """Sinkronkan relasi operasional Invoice-Resi dari detail snapshot yang disimpan."""
-    cursor.execute("DELETE FROM invoice_resi WHERE no_invoice = ?", (no_invoice,))
+def _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items, source_resi=None):
+    """Sinkronkan relasi operasional Invoice-Resi hanya dari metadata sumber.
+
+    ``source_resi`` dipisahkan dari kolom Invoice yang terlihat supaya relasi
+    operasional tetap utuh walaupun template menyembunyikan/menghapus kolom RESI.
+    Bila invoice legacy tidak memiliki metadata sumber, relasi lama dipertahankan.
+    """
     relasi = set()
-    for item in items or []:
-        raw = item.get("data_kolom") if isinstance(item, dict) else None
-        if raw in (None, ""):
+
+    sumber = source_resi if isinstance(source_resi, (list, tuple, set)) else []
+    if not sumber:
+        if cursor.execute(
+            "SELECT 1 FROM invoice_resi WHERE no_invoice = ? LIMIT 1",
+            (no_invoice,),
+        ).fetchone():
+            return
+
+    cursor.execute("DELETE FROM invoice_resi WHERE no_invoice = ?", (no_invoice,))
+    for item in sumber:
+        if isinstance(item, dict):
+            nomor_snapshot = str(
+                item.get("no_resi") or item.get("resi") or item.get("nomor_resi") or ""
+            ).strip().upper()
+            kode_cabang_snapshot = str(
+                item.get("kode_cabang") or ""
+            ).strip().upper() or None
+        else:
+            nomor_snapshot = str(item or "").strip().upper()
+            kode_cabang_snapshot = None
+
+        if not nomor_snapshot:
             continue
-        try:
-            parsed = json.loads(str(raw))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        for nomor_snapshot in _kumpulkan_nomor_resi_snapshot(
-            parsed, izinkan_fallback=False
-        ):
-            resolved = _resolve_resi_aktif_cursor(cursor, nomor_snapshot)
-            if resolved:
-                relasi.add(resolved)
+        resolved = _resolve_resi_aktif_cursor(cursor, nomor_snapshot)
+        if resolved:
+            no_resi_aktif, kode_cabang_aktif = resolved
+            if kode_cabang_snapshot and kode_cabang_aktif:
+                if kode_cabang_snapshot != str(kode_cabang_aktif).strip().upper():
+                    continue
+            relasi.add((no_resi_aktif, kode_cabang_aktif))
 
     if relasi:
         cursor.executemany(
@@ -2726,28 +2995,108 @@ def _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items):
         )
 
 
+def _sequence_invoice_berikutnya_cursor(cursor, prefix):
+    """Hitung sequence Invoice memakai cursor aktif di dalam transaksi."""
+    prefix = str(prefix or "").strip().upper()
+    if not prefix:
+        return 1
+
+    cursor.execute(
+        "SELECT no_invoice FROM invoice_header WHERE no_invoice LIKE ?",
+        (f"{prefix}-%",),
+    )
+    max_sequence = 0
+    pola = re.compile(rf"^{re.escape(prefix)}-(\d+)$", re.IGNORECASE)
+    for row in cursor.fetchall():
+        match = pola.search(str(row[0] or "").strip())
+        if match:
+            max_sequence = max(max_sequence, int(match.group(1)))
+    return max_sequence + 1
+
+
 def dapatkan_sequence_invoice_baru(prefix):
-    """Menghasilkan sequence berikutnya dari angka terakhir nomor invoice."""
+    """Menghasilkan prediksi sequence berikutnya untuk tampilan UI.
+
+    Nomor final invoice otomatis tetap dialokasikan ulang di dalam transaksi
+    simpan agar dua user tidak memakai sequence yang sama.
+    """
     if USE_CLOUD:
         return 1
     prefix = str(prefix or "").strip()
     try:
-        rows = _fetchall(
-            "SELECT no_invoice FROM invoice_header WHERE no_invoice LIKE ?",
-            (f"{prefix}-%",),
-        )
-        max_sequence = 0
-        for row in rows:
-            match = re.search(r"-(\d+)$", str(row[0] or ""))
-            if match:
-                max_sequence = max(max_sequence, int(match.group(1)))
-        return max_sequence + 1
+        conn = get_db_connection()
+        try:
+            return _sequence_invoice_berikutnya_cursor(conn.cursor(), prefix)
+        finally:
+            _close(conn)
     except (sqlite3.Error, ValueError) as exc:
         logger.error("[Invoice] Gagal membuat sequence: %s", exc)
         return 1
 
+
+def _alokasikan_nomor_invoice_otomatis_cursor(cursor, header):
+    prefix = str(header.get("auto_invoice_prefix") or "").strip().upper()
+    if not prefix:
+        return ""
+    sequence = _sequence_invoice_berikutnya_cursor(cursor, prefix)
+    return f"{prefix}-{sequence:04d}"
+
+
+def _validasi_source_resi_invoice_cursor(cursor, source_resi):
+    sumber = source_resi if isinstance(source_resi, (list, tuple, set)) else []
+    for item in sumber:
+        if not isinstance(item, dict):
+            continue
+        nomor = str(item.get("no_resi") or item.get("resi") or "").strip().upper()
+        if not nomor:
+            continue
+        kode_cabang = str(item.get("kode_cabang") or "").strip().upper()
+        revision_diharapkan = item.get("revision")
+        try:
+            revision_diharapkan = int(revision_diharapkan)
+        except (TypeError, ValueError):
+            return f"Revision Resi {nomor} tidak valid. Muat ulang Billing Queue."
+
+        if kode_cabang:
+            row = cursor.execute(
+                """
+                SELECT revision
+                FROM data_resi
+                WHERE UPPER(no_resi) = UPPER(?) AND kode_cabang = ?
+                LIMIT 1
+                """,
+                (nomor, kode_cabang),
+            ).fetchone()
+        else:
+            row = cursor.execute(
+                """
+                SELECT revision
+                FROM data_resi
+                WHERE UPPER(no_resi) = UPPER(?)
+                LIMIT 1
+                """,
+                (nomor,),
+            ).fetchone()
+
+        if row is None:
+            return f"Resi sumber {nomor} tidak ditemukan. Muat ulang Billing Queue."
+        revision_sekarang = int(row[0] or 0)
+        if revision_sekarang != revision_diharapkan:
+            return (
+                f"Resi {nomor} sudah berubah sejak dipilih. "
+                "Muat ulang Billing Queue sebelum menyimpan Invoice."
+            )
+    return None
+
+
 def _simpan_header_invoice(cursor, header, no_invoice, now, is_update):
     if is_update:
+        existing = cursor.execute(
+            "SELECT status FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+            (no_invoice,),
+        ).fetchone()
+        if existing and str(existing[0] or "").strip().upper() == "LUNAS":
+            return "Invoice berstatus LUNAS tidak dapat diubah."
         cursor.execute(
             """
             UPDATE invoice_header
@@ -2809,7 +3158,8 @@ def simpan_atau_update_invoice(header, items, is_update=False):
         return False, "Penyimpanan cloud belum diaktifkan."
 
     no_invoice = str(header.get("no_invoice", "")).strip().upper()
-    if not no_invoice:
+    auto_prefix = str(header.get("auto_invoice_prefix") or "").strip().upper()
+    if not no_invoice and not (auto_prefix and not is_update):
         return False, "Nomor invoice tidak boleh kosong."
     if not items:
         return False, "Item invoice tidak boleh kosong."
@@ -2823,13 +3173,29 @@ def simpan_atau_update_invoice(header, items, is_update=False):
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
 
+        if not is_update and not no_invoice:
+            no_invoice = _alokasikan_nomor_invoice_otomatis_cursor(cursor, header)
+            if not no_invoice:
+                conn.rollback()
+                return False, "Nomor invoice tidak berhasil dibuat."
+            header["no_invoice"] = no_invoice
+
+        pesan = _validasi_source_resi_invoice_cursor(
+            cursor, header.get("source_resi")
+        )
+        if pesan:
+            conn.rollback()
+            return False, pesan
+
         pesan = _simpan_header_invoice(cursor, header, no_invoice, now, is_update)
         if pesan:
             conn.rollback()
             return False, pesan
 
         _simpan_detail_invoice(cursor, no_invoice, items)
-        _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items)
+        _sinkronkan_invoice_resi_cursor(
+            cursor, no_invoice, items, header.get("source_resi")
+        )
         conn.commit()
         return True, "Sukses"
     except sqlite3.IntegrityError as exc:
@@ -3035,26 +3401,29 @@ def ambil_histori_transaksi_by_penerima(nama_penerima, kode_cabang):
     )
 
 def ambil_semua_master_penerima_full(kode_cabang):
-    """Mengambil data lengkap master penerima untuk tabel UI."""
+    """Mengambil data lengkap master penerima ter-optimasi dengan GROUP BY."""
     kode_cabang = str(
         kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")
     ).strip().upper()
     try:
         return _fetchall(
             """
-            SELECT id_penerima,
-                   COALESCE(nama, ''), COALESCE(no_hp, ''),
-                   COALESCE(alamat, ''), COALESCE(kota, ''),
-                   COALESCE(provinsi, ''),
-                   (SELECT COUNT(*)
-                    FROM data_resi
-                    WHERE kode_cabang = master_penerima.kode_cabang
-                      AND TRIM(UPPER(penerima)) = TRIM(UPPER(master_penerima.nama))) AS total_transaksi,
-                   COALESCE(pembayaran, 'TF / INVOICE'),
-                   COALESCE(status_tagihan, 'NORMAL')
-            FROM master_penerima
-            WHERE kode_cabang = ?
-            ORDER BY TRIM(COALESCE(nama, '')) COLLATE NOCASE ASC
+            SELECT p.id_penerima,
+                   COALESCE(p.nama, ''),
+                   COALESCE(p.no_hp, ''),
+                   COALESCE(p.alamat, ''),
+                   COALESCE(p.kota, ''),
+                   COALESCE(p.provinsi, ''),
+                   COUNT(r.no_resi) AS total_transaksi,
+                   COALESCE(p.pembayaran, 'TF / INVOICE'),
+                   COALESCE(p.status_tagihan, 'NORMAL')
+            FROM master_penerima p
+            LEFT JOIN data_resi r 
+                   ON r.kode_cabang = p.kode_cabang 
+                  AND TRIM(UPPER(r.penerima)) = TRIM(UPPER(p.nama))
+            WHERE p.kode_cabang = ?
+            GROUP BY p.id_penerima
+            ORDER BY TRIM(COALESCE(p.nama, '')) COLLATE NOCASE ASC
             """,
             (kode_cabang,),
         )

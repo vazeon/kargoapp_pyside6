@@ -1,11 +1,4 @@
 # utils/modules/manifest_metrics.py
-"""Baseline geometry/layout khusus modul Manifest.
-
-Semua nilai piksel adalah logical-pixel baseline desain.
-Responsive geometry umum tetap ditangani ``utils.ui_scaler``.
-Geometry internal tabel yang mengikuti user zoom tetap diterapkan melalui
-``utils.zoom`` dari baseline yang didefinisikan di sini.
-"""
 
 # ---------------------------------------------------------------------------
 # Panel utama
@@ -54,7 +47,7 @@ MANIFEST_DETAIL_STRETCH = (5, 6)
 # ---------------------------------------------------------------------------
 MANIFEST_CHECK_COLUMN_WIDTH = 22
 MANIFEST_DEFAULT_COLUMN_WIDTHS = (
-    22,   # CHECK
+    36,   # CHECK
     45,   # NO.
     125,  # RESI
     105,  # TGL MASUK

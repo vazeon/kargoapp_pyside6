@@ -132,18 +132,19 @@ def get_buku_gudang_action_styles() -> Dict[str, str]:
     }
 
 
-def get_buku_gudang_styles(
-    is_dark: bool,
-    sz_base: int,
-    sz_input: int,
-    sz_title: int,
-) -> Dict[str, str]:
-    """Menghasilkan style dinamis Buku Gudang berdasarkan tema dan zoom."""
+# Ukuran tetap untuk elemen UI Buku Gudang yang bukan tabel.
+# Zoom tabel diterapkan terpisah oleh utils.zoom pada widget tabel.
+BUKU_GUDANG_FONT_TITLE = 16
+BUKU_GUDANG_FONT_FILTER = 12
+BUKU_GUDANG_FONT_LABEL = 11
+BUKU_GUDANG_FONT_TABLE = 11
+
+
+def get_buku_gudang_styles(is_dark: bool) -> Dict[str, str]:
+    """Style Buku Gudang; zoom hanya diterapkan langsung pada tabel."""
     ui = get_theme_colors(is_dark)["ui"]
-    ukuran_judul = max(14, sz_title - 2)
-    ukuran_filter = max(10, sz_input - 1)
-    ukuran_label = max(10, sz_input - 2)
-    ukuran_tabel = max(10, sz_base - 1)
+    ukuran_judul = BUKU_GUDANG_FONT_TITLE
+    ukuran_filter = BUKU_GUDANG_FONT_FILTER
 
     return {
         "lbl_judul": f"""
@@ -211,37 +212,23 @@ def get_buku_gudang_styles(
             background-color: {ui["field_background"]};
             color: {ui["text_primary"]};
             placeholder-text-color: {ui["placeholder_text"]};
-            padding: 2px;
-            border: 2px solid {ui["primary"]};
-            border-radius: 3px;
             selection-background-color: {ui["selection_background"]};
             selection-color: {ui["selection_text"]};
         """,
 
-        "tabel": f"""
-            QTableWidget {{
-                background-color: {ui["table_background"]};
-                alternate-background-color: {ui["table_alternate_background"]};
-                color: {ui["table_text"]};
-                gridline-color: {ui["table_grid"]};
-                font-size: {ukuran_tabel}px;
-                font-family: '{get_master_font()}';
-            }}
-            QHeaderView::section {{
-                background-color: {ui["table_header_background"]};
-                color: {_warna_tema(is_dark, "#f8fafc", "#ffffff")};
-                border: 1px solid {_warna_tema(is_dark, ui["table_grid"], ui["field_border"])};
-                font-size: {ukuran_tabel}px;
-                font-weight: 600;
-                padding: 4px 6px;
-                font-family: '{get_master_font()}';
-            }}
-            QTableWidget::item:selected {{
-                background-color: {ui["selection_background"]};
-                color: white;
-            }}
-        """,
+
     }
+
+
+def get_buku_gudang_tooltip_style(is_dark: bool) -> str:
+    """Style tooltip modul; aturan visual tetap berada di lapisan tema."""
+    text = _warna_tema(is_dark, "#F2F2F2", "#202124")
+    background = _warna_tema(is_dark, "#252525", "#FFFFFF")
+    border = _warna_tema(is_dark, "#555555", "#C9CDD2")
+    return (
+        f"QToolTip {{ color: {text}; background-color: {background}; "
+        f"border: 1px solid {border}; padding: 5px; }}"
+    )
 
 
 def get_buku_gudang_menu_style(font_size: Optional[int] = None, is_dark: bool = False) -> str:

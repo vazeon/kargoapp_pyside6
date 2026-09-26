@@ -1,6 +1,7 @@
 # themes/modules/setting.py
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font
+from themes.components.table import get_table_styles, TableMetrics
+from utils.typography import get_master_font, ukuran_font_px_ke_pt
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
@@ -15,81 +16,19 @@ def get_setting_styles(
     sz_title: int,
 ) -> dict:
     ui = get_theme_colors(is_dark)["ui"]
-    placeholder = ui["placeholder_text"]
     return {
-        'scroll_area': f"""
-            QScrollArea {{
-                background-color: transparent;
-                border: none;
-            }}
-        """,
-        'groupbox': f"""
-            QGroupBox {{
-                font-weight: bold;
-                font-size: {sz_title}px;
-                font-family: '{get_master_font()}';
-                color: {_warna_tema(is_dark, "#cbd5e1", "#0f172a")};
-                background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
-                border: 1px solid {ui["field_border"]};
-                border-radius: 10px;
-                margin-top: 22px;
-                padding-top: 22px;
-                padding-left: 4px;
-                padding-right: 4px;
-                padding-bottom: 8px;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 14px;
-                top: 4px;
-                padding: 0 6px;
-                background-color: transparent;
-            }}
-        """,
+        'table': get_table_styles(
+            is_dark,
+            metrics=TableMetrics(
+                font_family=get_master_font(),
+                font_size_pt=ukuran_font_px_ke_pt(sz_base),
+            ),
+        ),
         'form_label': f"""
             color: {_warna_tema(is_dark, "#94a3b8", "#475569")};
             font-size: {sz_base}px;
             font-family: '{get_master_font()}';
-            font-weight: 600;
-        """,
-        'input_readonly': f"""
-            QLineEdit {{
-                padding: 8px 12px;
-                font-size: {sz_base}px;
-                font-family: '{get_master_font()}';
-                border: 1px solid {ui["field_border"]};
-                border-radius: 6px;
-                background-color: {_warna_tema(is_dark, "#20242b", "#f8fafc")};
-                color: {ui["text_muted"]};
-                placeholder-text-color: {placeholder};
-                letter-spacing: 0.2px;
-            }}
-        """,
-        'input': f"""
-            QLineEdit, QTextEdit {{
-                padding: 8px 12px;
-                font-size: {sz_input}px;
-                font-family: '{get_master_font()}';
-                border: 1px solid {ui["field_border"]};
-                border-radius: 6px;
-                background-color: {ui["field_background"]};
-                color: {ui["table_text"]};
-                placeholder-text-color: {placeholder};
-                selection-background-color: #3b82f6;
-            }}
-            QLineEdit:focus, QTextEdit:focus {{
-                border: 1px solid {_warna_tema(is_dark, "#3b82f6", "#2563eb")};
-                background-color: {ui["field_focus_background"]};
-            }}
-            QLineEdit:disabled, QTextEdit:disabled {{
-                color: {ui["text_muted"]};
-                background-color: {_warna_tema(is_dark, "#20242b", "#f8fafc")};
-            }}
-            QTextEdit {{
-                padding: 6px 10px;
-                line-height: 1.4;
-            }}
+            font-weight: normal;
         """,
         'btn_simpan': f"""
             QPushButton {{
@@ -97,11 +36,11 @@ def get_setting_styles(
                 color: #ffffff;
                 font-size: {sz_input}px;
                 font-family: '{get_master_font()}';
-                font-weight: bold;
+                font-weight: 600;
                 letter-spacing: 0.8px;
                 border: none;
                 border-radius: 8px;
-                padding: 12px 20px;
+                padding: 0px 0px;
                 margin-top: 6px;
             }}
             QPushButton:hover {{
@@ -111,30 +50,38 @@ def get_setting_styles(
                 background-color: #1e40af;
             }}
             QPushButton:disabled {{
-                background-color: #94a3b8;
-                color: #e2e8f0;
+                background-color: {_warna_tema(is_dark, "#334155", "#94a3b8")};
+                color: {_warna_tema(is_dark, "#94a3b8", "#e2e8f0")};
             }}
         """,
         'btn_secondary': f"""
             QPushButton {{
                 background-color: transparent;
-                color: #2563eb;
+                color: {_warna_tema(is_dark, "#93c5fd", "#2563eb")};
                 font-size: {sz_base}px;
                 font-family: '{get_master_font()}';
                 font-weight: 600;
-                border: 1px solid #2563eb;
+                border: 1px solid {_warna_tema(is_dark, "#60a5fa", "#2563eb")};
                 border-radius: 6px;
-                padding: 7px 16px;
+                padding: 8px 8px;
             }}
             QPushButton:hover {{
-                background-color: #eff6ff;
-                border-color: #1d4ed8;
+                background-color: {_warna_tema(is_dark, "#1e3a5f", "#eff6ff")};
+                border-color: {_warna_tema(is_dark, "#93c5fd", "#1d4ed8")};
             }}
             QPushButton:pressed {{
-                background-color: #dbeafe;
+                background-color: {_warna_tema(is_dark, "#24476e", "#dbeafe")};
+            }}
+            QPushButton:disabled {{
+                color: {ui["text_muted"]};
+                border-color: {ui["field_border"]};
+                background-color: transparent;
             }}
         """,
-        'sidebar_container': f"background-color: {_warna_tema(is_dark, "#14171c", "#e2e8f0")};",
+        'sidebar_container': f"""
+            QWidget {{ background-color: {_warna_tema(is_dark, "#14171c", "#e2e8f0")}; }}
+            QLabel {{ background-color: transparent; }}
+        """,
         'sidebar_list': f"""
             QListWidget {{
                 background-color: transparent;
@@ -144,7 +91,7 @@ def get_setting_styles(
                 font-size: {sz_input}px;
             }}
             QListWidget::item {{
-                padding: 14px 16px;
+                padding: 8px 16px;
                 border-radius: 6px;
                 margin-bottom: 4px;
                 color: {_warna_tema(is_dark, "#cbd5e1", "#334155")};
@@ -152,7 +99,8 @@ def get_setting_styles(
             QListWidget::item:hover:!selected {{
                 background-color: {_warna_tema(is_dark, "#1e222b", "#cbd5e1")};
             }}
-            QListWidget::item:selected {{
+            QListWidget::item:selected,
+            QListWidget::item:selected:!active {{
                 background-color: #3b82f6;
                 color: #ffffff;
                 font-weight: bold;
@@ -160,7 +108,7 @@ def get_setting_styles(
         """,
         'custom_groupbox': f"""
             QGroupBox {{
-                font-weight: bold;
+                font-weight: 500;
                 font-size: {sz_title}px;
                 font-family: '{get_master_font()}';
                 color: {ui["text_primary"]};
@@ -174,18 +122,14 @@ def get_setting_styles(
             }}
         """,
         'lbl_page_title': f"""
-            font-size: {sz_title + 8}px;
-            font-weight: bold;
+            font-size: {sz_title + 2}px;
+            font-weight: 600;
             font-family: '{get_master_font()}';
             margin-bottom: 20px;
             color: {ui["text_primary"]};
         """,
-        'lbl_hint': f"""
-            color: {ui["text_muted"]};
-            font-size: {sz_base - 1}px;
-        """,
-        'lbl_info_italic': """
-            color: #94a3b8;
+        'lbl_info_italic': f"""
+            color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
             font-style: italic;
         """,
         'btn_add_rekening': f"""
@@ -219,7 +163,7 @@ def get_setting_styles(
             }}
         """,
         'lbl_menu': f"""
-            font-weight: bold;
+            font-weight: 500;
             font-size: 18px;
             color: #94a3b8;
             margin-bottom: 10px;

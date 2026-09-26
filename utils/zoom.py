@@ -1,17 +1,3 @@
-# utils/zoom.py
-"""Helper zoom khusus tabel untuk aplikasi PySide6.
-
-Arsitektur saat ini:
-- level zoom tetap disimpan per tab melalui QSettings;
-- zoom TIDAK mengubah QWidget umum, input, QComboBox, tombol, ikon toolbar,
-  layout, margin, spacing, atau padding form;
-- helper ini hanya menangani elemen QTableView/QTableWidget seperti font tabel,
-  tinggi baris/header, lebar kolom, dan sinkronisasi frozen table;
-- geometry tabel menggabungkan responsive screen scale dengan zoom manual user,
-  sedangkan font tabel tetap mengikuti level zoom manual.
-
-"""
-
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -26,6 +12,8 @@ from PySide6.QtWidgets import (
 
 from utils import typography
 from utils.ui_metrics import dapatkan_ui_scale, skalakan_px
+from themes.components.table import get_table_styles, TableMetrics
+from themes.colors import get_theme_colors
 
 
 # Gunakan identitas QSettings yang sama dengan aplikasi utama.
@@ -71,6 +59,8 @@ class CtrlWheelZoomFilter(QObject):
         if event.type() == QEvent.Type.Wheel:
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 delta = event.angleDelta().y()
+                if delta == 0:
+                    return False
                 if callable(self.callback):
                     self.callback(1 if delta > 0 else -1)
                 event.accept()
@@ -88,13 +78,21 @@ def pasang_ctrl_scroll_zoom(table, callback):
     if table is None:
         return
 
+    previous = getattr(table, "_ctrl_wheel_zoom_filter", None)
     filter_zoom = CtrlWheelZoomFilter(callback)
+    filter_zoom.setParent(table)
     table._ctrl_wheel_zoom_filter = filter_zoom
-    table.installEventFilter(filter_zoom)
-
-    viewport = getattr(table, "viewport", None)
-    if callable(viewport):
-        viewport().installEventFilter(filter_zoom)
+    for target in (table, getattr(table, "frozen_table", None)):
+        if target is None:
+            continue
+        viewport = getattr(target, "viewport", None)
+        for receiver in (target, viewport() if callable(viewport) else None):
+            if receiver is not None:
+                if previous is not None:
+                    receiver.removeEventFilter(previous)
+                receiver.installEventFilter(filter_zoom)
+    if previous is not None:
+        previous.deleteLater()
 
 
 def _int_aman(
@@ -209,7 +207,7 @@ class ZoomMetrics:
 
 def dapatkan_metrik_zoom(z: Any) -> ZoomMetrics:
     level = _batasi_zoom(z)
-    sizes = typography.get_global_font_sizes_pt(level)
+    sizes = typography.get_zoom_font_sizes_pt(level)
 
     return ZoomMetrics(
         level=level,
@@ -268,65 +266,7 @@ def _font_family_qss() -> str:
     return _master_font().replace("\\", "\\\\").replace("'", "\\'")
 
 
-def generate_font_zoom_tabel_qss(z: int = 0) -> str:
-    """QSS opsional khusus tipografi tabel; tidak mengubah warna tema."""
-    metrics = dapatkan_metrik_zoom(z)
-    family = _font_family_qss()
-    size_pt = f"{metrics.font_base_pt:g}"
 
-    return f"""
-QTableWidget, QTableView {{
-    font-family: '{family}';
-    font-size: {size_pt}pt;
-}}
-QTableWidget::item, QTableView::item {{
-    font-family: '{family}';
-    font-size: {size_pt}pt;
-}}
-QHeaderView, QHeaderView::section {{
-    font-family: '{family}';
-    font-size: {size_pt}pt;
-}}
-"""
-
-
-def generate_style_tabel(is_dark: bool, z: int = 0) -> str:
-    """Style visual tabel lama + tipografi zoom manual.
-
-    Geometry QSS tabel digabungkan langsung dengan responsive screen scale dan
-    zoom manual karena ``ui_scaler`` sengaja tidak memodifikasi item-view.
-    """
-    zoom = _batasi_zoom(z)
-    item_pad = skalakan_px(max(2, 4 + zoom), minimum=2)
-    header_v = skalakan_px(max(4, 6 + zoom), minimum=3)
-    header_h = skalakan_px(max(6, 8 + (zoom * 2)), minimum=5)
-    indicator = _skalakan(16, zoom, minimum=10)
-
-    if is_dark:
-        bg, alt_bg, text, grid = "#1a1d24", "#20242b", "#f8fafc", "#334155"
-        header_bg, header_text, selected_bg = "#1e293b", "#ffffff", "#3b82f6"
-    else:
-        bg, alt_bg, text, grid = "#ffffff", "#f1f5f9", "#0f172a", "#e2e8f0"
-        header_bg, header_text, selected_bg = "#243752", "#ffffff", "#2563eb"
-
-    visual = f"""
-QTableWidget, QTableView {{
-    background-color: {bg}; alternate-background-color: {alt_bg}; color: {text};
-    gridline-color: {grid}; border: 1px solid {grid};
-}}
-QTableWidget::item, QTableView::item {{ padding: {item_pad}px; }}
-QHeaderView::section {{
-    background-color: {header_bg}; color: {header_text}; border: 1px solid {grid};
-    padding: {header_v}px {header_h}px;
-}}
-QTableWidget::item:selected, QTableView::item:selected {{
-    background-color: {selected_bg}; color: #ffffff;
-}}
-QCheckBox::indicator, QRadioButton::indicator {{
-    width: {indicator}px; height: {indicator}px;
-}}
-"""
-    return f"{visual}\n{generate_font_zoom_tabel_qss(zoom)}"
 
 
 def _ambil_atau_simpan_dasar(objek: Any, nama: str, nilai: Any) -> Any:
@@ -407,20 +347,24 @@ def _sinkronkan_frozen_sekarang(table: QTableView) -> None:
     try:
         frozen = getattr(table, "frozen_table", None)
 
-        _panggil_metode_jika_tersedia(
-            table,
-            "updateFrozenTableGeometry",
-            "update_frozen_table_geometry",
-            "_update_frozen_table_geometry",
-            "perbarui_geometri_frozen",
-        )
-
         table.doItemsLayout()
         table.updateGeometries()
 
         if frozen is not None:
             frozen.doItemsLayout()
             frozen.updateGeometries()
+
+        # Geometri dihitung setelah layout agar memakai ukuran viewport terbaru.
+        _panggil_metode_jika_tersedia(
+            table,
+            "update_frozen_geometry",
+            "updateFrozenTableGeometry",
+            "update_frozen_table_geometry",
+            "_update_frozen_table_geometry",
+            "perbarui_geometri_frozen",
+        )
+
+        if frozen is not None:
             frozen.verticalScrollBar().setValue(
                 table.verticalScrollBar().value()
             )
@@ -493,47 +437,63 @@ def _terapkan_font_item_view(view: QAbstractItemView, metrics: ZoomMetrics) -> N
 
 
 def terapkan_zoom_tabel(
-    table: QAbstractItemView,
-    is_dark: bool = False,
-    z: int = 0,
+        table: QAbstractItemView,
+        is_dark: bool = False,
+        z: int = 0,
 ) -> None:
-    """Terapkan zoom hanya pada QTableView/QTableWidget yang diberikan.
-
-    Fungsi ini TIDAK mengubah stylesheet warna/theme. ``is_dark`` hanya
-    dipertahankan demi kompatibilitas signature lama.
-    """
     if table is None or not isinstance(table, _TABLE_VIEW_TYPES):
         return
 
-    metrics = dapatkan_metrik_zoom(z)
+    zoom = _batasi_zoom(z)
+    metrics_font = dapatkan_metrik_zoom(z)
     frozen = getattr(table, "frozen_table", None)
 
-    table.setUpdatesEnabled(False)
-    if frozen is not None:
-        frozen.setUpdatesEnabled(False)
+    # Hanya lepaskan kunci yang dipasang oleh pemanggilan ini. False dapat
+    # diwarisi dari parent/batch luar; jangan mengubahnya menjadi kunci lokal.
+    # Frozen adalah child tabel dan otomatis mengikuti pembaruan parent.
+    updates_main = table.updatesEnabled()
+    if updates_main:
+        table.setUpdatesEnabled(False)
 
     try:
-        table.setStyleSheet(generate_style_tabel(is_dark, metrics.level))
-        _terapkan_font_item_view(table, metrics)
+        # Rakit metrics dengan logika responsive UI
+        t_metrics = TableMetrics(
+            font_family=_font_family_qss(),
+            font_size_pt=metrics_font.font_base_pt,
+            item_pad=skalakan_px(max(2, 4 + zoom), minimum=2),
+            header_v=skalakan_px(max(4, 6 + zoom), minimum=3),
+            header_h=skalakan_px(max(6, 8 + (zoom * 2)), minimum=5),
+            indicator_size=skalakan_px(16 + (zoom * 2), minimum=10)
+        )
+
+        ui_colors = get_theme_colors(is_dark).get("ui", {})
+
+        # Terapkan styling terpusat
+        style_tabel = get_table_styles(is_dark, metrics=t_metrics, ui_colors=ui_colors)
+        table.setStyleSheet(style_tabel)
+        if frozen is not None:
+            frozen.setStyleSheet(style_tabel)
+
+        _terapkan_font_item_view(table, metrics_font)
 
         if isinstance(table, QTableView):
             h_header = table.horizontalHeader()
             v_header = table.verticalHeader()
-            header_font = _header_font(h_header, metrics)
+            header_font = _header_font(h_header, metrics_font)
 
             h_header.setFont(header_font)
             v_header.setFont(header_font)
 
             row_height = _tinggi_view(
                 table.fontMetrics().height(),
-                metrics.row_height,
-                metrics.item_padding,
+                metrics_font.row_height,
+                metrics_font.item_padding,
                 24,
             )
             header_height = _tinggi_view(
                 h_header.fontMetrics().height(),
-                metrics.header_height,
-                metrics.header_padding_v,
+                metrics_font.header_height,
+                metrics_font.header_padding_v,
                 26,
             )
 
@@ -547,9 +507,10 @@ def terapkan_zoom_tabel(
             table._zoom_current_row_height = row_height
             table._zoom_current_header_height = header_height
 
+            from PySide6.QtCore import QSignalBlocker
             blocker = QSignalBlocker(h_header)
             try:
-                skalakan_kolom_tableview(table, metrics.level)
+                skalakan_kolom_tableview(table, metrics_font.level)
             finally:
                 del blocker
 
@@ -559,7 +520,7 @@ def terapkan_zoom_tabel(
                     table.setRowHeight(row, row_height)
 
             if frozen is not None:
-                _terapkan_font_item_view(frozen, metrics)
+                _terapkan_font_item_view(frozen, metrics_font)
                 frozen.horizontalHeader().setFont(header_font)
                 frozen.verticalHeader().setFont(header_font)
                 frozen.verticalHeader().setMinimumSectionSize(row_height)
@@ -569,11 +530,9 @@ def terapkan_zoom_tabel(
                     for row in range(model.rowCount()):
                         frozen.setRowHeight(row, row_height)
 
-
     finally:
-        if frozen is not None:
-            frozen.setUpdatesEnabled(True)
-        table.setUpdatesEnabled(True)
+        if updates_main:
+            table.setUpdatesEnabled(True)
 
         if isinstance(table, QTableView):
             sinkronkan_frozen_table(table, tertunda=True)
@@ -607,5 +566,7 @@ def _tabel_utama_dalam_container(container_widget: QWidget) -> list[QTableView]:
             continue
         sudah.add(identitas)
         hasil.append(tabel)
+
+    return hasil
 
     return hasil

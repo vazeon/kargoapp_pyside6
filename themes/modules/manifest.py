@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 from PySide6.QtGui import QColor, QFont
 
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font, get_global_font_sizes
+from utils.typography import get_master_font, get_fixed_font_sizes
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
@@ -12,9 +12,9 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     return gelap if is_dark else terang
 
 
-def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
-    """Menghasilkan seluruh QSS utama milik TabManifest."""
-    sizes = get_global_font_sizes(z)
+def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
+    """Menghasilkan seluruh QSS utama milik TabManifest (tanpa QSS Tabel)."""
+    sizes = get_fixed_font_sizes()
     sz_base = sizes["sz_base"]
     sz_input = sizes["sz_input"]
     sz_title = sizes["sz_title"]
@@ -47,7 +47,6 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         }}
     """
 
-    # Kartu detail Manifest. Warna dark/light ditulis langsung pada blok pemakainya.
     card_manifest = f"""
         QFrame#cardRuteManifest, QFrame#cardArmadaManifest {{
             background-color: {_warna_tema(is_dark, "#171B23", "#FFFFFF")};
@@ -101,45 +100,6 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
             font-weight: 500;
             letter-spacing: 1px;
             font-family: '{get_master_font()}';
-        }}
-    """
-
-    style_tabel = f"""
-        QTableWidget {{
-            background-color: {ui["table_background"]};
-            alternate-background-color: {ui["table_alternate_background"]};
-            color: {ui["table_text"]};
-            gridline-color: {ui["table_grid"]};
-            font-size: {sz_base}px;
-            font-family: '{get_master_font()}';
-        }}
-        QLineEdit#manifestKetCell {{
-            background-color: transparent;
-            border: none;
-            padding-left: 4px;
-            color: {ui["table_text"]};
-            placeholder-text-color: {placeholder};
-        }}
-        QLineEdit#manifestKetCell:focus {{
-            border: 1px solid {ui["selection_background"]};
-            background-color: transparent;
-        }}
-        QHeaderView::section {{
-            background-color: {ui["table_header_background"]};
-            color: #ffffff;
-            border: 1px solid {_warna_tema(is_dark, "#334155", "#cbd5e1")};
-            font-size: {sz_base}px;
-            font-weight: bold;
-            padding: 6px;
-            font-family: '{get_master_font()}';
-        }}
-        QTableWidget::item:selected {{
-            background-color: {ui["selection_background"]};
-            color: #ffffff;
-        }}
-        QTableWidget::indicator {{
-            width: {18 + z}px;
-            height: {18 + z}px;
         }}
     """
 
@@ -198,7 +158,6 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool, z: int = 0) -> dict:
         "txt_no_manifest": txt_no_manifest,
         "btn_proses": btn_proses,
         "list_histori": list_histori,
-        "style_tabel": style_tabel,
         "panel_kiri": panel_kiri,
         "panel_kanan": panel_kanan,
     }
@@ -208,10 +167,8 @@ def get_manifest_row_highlight(
     is_dark: bool,
     belongs_to_current_manifest: bool,
 ) -> Optional[QColor]:
-    """Warna baris yang sudah termasuk manifest ketika mode edit aktif."""
     if not belongs_to_current_manifest:
         return None
-
     return QColor("#3d2a1b" if is_dark else "#fef3c7")
 
 
@@ -219,13 +176,9 @@ def get_manifest_history_date_appearance(
     is_dark: bool,
     base_point_size: int,
 ) -> Tuple[QFont, QColor]:
-    """Font dan warna untuk tanggal pada histori manifest."""
     font_tanggal = QFont(get_master_font())
-
     if base_point_size > 0:
         font_tanggal.setPointSize(max(6, base_point_size - 2))
-
     font_tanggal.setItalic(True)
     warna_tanggal = QColor("#94a3b8" if is_dark else "#64748b")
-
     return font_tanggal, warna_tanggal

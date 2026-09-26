@@ -1,12 +1,14 @@
 # database_manager.py
 import json
+import re
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_NAME = "database_cargo.db"
-DB_SCHEMA_VERSION = 4
+DB_SCHEMA_VERSION = 7
 
 _SCHEMA_STATEMENTS = (
     """
@@ -553,11 +555,693 @@ def _migration_v4(cursor) -> None:
     )
 
 
+
+def _migration_v5(cursor) -> None:
+    """Fondasi offline-first: identitas sync, outbox lokal, cursor server, dan trigger."""
+    # Tambahkan metadata sinkronisasi tanpa menghapus data lama.
+    for table in ("data_resi", "data_resi_detail"):
+        columns = {
+            str(row[1]).strip().lower()
+            for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "sync_id" not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN sync_id TEXT")
+        if "deleted_at" not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at TEXT")
+
+        # Record lama mendapat identitas stabil, tetapi sengaja TIDAK dimasukkan
+        # ke outbox. Upload massal existing data akan dilakukan pada tahap bootstrap.
+        rows = cursor.execute(
+            f"SELECT rowid FROM {table} WHERE sync_id IS NULL OR TRIM(sync_id) = ''"
+        ).fetchall()
+        for (rowid,) in rows:
+            cursor.execute(
+                f"UPDATE {table} SET sync_id = ? WHERE rowid = ?",
+                (str(uuid.uuid4()), rowid),
+            )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            record_key TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('INSERT','UPDATE','DELETE')),
+            payload_json TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending
+        ON sync_outbox(status, id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_record
+        ON sync_outbox(table_name, record_key, id)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_state (
+            kunci TEXT PRIMARY KEY,
+            nilai TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            table_name TEXT NOT NULL,
+            record_key TEXT NOT NULL,
+            local_payload TEXT,
+            remote_payload TEXT,
+            detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'OPEN'
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_control (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            suppress_outbox INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO sync_control(id, suppress_outbox) VALUES (1, 0)"
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO sync_state(kunci, nilai) VALUES ('last_server_change_id', '0')"
+    )
+    if not cursor.execute(
+        "SELECT 1 FROM sync_state WHERE kunci = 'device_id' LIMIT 1"
+    ).fetchone():
+        cursor.execute(
+            "INSERT INTO sync_state(kunci, nilai) VALUES ('device_id', ?)",
+            (str(uuid.uuid4()),),
+        )
+
+    # Trigger untuk data_resi. Perubahan housekeeping `is_synced` dan `updated_at`
+    # saja tidak membuat antrean baru. Hal ini mencegah loop saat sync engine
+    # menandai row lokal sebagai sudah tersinkron.
+    payload_new = "json_object(" + ", ".join([
+        "'no_resi', NEW.no_resi",
+        "'kode_cabang', NEW.kode_cabang",
+        "'tanggal_masuk', NEW.tanggal_masuk",
+        "'tanggal_keluar', NEW.tanggal_keluar",
+        "'pengirim', NEW.pengirim",
+        "'hp_pengirim', NEW.hp_pengirim",
+        "'alamat_pengirim', NEW.alamat_pengirim",
+        "'kota_asal', NEW.kota_asal",
+        "'penerima', NEW.penerima",
+        "'hp_penerima', NEW.hp_penerima",
+        "'alamat_penerima', NEW.alamat_penerima",
+        "'kota_tujuan', NEW.kota_tujuan",
+        "'nama_barang', NEW.nama_barang",
+        "'koli', NEW.koli",
+        "'berat', NEW.berat",
+        "'cbm', NEW.cbm",
+        "'ongkir_per_kg', NEW.ongkir_per_kg",
+        "'ongkir_per_cbm', NEW.ongkir_per_cbm",
+        "'subtotal_ongkir', NEW.subtotal_ongkir",
+        "'jenis_pajak', NEW.jenis_pajak",
+        "'total_ongkir', NEW.total_ongkir",
+        "'pembayaran', NEW.pembayaran",
+        "'status_resi', NEW.status_resi",
+        "'foto_bukti', NEW.foto_bukti",
+        "'truk', NEW.truk",
+        "'ket_buku_gudang', NEW.ket_buku_gudang",
+        "'no_manifest', NEW.no_manifest",
+        "'ket_manifest', NEW.ket_manifest",
+        "'rincian_json', NEW.rincian_json",
+        "'revision', NEW.revision",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+    ]) + ")"
+    payload_old = payload_new.replace("NEW.", "OLD.")
+
+    cursor.execute("DROP TRIGGER IF EXISTS trg_local_data_resi_outbox_insert")
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_outbox_insert
+        AFTER INSERT ON data_resi
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi', NEW.no_resi, 'INSERT', {payload_new});
+        END
+    """)
+
+    update_changed = " OR ".join([
+        f"NEW.{c} IS NOT OLD.{c}" for c in (
+            "no_resi","kode_cabang","tanggal_masuk","tanggal_keluar","pengirim",
+            "hp_pengirim","alamat_pengirim","kota_asal","penerima","hp_penerima",
+            "alamat_penerima","kota_tujuan","nama_barang","koli","berat","cbm",
+            "ongkir_per_kg","ongkir_per_cbm","subtotal_ongkir","jenis_pajak",
+            "total_ongkir","pembayaran","status_resi","foto_bukti","truk",
+            "ket_buku_gudang","no_manifest","ket_manifest","rincian_json",
+            "revision","sync_id","created_at","deleted_at",
+        )
+    ])
+    cursor.execute("DROP TRIGGER IF EXISTS trg_local_data_resi_outbox_update")
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_outbox_update
+        AFTER UPDATE ON data_resi
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+         AND ({update_changed})
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi', NEW.no_resi, 'UPDATE', {payload_new});
+        END
+    """)
+
+    cursor.execute("DROP TRIGGER IF EXISTS trg_local_data_resi_outbox_delete")
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_outbox_delete
+        AFTER DELETE ON data_resi
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi', OLD.no_resi, 'DELETE', {payload_old});
+        END
+    """)
+
+    # Detail barang ikut disinkronkan karena satu transaksi Resi dapat memiliki
+    # banyak baris detail. Identitas lintas perangkat memakai sync_id, bukan id_detail.
+    detail_payload_new = "json_object(" + ", ".join([
+        "'id_detail', NEW.id_detail",
+        "'no_resi', NEW.no_resi",
+        "'urutan', NEW.urutan",
+        "'nama_barang', NEW.nama_barang",
+        "'koli', NEW.koli",
+        "'berat', NEW.berat",
+        "'cbm', NEW.cbm",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+    ]) + ")"
+    detail_payload_old = detail_payload_new.replace("NEW.", "OLD.")
+
+    cursor.execute("DROP TRIGGER IF EXISTS trg_local_data_resi_detail_outbox_insert")
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_detail_outbox_insert
+        AFTER INSERT ON data_resi_detail
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi_detail', COALESCE(NEW.sync_id, CAST(NEW.id_detail AS TEXT)), 'INSERT', {detail_payload_new});
+        END
+    """)
+    detail_changed = " OR ".join([
+        f"NEW.{c} IS NOT OLD.{c}" for c in (
+            "id_detail","no_resi","urutan","nama_barang","koli","berat","cbm","sync_id","created_at","deleted_at"
+        )
+    ])
+    cursor.execute("DROP TRIGGER IF EXISTS trg_local_data_resi_detail_outbox_update")
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_detail_outbox_update
+        AFTER UPDATE ON data_resi_detail
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+         AND ({detail_changed})
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi_detail', COALESCE(NEW.sync_id, CAST(NEW.id_detail AS TEXT)), 'UPDATE', {detail_payload_new});
+        END
+    """)
+    cursor.execute("DROP TRIGGER IF EXISTS trg_local_data_resi_detail_outbox_delete")
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_detail_outbox_delete
+        AFTER DELETE ON data_resi_detail
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi_detail', COALESCE(OLD.sync_id, CAST(OLD.id_detail AS TEXT)), 'DELETE', {detail_payload_old});
+        END
+    """)
+
+
+def _migration_v6(cursor) -> None:
+    """Master wilayah lokal untuk white-label + sinkronisasi Supabase."""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS master_wilayah (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kode_wilayah TEXT NOT NULL UNIQUE,
+            nama_wilayah TEXT NOT NULL,
+            tipe_wilayah TEXT NOT NULL DEFAULT 'PROVINSI',
+            aktif INTEGER NOT NULL DEFAULT 1,
+            urutan INTEGER NOT NULL DEFAULT 0,
+            sync_id TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cabang_wilayah (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kode_cabang TEXT NOT NULL,
+            kode_wilayah TEXT NOT NULL,
+            prefix_resi TEXT,
+            aktif INTEGER NOT NULL DEFAULT 1,
+            sync_id TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP,
+            UNIQUE (kode_cabang, kode_wilayah),
+            FOREIGN KEY (kode_cabang)
+                REFERENCES data_cabang (kode_cabang)
+                ON UPDATE CASCADE
+                ON DELETE CASCADE,
+            FOREIGN KEY (kode_wilayah)
+                REFERENCES master_wilayah (kode_wilayah)
+                ON UPDATE CASCADE
+                ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_master_wilayah_aktif_urutan
+        ON master_wilayah (aktif, urutan, nama_wilayah)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cabang_wilayah_cabang
+        ON cabang_wilayah (kode_cabang, aktif)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cabang_wilayah_wilayah
+        ON cabang_wilayah (kode_wilayah, aktif)
+        """
+    )
+
+    def normalisasi_nama(value):
+        return " ".join(str(value or "").strip().upper().split())
+
+    def kode_default(nama):
+        nama = normalisasi_nama(nama)
+        alias = {
+            "KALIMANTAN TIMUR": "KALTIM",
+            "KALIMANTAN SELATAN": "KALSEL",
+            "PROVINSI LAINNYA": "LAINNYA",
+            "LAINNYA": "LAINNYA",
+        }
+        if nama in alias:
+            return alias[nama]
+
+        alnum = re.sub(r"[^A-Z0-9]+", "", nama)
+        if not alnum:
+            return ""
+        return alnum[:12]
+
+    # Migrasikan daftar lama pengaturan_sistem.provinsi_tujuan ke master_wilayah.
+    row = cursor.execute(
+        """
+        SELECT nilai
+        FROM pengaturan_sistem
+        WHERE kunci = 'provinsi_tujuan'
+        LIMIT 1
+        """
+    ).fetchone()
+
+    daftar_wilayah = []
+    if row and row[0]:
+        try:
+            parsed = json.loads(str(row[0]))
+            if isinstance(parsed, list):
+                daftar_wilayah.extend(parsed)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    # Jika setting lama kosong, ambil nama wilayah dari kamus prefix cabang.
+    if not daftar_wilayah:
+        branch_rows = cursor.execute(
+            "SELECT aturan_prefix FROM data_cabang WHERE aturan_prefix IS NOT NULL"
+        ).fetchall()
+        for (raw_rules,) in branch_rows:
+            try:
+                rules = json.loads(str(raw_rules or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(rules, dict):
+                daftar_wilayah.extend(rules.keys())
+
+    nama_seen = set()
+    for index, raw_name in enumerate(daftar_wilayah, start=1):
+        nama = normalisasi_nama(raw_name)
+        if not nama or nama in nama_seen:
+            continue
+        nama_seen.add(nama)
+        kode = kode_default(nama)
+        if not kode:
+            continue
+
+        existing = cursor.execute(
+            """
+            SELECT kode_wilayah
+            FROM master_wilayah
+            WHERE kode_wilayah = ?
+            LIMIT 1
+            """,
+            (kode,),
+        ).fetchone()
+        if existing:
+            cursor.execute(
+                """
+                UPDATE master_wilayah
+                SET nama_wilayah = ?,
+                    aktif = 1,
+                    urutan = MIN(urutan, ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE kode_wilayah = ?
+                """,
+                (nama, index * 10, kode),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO master_wilayah (
+                    kode_wilayah, nama_wilayah, tipe_wilayah,
+                    aktif, urutan, sync_id
+                )
+                VALUES (?, ?, 'PROVINSI', 1, ?, ?)
+                """,
+                (kode, nama, index * 10, str(uuid.uuid4())),
+            )
+
+    # Migrasikan aturan prefix lama ke cabang_wilayah.
+    branch_rows = cursor.execute(
+        """
+        SELECT kode_cabang, aturan_prefix
+        FROM data_cabang
+        WHERE TRIM(COALESCE(kode_cabang, '')) != ''
+        """
+    ).fetchall()
+
+    for kode_cabang, raw_rules in branch_rows:
+        kode_cabang = str(kode_cabang or "").strip().upper()
+        try:
+            rules = json.loads(str(raw_rules or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            rules = {}
+
+        if not isinstance(rules, dict):
+            continue
+
+        for raw_name, raw_prefix in rules.items():
+            nama = normalisasi_nama(raw_name)
+            if not nama or nama == "DEFAULT":
+                continue
+
+            kode_wilayah = kode_default(nama)
+            if not kode_wilayah:
+                continue
+
+            # Pastikan master wilayah ada meskipun nama tersebut hanya muncul
+            # pada aturan prefix cabang dan belum ada di provinsi_tujuan.
+            if not cursor.execute(
+                "SELECT 1 FROM master_wilayah WHERE kode_wilayah = ? LIMIT 1",
+                (kode_wilayah,),
+            ).fetchone():
+                cursor.execute(
+                    """
+                    INSERT INTO master_wilayah (
+                        kode_wilayah, nama_wilayah, tipe_wilayah,
+                        aktif, urutan, sync_id
+                    )
+                    VALUES (?, ?, 'PROVINSI', 1, 999, ?)
+                    """,
+                    (kode_wilayah, nama, str(uuid.uuid4())),
+                )
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO cabang_wilayah (
+                    kode_cabang, kode_wilayah, prefix_resi,
+                    aktif, sync_id
+                )
+                VALUES (?, ?, ?, 1, ?)
+                """,
+                (
+                    kode_cabang,
+                    kode_wilayah,
+                    str(raw_prefix or "").strip().upper() or None,
+                    str(uuid.uuid4()),
+                ),
+            )
+
+
+
+def _migration_v7(cursor) -> None:
+    """Fondasi konfigurasi generic: penomoran dokumen + master opsi operasional."""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS numbering_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kode_cabang TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            format_template TEXT NOT NULL,
+            starting_count INTEGER NOT NULL DEFAULT 1,
+            current_count INTEGER NOT NULL DEFAULT 0,
+            padding INTEGER NOT NULL DEFAULT 5,
+            reset_rule TEXT NOT NULL DEFAULT 'NONE',
+            aktif INTEGER NOT NULL DEFAULT 1,
+            sync_id TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP,
+            UNIQUE (kode_cabang, document_type),
+            FOREIGN KEY (kode_cabang)
+                REFERENCES data_cabang (kode_cabang)
+                ON UPDATE CASCADE
+                ON DELETE CASCADE
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_numbering_settings_branch_doc
+        ON numbering_settings (kode_cabang, document_type, aktif)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS master_option (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            option_group TEXT NOT NULL,
+            option_code TEXT NOT NULL,
+            option_label TEXT NOT NULL,
+            kode_cabang TEXT NOT NULL DEFAULT '*',
+            urutan INTEGER NOT NULL DEFAULT 0,
+            aktif INTEGER NOT NULL DEFAULT 1,
+            sync_id TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP,
+            UNIQUE (kode_cabang, option_group, option_code)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_master_option_group
+        ON master_option (option_group, kode_cabang, aktif, urutan)
+        """
+    )
+
+    # Seed default client options sebelum trigger outbox dibuat. Ini hanya
+    # bootstrap konfigurasi; perubahan berikutnya dilakukan dari Settings.
+    numbering_defaults = {
+        "RESI": ("{CABANG}-{WILAYAH}-{SEQ}", 1000, 0, 5, "NONE"),
+        "BUKU_GUDANG": ("BG-{CABANG}-{TAHUN}-{SEQ}", 1, 0, 5, "YEARLY"),
+        "MANIFEST": ("MAN-{CABANG}-{TAHUN}-{SEQ}", 1, 0, 5, "YEARLY"),
+        "INVOICE": ("INV-{CABANG}-{TAHUN}-{SEQ}", 1, 0, 5, "YEARLY"),
+    }
+    branches = [str(r[0] or '').strip().upper() for r in cursor.execute(
+        "SELECT kode_cabang FROM data_cabang WHERE TRIM(COALESCE(kode_cabang,'')) <> ''"
+    ).fetchall()]
+    for branch in branches:
+        for doc_type, values in numbering_defaults.items():
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO numbering_settings(
+                    kode_cabang, document_type, format_template, starting_count,
+                    current_count, padding, reset_rule, aktif, sync_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (branch, doc_type, *values, str(uuid.uuid4())),
+            )
+
+    option_defaults = [
+        ("BUKU_STATUS_GUDANG", "DI GUDANG", "DI GUDANG", 10),
+        ("BUKU_STATUS_GUDANG", "PERJALANAN", "PERJALANAN", 20),
+        ("BUKU_STATUS_GUDANG", "SELESAI", "SELESAI", 30),
+        ("BUKU_STATUS_TAGIHAN", "BELUM INVOICE", "BELUM INVOICE", 10),
+        ("BUKU_STATUS_TAGIHAN", "BELUM LUNAS", "BELUM LUNAS", 20),
+        ("BUKU_STATUS_TAGIHAN", "LUNAS", "LUNAS", 30),
+        ("BUKU_STATUS_TAGIHAN", "MACET", "MACET", 40),
+        ("BUKU_METODE_PEMBAYARAN", "TF / INVOICE", "TF / INVOICE", 10),
+        ("BUKU_METODE_PEMBAYARAN", "CASH", "CASH", 20),
+        ("ARMADA_JENIS_TRUK", "TB", "TB", 10),
+        ("ARMADA_JENIS_TRUK", "TRONTON", "Tronton", 20),
+        ("ARMADA_JENIS_TRUK", "CDD", "CDD", 30),
+        ("ARMADA_JENIS_TRUK", "PICK-UP", "Pick-up", 40),
+        ("ARMADA_JENIS_TRUK", "LAINNYA", "Lainnya...", 50),
+    ]
+    for group, code, label, order in option_defaults:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO master_option(
+                option_group, option_code, option_label, kode_cabang,
+                urutan, aktif, sync_id
+            ) VALUES (?, ?, ?, '*', ?, 1, ?)
+            """,
+            (group, code, label, order, str(uuid.uuid4())),
+        )
+    destinations = cursor.execute(
+        "SELECT DISTINCT TRIM(tujuan) FROM kapal WHERE TRIM(COALESCE(tujuan,'')) <> ''"
+    ).fetchall()
+    for idx, (destination,) in enumerate(destinations, start=100):
+        label = str(destination).strip().upper()
+        code = ' '.join(label.split())
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO master_option(
+                option_group, option_code, option_label, kode_cabang,
+                urutan, aktif, sync_id
+            ) VALUES ('ARMADA_TUJUAN_KAPAL', ?, ?, '*', ?, 1, ?)
+            """,
+            (code, label, idx, str(uuid.uuid4())),
+        )
+
+    # Local outbox triggers. Saat initial/incremental pull berjalan,
+    # sync_control.suppress_outbox mencegah loop balik ke server.
+    num_payload_new = "json_object(" + ", ".join([
+        "'kode_cabang', NEW.kode_cabang",
+        "'document_type', NEW.document_type",
+        "'format_template', NEW.format_template",
+        "'starting_count', NEW.starting_count",
+        "'current_count', NEW.current_count",
+        "'padding', NEW.padding",
+        "'reset_rule', NEW.reset_rule",
+        "'aktif', NEW.aktif",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+    ]) + ")"
+    num_payload_old = num_payload_new.replace('NEW.', 'OLD.')
+    for name in (
+        'trg_local_numbering_insert',
+        'trg_local_numbering_update',
+        'trg_local_numbering_delete',
+    ):
+        cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_numbering_insert
+        AFTER INSERT ON numbering_settings
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('numbering_settings',NEW.sync_id,'INSERT',{num_payload_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_numbering_update
+        AFTER UPDATE ON numbering_settings
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('numbering_settings',NEW.sync_id,'UPDATE',{num_payload_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_numbering_delete
+        AFTER DELETE ON numbering_settings
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('numbering_settings',OLD.sync_id,'DELETE',{num_payload_old});
+        END
+    """)
+
+    opt_payload_new = "json_object(" + ", ".join([
+        "'option_group', NEW.option_group",
+        "'option_code', NEW.option_code",
+        "'option_label', NEW.option_label",
+        "'kode_cabang', NEW.kode_cabang",
+        "'urutan', NEW.urutan",
+        "'aktif', NEW.aktif",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+    ]) + ")"
+    opt_payload_old = opt_payload_new.replace('NEW.', 'OLD.')
+    for name in (
+        'trg_local_master_option_insert',
+        'trg_local_master_option_update',
+        'trg_local_master_option_delete',
+    ):
+        cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_master_option_insert
+        AFTER INSERT ON master_option
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('master_option',NEW.sync_id,'INSERT',{opt_payload_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_master_option_update
+        AFTER UPDATE ON master_option
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('master_option',NEW.sync_id,'UPDATE',{opt_payload_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_master_option_delete
+        AFTER DELETE ON master_option
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('master_option',OLD.sync_id,'DELETE',{opt_payload_old});
+        END
+    """)
+
+
+
 _SCHEMA_MIGRATIONS = {
     1: _migration_v1,
     2: _migration_v2,
     3: _migration_v3,
     4: _migration_v4,
+    5: _migration_v5,
+    6: _migration_v6,
+    7: _migration_v7,
 }
 
 

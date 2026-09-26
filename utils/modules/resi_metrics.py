@@ -23,7 +23,6 @@ RESI_TOTAL_ONGKIR_HEIGHT = 40
 # Area utama + splitter
 # ---------------------------------------------------------------------------
 RESI_SCROLL_LEFT_MIN_WIDTH = 700
-RESI_SCROLL_LEFT_MAX_WIDTH = 1800
 RESI_SPLITTER_INITIAL_SIZES = (856, 256)
 
 # ---------------------------------------------------------------------------
@@ -87,7 +86,6 @@ RESI_ACTION_TOP_GAP = 15
 RESI_HISTORY_MARGINS = (8, 8, 8, 8)
 RESI_HISTORY_MIN_WIDTH = 256
 RESI_HISTORY_MAX_WIDTH = 520
-RESI_HISTORY_DATE_WIDTH = 112
 RESI_HISTORY_RESET_WIDTH = 56
 
 # ---------------------------------------------------------------------------
