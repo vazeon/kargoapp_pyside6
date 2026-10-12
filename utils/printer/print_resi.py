@@ -45,8 +45,8 @@ def _buat_logo_gambar_html() -> str:
     """
     root_project = Path(__file__).resolve().parents[2]
     nilai_path = (
-        DATA_CLIENT.get("logo_path")
-        or "assets/logo/logo_mahkota_kargo.png"
+            DATA_CLIENT.get("logo_path")
+            or "assets/logo/logo_mahkota_kargo.png"
     )
 
     logo_path = Path(str(nilai_path)).expanduser()
@@ -78,8 +78,8 @@ def _teks_koli(nilai: Any) -> str:
 
 
 def _format_rupiah(
-    nilai: Any,
-    kosong_jika_nol: bool = True,
+        nilai: Any,
+        kosong_jika_nol: bool = True,
 ) -> str:
     hasil = format_ke_rupiah(nilai)
 
@@ -94,8 +94,8 @@ def _format_rupiah(
 
 
 def _format_desimal(
-    nilai: Any,
-    kosong_jika_nol: bool = True,
+        nilai: Any,
+        kosong_jika_nol: bool = True,
 ) -> str:
     return format_angka_indonesia(
         nilai,
@@ -119,9 +119,9 @@ def _persen_ppn_cetak(data: dict | None = None) -> Decimal:
 
 
 def _hitung_tarif_satuan_cetak(
-    nilai: Any,
-    tipe_pajak: str,
-    ppn_persen: Decimal | None = None,
+        nilai: Any,
+        tipe_pajak: str,
+        ppn_persen: Decimal | None = None,
 ) -> int:
     """Mengembalikan tarif satuan untuk preview, termasuk PPN bila transaksi pajak."""
     tarif_dasar = max(0, rupiah_to_int(str(nilai or "")))
@@ -143,7 +143,7 @@ def _hitung_tarif_satuan_cetak(
 
 
 def _ambil_rekening(
-    tipe_pajak: str,
+        tipe_pajak: str,
 ) -> list[str]:
     key = (
         "rekening_pajak"
@@ -157,9 +157,9 @@ def _ambil_rekening(
         try:
             rekening = json.loads(rekening)
         except (
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
         ):
             rekening = []
 
@@ -171,14 +171,14 @@ def _ambil_rekening(
 
 
 def _buat_html_rekening(
-    tipe_pajak: str,
+        tipe_pajak: str,
 ) -> str:
     hasil = [
         "<strong>PEMBAYARAN :</strong><br>"
     ]
 
     for rekening in _ambil_rekening(
-        tipe_pajak
+            tipe_pajak
     ):
         if not rekening:
             continue
@@ -207,8 +207,6 @@ def _buat_html_rekening(
             )
 
     return "".join(hasil)
-
-
 
 
 def _identitas_perusahaan_resi():
@@ -270,18 +268,18 @@ def _siapkan_baris_barang_resi(data: dict):
 
 def _ambil_tarif_resi(data: dict):
     tarif_kg = (
-        data.get("tarif_kg_raw", "")
-        or data.get("ongkir_kg_raw", "")
-        or data.get("ongkir_per_kg", "")
-        or data.get("tarif_kg", "")
-        or data.get("ongkir_kg", "")
+            data.get("tarif_kg_raw", "")
+            or data.get("ongkir_kg_raw", "")
+            or data.get("ongkir_per_kg", "")
+            or data.get("tarif_kg", "")
+            or data.get("ongkir_kg", "")
     )
     tarif_m3 = (
-        data.get("tarif_m3_raw", "")
-        or data.get("ongkir_m3_raw", "")
-        or data.get("ongkir_per_cbm", "")
-        or data.get("tarif_m3", "")
-        or data.get("ongkir_m3", "")
+            data.get("tarif_m3_raw", "")
+            or data.get("ongkir_m3_raw", "")
+            or data.get("ongkir_per_cbm", "")
+            or data.get("tarif_m3", "")
+            or data.get("ongkir_m3", "")
     )
     return tarif_kg, tarif_m3
 
@@ -337,14 +335,21 @@ def _kota_penerima_html(data: dict) -> str:
     return ""
 
 
-def _nama_admin_cetak() -> str:
-    nama_admin = str(CURRENT_SESSION.get("username") or "ADMIN").strip().upper()
+def _nama_admin_cetak(data: dict | None = None) -> str:
+    data = data or {}
+    nama_admin = str(
+        data.get("created_by_name")
+        or data.get("created_by_username")
+        or CURRENT_SESSION.get("nama_lengkap")
+        or CURRENT_SESSION.get("username")
+        or "ADMIN"
+    ).strip().upper()
     return nama_admin or "..................."
 
 
 def cetak_resi_ke_printer(
-    data: dict,
-    parent_window=None,
+        data: dict,
+        parent_window=None,
 ) -> None:
     """Membuat preview dan mencetak dokumen Resi."""
     printer = buat_printer(JENIS_RESI)
@@ -355,7 +360,7 @@ def cetak_resi_ke_printer(
     teks_tarif_satuan = _buat_teks_tarif_satuan(data, tipe_pajak)
     html_kolom_tagihan = _buat_html_kolom_tagihan(data, teks_tarif_satuan)
     str_kota = _kota_penerima_html(data)
-    nama_admin = _nama_admin_cetak()
+    nama_admin = _nama_admin_cetak(data)
     font_dokumen = get_master_font()
 
     html_content = f"""
@@ -505,15 +510,15 @@ def cetak_resi_ke_printer(
     <body>
         <table class="header-table">
             <tr>
-                
+
                 <td width="37%" class="comp-details"
                     valign="middle">
                     <strong>{_esc(comp_name)}</strong><br>
                     📍 {_esc(comp_address)}<br>
                     📞 {_esc(comp_phone)}
                 </td>
-            
-            
+
+
                 <td width="38%" valign="middle"
                     style="white-space: nowrap;">
                     <table class="brand-table" cellpadding="0" cellspacing="0">
@@ -527,7 +532,7 @@ def cetak_resi_ke_printer(
                         </tr>
                     </table>
                 </td>
-                
+
                 <td width="25%" valign="middle">
                     <table class="box-resi" width="100%">
                         <tr>

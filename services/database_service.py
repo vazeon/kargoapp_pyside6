@@ -6,16 +6,23 @@ import logging
 import re
 import uuid
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
-from config import CURRENT_SESSION, DATA_CLIENT, CENTRAL_BRANCH_ROLES
+from audit_context import install_sqlite_audit_functions
+from config import CURRENT_SESSION, DATA_CLIENT, CENTRAL_BRANCH_ROLES, BRANCH_ACCESS_VIEW, cabang_boleh_tulis, mode_akses_cabang
+from supabase_client import SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, supabase
+import services.numbering_service as numbering_service
 
 logger = logging.getLogger(__name__)
 
 # Performance cache (in-memory)
+# Autocomplete harus mengikuti perubahan master yang masuk dari Supabase -> SQLite.
+# Cache lama bersifat permanen per sesi sehingga bisa menahan daftar kosong/lama
+# sampai aplikasi direstart. Sekarang cache memakai TTL + fingerprint DB lokal.
 _AUTOCOMPLETE_CACHE = {}
+_AUTOCOMPLETE_CACHE_TTL = 5.0
 
-# CLOUD PLACEHOLDER: tetap False sampai adapter/sinkronisasi Supabase benar-benar tersedia.
-USE_CLOUD = False
 
 # ==============================================================================
 # 01. ERROR TERSTRUKTUR
@@ -45,6 +52,7 @@ def get_db_connection(db_name=None):
     target_db = db_name or CURRENT_SESSION.get("db_name", "database_cargo.db")
     conn = sqlite3.connect(str(target_db), timeout=20.0)
     conn.execute("PRAGMA foreign_keys = ON")
+    install_sqlite_audit_functions(conn)
     # SQLite performance tuning (safe for existing schema)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
@@ -54,7 +62,11 @@ def get_db_connection(db_name=None):
 
 @contextmanager
 def _db_transaction(db_name=None, *, immediate=False):
-    """Kelola commit/rollback/close untuk transaksi CRUD sederhana."""
+    """Kelola transaksi SQLite dan cegah mutation saat cabang aktif VIEW ONLY."""
+    if immediate and str(CURRENT_SESSION.get("active_access_mode") or "FULL").strip().upper() == BRANCH_ACCESS_VIEW:
+        raise PermissionError(
+            "Cabang aktif sedang dalam mode VIEW ONLY. Operasi perubahan data tidak diizinkan."
+        )
     conn = get_db_connection(db_name)
     try:
         if immediate:
@@ -75,6 +87,17 @@ def _text(value):
 def _upper(value):
     return _text(value).upper()
 
+def _audit_actor_values():
+    """Ambil snapshot user aktif untuk penulisan record lokal.
+
+    Identitas ini harus menempel pada record saat dibuat, sehingga tetap benar
+    ketika antrean offline baru dikirim setelah user berganti akun.
+    """
+    user_id = str(CURRENT_SESSION.get("id_user") or "").strip() or None
+    username = str(CURRENT_SESSION.get("username") or "").strip().upper() or None
+    name = str(CURRENT_SESSION.get("nama_lengkap") or "").strip() or username
+    return user_id, username, name
+
 def _rollback(conn):
     if conn:
         conn.rollback()
@@ -88,6 +111,15 @@ def _kode_cabang_aktif(kode_cabang=None):
     return _upper(
         kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT") or "PUSAT"
     )
+
+def _pastikan_boleh_tulis_cabang(kode_cabang=None):
+    """Blok mutation lokal saat user membuka cabang dalam mode VIEW ONLY."""
+    kode = _kode_cabang_aktif(kode_cabang)
+    if not cabang_boleh_tulis(kode):
+        raise PermissionError(
+            f"Cabang {kode} sedang dalam mode VIEW ONLY. Data cabang ini tidak dapat diubah oleh akun ini."
+        )
+    return kode
 
 def _fetchall(query, params=(), *, db_name=None):
     """Eksekusi query baca dan selalu tutup koneksi setelah fetchall."""
@@ -375,8 +407,6 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
 
 def cari_histori_resi(keyword, kode_cabang):
     """Pencarian live histori resi pada cabang aktif."""
-    if USE_CLOUD:
-        return []
 
     keyword = str(keyword or "").strip().lower()
     kode_cabang = str(
@@ -405,8 +435,6 @@ def cari_histori_resi(keyword, kode_cabang):
 
 def ambil_histori_resi_by_tanggal(tgl_pilih, kode_cabang):
     """Memuat daftar resi di sidebar kanan berdasarkan kalender yang dipilih"""
-    if USE_CLOUD:
-        return None
     return _fetchall(
         "SELECT no_resi, penerima FROM data_resi WHERE tanggal_masuk = ? AND kode_cabang = ? ORDER BY rowid ASC",
         (tgl_pilih, kode_cabang),
@@ -421,8 +449,6 @@ def ambil_histori_resi_by_rentang(
     perlu mengambil data di luar rentang lalu memfilternya di Python. Tanggal
     disertakan pada hasil untuk kebutuhan grouping bulan di panel histori.
     """
-    if USE_CLOUD:
-        return []
 
     tanggal_awal = str(tanggal_awal or "").strip()
     tanggal_akhir = str(tanggal_akhir or "").strip()
@@ -457,6 +483,33 @@ def ambil_histori_resi_by_rentang(
         logger.error("[Resi] Gagal mengambil histori rentang: %s", exc)
         return []
 
+def ambil_identitas_pembuat_resi(no_resi):
+    """Ambil snapshot identitas pembuat/perubahan Resi."""
+    try:
+        row = _fetchone(
+            """
+            SELECT created_by_user_id, created_by_username, created_by_name,
+                   updated_by_user_id, updated_by_username, updated_by_name
+            FROM data_resi
+            WHERE no_resi = ?
+            LIMIT 1
+            """,
+            (str(no_resi or "").strip().upper(),),
+        )
+        if not row:
+            return {}
+        return {
+            "created_by_user_id": row[0],
+            "created_by_username": row[1],
+            "created_by_name": row[2],
+            "updated_by_user_id": row[3],
+            "updated_by_username": row[4],
+            "updated_by_name": row[5],
+        }
+    except sqlite3.Error:
+        logger.exception("[Resi] Gagal membaca identitas pembuat %s", no_resi)
+        return {}
+
 def ambil_detail_resi(no_resi):
     """Mengambil data lengkap satu resi untuk keperluan Cetak / Preview Nota.
 
@@ -464,8 +517,6 @@ def ambil_detail_resi(no_resi):
     dikembalikan pada posisi lama sebagai representasi kompatibilitas untuk UI
     dan modul cetak yang sudah ada.
     """
-    if USE_CLOUD:
-        return None
 
     conn = None
     try:
@@ -492,7 +543,13 @@ def ambil_detail_resi(no_resi):
                    kota_asal,
                    jenis_pajak,
                    subtotal_ongkir,
-                   revision
+                   revision,
+                   created_by_user_id,
+                   created_by_username,
+                   created_by_name,
+                   updated_by_user_id,
+                   updated_by_username,
+                   updated_by_name
             FROM data_resi
             WHERE no_resi = ?
             """,
@@ -510,27 +567,94 @@ def ambil_detail_resi(no_resi):
     finally:
         _close(conn)
 
+def _autocomplete_db_fingerprint(cursor, kode_cabang):
+    """Fingerprint ringan untuk mendeteksi master yang berubah di SQLite.
+
+    Sync worker menulis langsung ke SQLite, sehingga cache Python tidak menerima
+    callback. Kombinasi jumlah + MAX(updated_at) + MAX(sync_id) cukup murah dan
+    menangkap insert/update/delete/sync ulang tanpa menghapus cache setiap query.
+    """
+    row = cursor.execute(
+        """
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM master_pengirim
+                WHERE kode_cabang = ?
+                  AND TRIM(COALESCE(nama, '')) <> ''
+            ) AS pengirim_count,
+            COALESCE((
+                SELECT MAX(updated_at)
+                FROM master_pengirim
+                WHERE kode_cabang = ?
+                  AND TRIM(COALESCE(nama, '')) <> ''
+            ), '') AS pengirim_updated,
+            COALESCE((
+                SELECT MAX(sync_id)
+                FROM master_pengirim
+                WHERE kode_cabang = ?
+                  AND TRIM(COALESCE(nama, '')) <> ''
+            ), '') AS pengirim_sync,
+            (
+                SELECT COUNT(*)
+                FROM master_penerima
+                WHERE kode_cabang = ?
+                  AND TRIM(COALESCE(nama, '')) <> ''
+            ) AS penerima_count,
+            COALESCE((
+                SELECT MAX(updated_at)
+                FROM master_penerima
+                WHERE kode_cabang = ?
+                  AND TRIM(COALESCE(nama, '')) <> ''
+            ), '') AS penerima_updated,
+            COALESCE((
+                SELECT MAX(sync_id)
+                FROM master_penerima
+                WHERE kode_cabang = ?
+                  AND TRIM(COALESCE(nama, '')) <> ''
+            ), '') AS penerima_sync
+        """,
+        (kode_cabang,) * 6,
+    ).fetchone()
+    return tuple(row or ())
+
+
+def clear_autocomplete_cache(kode_cabang=None):
+    """Invalidate cache autocomplete global atau hanya satu cabang."""
+    if kode_cabang is None:
+        _AUTOCOMPLETE_CACHE.clear()
+        return
+    _AUTOCOMPLETE_CACHE.pop(
+        str(kode_cabang or '').strip().upper(),
+        None,
+    )
+
+
 def ambil_data_autocomplete(kode_cabang):
-    """Menyediakan daftar nama Pengirim dan Penerima untuk QCompleter di form input Resi"""
-    if USE_CLOUD:
-        return [], []
-
-    pengirim, penerima = [], []
-
+    """Menyediakan daftar Pengirim/Penerima yang selalu konsisten dengan SQLite lokal."""
     kode_cabang = str(kode_cabang or CURRENT_SESSION.get(
         'kode_cabang',
         'PUSAT',
     )).strip().upper()
 
-    cache_key = kode_cabang
-    if cache_key in _AUTOCOMPLETE_CACHE:
-        return _AUTOCOMPLETE_CACHE[cache_key]
-
     conn = None
-
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        fingerprint = _autocomplete_db_fingerprint(cursor, kode_cabang)
+        cache_key = kode_cabang
+        sekarang = time.monotonic()
+        cached = _AUTOCOMPLETE_CACHE.get(cache_key)
+        if cached:
+            cache_time, cache_fingerprint, cache_data = cached
+            if (
+                sekarang - cache_time < _AUTOCOMPLETE_CACHE_TTL
+                and cache_fingerprint == fingerprint
+            ):
+                return cache_data
+
+        pengirim, penerima = [], []
+        load_ok = True
 
         try:
             cursor.execute("""
@@ -542,6 +666,7 @@ def ambil_data_autocomplete(kode_cabang):
             """, (kode_cabang,))
             pengirim = [str(r[0]).strip().upper() for r in cursor.fetchall() if r[0]]
         except sqlite3.OperationalError as e:
+            load_ok = False
             print(f"[Autocomplete Service] Gagal memuat pengirim: {e}")
 
         try:
@@ -554,20 +679,26 @@ def ambil_data_autocomplete(kode_cabang):
             """, (kode_cabang,))
             penerima = [str(r[0]).strip().upper() for r in cursor.fetchall() if r[0]]
         except sqlite3.OperationalError as e:
+            load_ok = False
             print(f"[Autocomplete Service] Gagal memuat penerima: {e}")
+
+        hasil = (pengirim, penerima)
+        if load_ok:
+            _AUTOCOMPLETE_CACHE[cache_key] = (
+                time.monotonic(),
+                fingerprint,
+                hasil,
+            )
+        return hasil
 
     except Exception as e:
         print(f"[Autocomplete Service] Critical Error: {e}")
-
+        return [], []
     finally:
         _close(conn)
 
-    return pengirim, penerima
-
 def ambil_detail_pengirim(name_clean, kode_cabang):
     """Autofill detail profil pengirim saat nama dipilih di form resi"""
-    if USE_CLOUD:
-        return None
     return _fetchone(
         """
         SELECT no_hp, alamat, kota
@@ -582,8 +713,6 @@ def ambil_detail_pengirim(name_clean, kode_cabang):
 
 def ambil_detail_penerima(nama_penerima, kode_cabang):
     """Autofill detail profil penerima saat nama dipilih di form resi"""
-    if USE_CLOUD:
-        return None
     return _fetchone(
         """
         SELECT no_hp, alamat, kota, provinsi
@@ -637,8 +766,6 @@ def _ambil_sekuens_resi_cursor(cursor, kode_cabang, pref):
 
 def ambil_sekuens_resi(kode_cabang, pref):
     """Menghitung nomor urut/counter resi otomatis berdasarkan cabang dan tipe transaksi."""
-    if USE_CLOUD:
-        return None
 
     conn = None
     try:
@@ -649,46 +776,21 @@ def ambil_sekuens_resi(kode_cabang, pref):
 
 
 def _nomor_resi_atomic_cursor(cursor, data, kode_cabang, fallback_no_resi):
-    """Tentukan nomor Resi final di dalam transaction lock tanpa mengubah schema."""
+    """Alokasikan nomor RESI fixed di dalam transaction penyimpanan."""
     cfg = data.get("_atomic_resi")
     if not isinstance(cfg, dict):
         return fallback_no_resi
-
-    pref = str(cfg.get("prefix") or "").strip().upper()
-    template = str(cfg.get("template") or "").strip()
+    wilayah = str(cfg.get("wilayah") or data.get("provinsi_tujuan") or "").strip().upper()
     suffix = str(cfg.get("suffix") or "").strip().upper()
-
-    # Template lama/custom yang tidak menyediakan counter tetap memakai nomor
-    # dari UI supaya kompatibilitas konfigurasi existing tidak berubah.
-    if not pref or "[COUNTER]" not in template:
-        return fallback_no_resi
-
-    base_number, max_num = _ambil_sekuens_resi_cursor(
-        cursor, kode_cabang, pref
-    )
-    counter = max(base_number, max_num) + 1
-
-    while True:
-        kandidat = (
-            template.replace("[PREFIX]", pref)
-            .replace("[COUNTER]", str(counter))
-            .replace("[SUFFIX]", suffix)
-            .strip()
-            .upper()
+    try:
+        result = numbering_service.allocate_number_cursor(
+            cursor, "RESI", kode_cabang,
+            wilayah=wilayah, tanggal=data.get("tanggal_masuk"), suffix=suffix,
         )
-        if not kandidat:
-            return fallback_no_resi
-
-        # no_resi adalah identitas global. Pemeriksaan ini juga mencegah
-        # collision apabila dua cabang kebetulan memakai prefix yang sama.
-        sudah_ada = cursor.execute(
-            "SELECT 1 FROM data_resi WHERE no_resi = ? LIMIT 1",
-            (kandidat,),
-        ).fetchone()
-        if not sudah_ada:
-            data["no_resi"] = kandidat
-            return kandidat
-        counter += 1
+        return result.nomor
+    except Exception as exc:
+        logger.error("[Resi] Gagal alokasi numbering fixed: %s", exc)
+        return fallback_no_resi
 
 def _insert_resi_baru(cursor, data, no_resi, kode_cabang):
     cursor.execute(
@@ -699,10 +801,12 @@ def _insert_resi_baru(cursor, data, no_resi, kode_cabang):
             penerima, hp_penerima, alamat_penerima, kota_tujuan,
             nama_barang, berat, koli, cbm,
             ongkir_per_kg, ongkir_per_cbm, subtotal_ongkir, jenis_pajak, total_ongkir,
-            pembayaran, status_resi, foto_bukti, rincian_json, sync_id, updated_at
+            pembayaran, status_resi, foto_bukti, rincian_json, sync_id,
+            created_by_user_id, created_by_username, created_by_name,
+            updated_by_user_id, updated_by_username, updated_by_name, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                'DI GUDANG', 'BELUM', ?, ?, CURRENT_TIMESTAMP)
+                'DI GUDANG', 'BELUM', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         """,
         (
             no_resi, kode_cabang, data.get("tanggal_masuk"),
@@ -723,6 +827,8 @@ def _insert_resi_baru(cursor, data, no_resi, kode_cabang):
             str(data.get("pembayaran", "")).strip().upper(),
             data.get("rincian_json", "[]"),
             str(data.get("sync_id") or uuid.uuid4()),
+            *_audit_actor_values(),
+            *_audit_actor_values(),
         ),
     )
 
@@ -731,18 +837,25 @@ def _upsert_buku_gudang_resi(cursor, data, no_resi, kode_cabang):
         """
         INSERT INTO buku_gudang (
             id_gudang, kode_cabang, tanggal, no_resi,
-            jenis, status_resi, updated_at
+            jenis, status_resi, sync_id, updated_at
         )
-        VALUES (?, ?, ?, ?, 'BARANG MASUK', 'DI GUDANG', CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, 'BARANG MASUK', 'DI GUDANG', ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id_gudang) DO UPDATE SET
             kode_cabang = excluded.kode_cabang,
             tanggal = excluded.tanggal,
             no_resi = excluded.no_resi,
             jenis = excluded.jenis,
             status_resi = excluded.status_resi,
+            deleted_at = NULL,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (f"GDG-{no_resi}", kode_cabang, data.get("tanggal_masuk"), no_resi),
+        (
+            f"GDG-{no_resi}",
+            kode_cabang,
+            data.get("tanggal_masuk"),
+            no_resi,
+            str(uuid.uuid4()),
+        ),
     )
 
 def _upsert_master_pengirim_resi(cursor, data, kode_cabang):
@@ -950,12 +1063,16 @@ def _ganti_rincian_resi(cursor, no_resi, data):
         cursor.execute(
             """
             INSERT INTO data_resi_detail (
-                no_resi, urutan, nama_barang, koli, berat, cbm, sync_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                no_resi, urutan, nama_barang, koli, berat, cbm, sync_id,
+                created_by_user_id, created_by_username, created_by_name,
+                updated_by_user_id, updated_by_username, updated_by_name, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 no_resi, urutan, item["nama"], item["qty"],
                 item["berat"], item["cbm"], str(uuid.uuid4()),
+                *_audit_actor_values(),
+                *_audit_actor_values(),
             ),
         )
     return rincian
@@ -1174,8 +1291,6 @@ def _catat_audit_resi(
 
 def ambil_audit_resi(no_resi, kode_cabang=None, limit=200):
     """Ambil audit manual Edit Resi/Buku Gudang untuk nomor atau varian suffix pajaknya."""
-    if USE_CLOUD:
-        return []
 
     cabang = str(
         kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")
@@ -1220,10 +1335,6 @@ def ambil_audit_resi(no_resi, kode_cabang=None, limit=200):
 
 def simpan_transaksi_resi(data):
     """Menyimpan resi, buku gudang, serta master pengirim/penerima dalam satu transaksi."""
-    if USE_CLOUD:
-        return False, KesalahanTransaksiResi(
-            KODE_DB_ERROR, "Penyimpanan cloud belum diaktifkan."
-        )
 
     no_resi = str(data.get("no_resi", "")).strip().upper()
     kode_cabang = str(
@@ -1233,6 +1344,10 @@ def simpan_transaksi_resi(data):
         return False, KesalahanTransaksiResi(KODE_DB_ERROR, "Nomor resi tidak boleh kosong.")
     if not kode_cabang:
         return False, KesalahanTransaksiResi(KODE_DB_ERROR, "Kode cabang tidak boleh kosong.")
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, KesalahanTransaksiResi(KODE_DB_ERROR, str(exc))
 
     conn = None
     try:
@@ -1409,10 +1524,6 @@ def _update_transaksi_resi_cursor(
 
 def update_transaksi_resi(data):
     """Perbarui data input Resi dan suffix pajaknya secara atomic."""
-    if USE_CLOUD:
-        return False, KesalahanTransaksiResi(
-            KODE_DB_ERROR, "Penyimpanan cloud belum diaktifkan."
-        )
 
     no_resi_lama = str(
         data.get("no_resi_lama") or data.get("no_resi") or ""
@@ -1424,6 +1535,11 @@ def update_transaksi_resi(data):
         str(data.get("jenis_pajak", "NONPAJAK")).strip().upper() or "NONPAJAK"
     )
     no_resi_baru = sesuaikan_nomor_resi_dengan_pajak(no_resi_lama, jenis_pajak)
+
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, KesalahanTransaksiResi(KODE_DB_ERROR, str(exc))
 
     if not no_resi_lama:
         return False, KesalahanTransaksiResi(
@@ -1593,8 +1709,6 @@ def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
     ``filters['_status_penagihan']``. Kolom filter indeks 5 juga diperlakukan
     sebagai STATUS PENAGIHAN pada Buku Gudang V2.
     """
-    if USE_CLOUD:
-        return None
 
     incoming_filters = dict(filters or {})
     bulan_terpilih = incoming_filters.pop("_bulan", None)
@@ -1896,13 +2010,15 @@ def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
 
     Buku Gudang hanya menjadi editor operasional; sumber detail tetap data_resi_detail.
     """
-    if USE_CLOUD:
-        return False
 
     no_resi = str(no_resi or "").strip().upper()
     kode_cabang = str(kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")).strip().upper()
 
     if not no_resi:
+        return False
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError:
         return False
 
     try:
@@ -1963,8 +2079,6 @@ def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
 
 def ambil_data_edit_buku_gudang(no_resi, kode_cabang):
     """Baca header dan seluruh detail dalam satu snapshot, tanpa filter tabel."""
-    if USE_CLOUD:
-        return None
     with _db_transaction() as (_, cursor):
         cursor.execute("BEGIN")
         snapshot = _snapshot_resi_untuk_audit(cursor, no_resi, kode_cabang)
@@ -2007,8 +2121,6 @@ def update_baris_buku_gudang(
     expected_revision=None, *, detail_barang=None,
 ):
     """Simpan header dan detail secara atomic, dengan pemeriksaan revision."""
-    if USE_CLOUD:
-        return False
 
     no_resi = str(no_resi or "").strip().upper()
     kode_cabang = str(
@@ -2026,6 +2138,10 @@ def update_baris_buku_gudang(
             return False
     if not safe_updates and not item_updates and detail_barang is None:
         return True
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError:
+        return False
 
     conn = None
     try:
@@ -2055,8 +2171,6 @@ def update_baris_buku_gudang(
         _close(conn)
 
 def tandai_resi_selesai_massal(resi_terpilih, kode_cabang):
-    if USE_CLOUD:
-        return False
 
     daftar_resi = list(dict.fromkeys(
         str(no_resi).strip().upper()
@@ -2065,6 +2179,10 @@ def tandai_resi_selesai_massal(resi_terpilih, kode_cabang):
     ))
     if not daftar_resi:
         return True
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError:
+        return False
 
     conn = None
     try:
@@ -2093,8 +2211,6 @@ def tandai_resi_selesai_massal(resi_terpilih, kode_cabang):
 
 def ambil_truk_list(kode_cabang=None):
     """Daftar nomor polisi dan sopir milik cabang aktif."""
-    if USE_CLOUD:
-        return []
     return _fetchall(
         """
         SELECT no_polisi, nama_sopir
@@ -2107,8 +2223,6 @@ def ambil_truk_list(kode_cabang=None):
 
 def ambil_detail_truk_by_nopol(nopol, kode_cabang=None):
     """Detail truk berdasarkan nomor polisi pada cabang aktif."""
-    if USE_CLOUD:
-        return None
     return _fetchone(
         """
         SELECT nama_sopir, jenis_truk
@@ -2121,8 +2235,6 @@ def ambil_detail_truk_by_nopol(nopol, kode_cabang=None):
 
 def ambil_detail_truk_by_sopir(sopir, kode_cabang=None):
     """Detail truk berdasarkan nama sopir pada cabang aktif."""
-    if USE_CLOUD:
-        return None
     return _fetchone(
         """
         SELECT no_polisi, jenis_truk, ket_truk
@@ -2135,24 +2247,18 @@ def ambil_detail_truk_by_sopir(sopir, kode_cabang=None):
     )
 
 def ambil_no_manifest_list_by_prefix(prefix, kode_cabang):
-    if USE_CLOUD:
-        return None
     return _fetchall(
         "SELECT no_manifest FROM data_resi WHERE no_manifest LIKE ? AND kode_cabang = ?",
         (f"{prefix}-%", kode_cabang),
     )
 
 def ambil_daftar_tahun_manifest(kode_cabang):
-    if USE_CLOUD:
-        return None
     return _fetchall(
         "SELECT DISTINCT substr(tanggal_keluar, 1, 4) FROM data_resi WHERE no_manifest IS NOT NULL AND tanggal_keluar IS NOT NULL AND kode_cabang = ?",
         (kode_cabang,),
     )
 
 def ambil_resi_untuk_manifest(kode_cabang, wilayah, is_edit_mode, edit_manifest_id):
-    if USE_CLOUD:
-        return None
     if is_edit_mode:
         query = """SELECT no_resi, tanggal_masuk, pengirim, penerima, kota_tujuan,
                           nama_barang, koli, berat, cbm, no_manifest,
@@ -2175,8 +2281,6 @@ def ambil_resi_untuk_manifest(kode_cabang, wilayah, is_edit_mode, edit_manifest_
     return _fetchall(query, params)
 
 def ambil_histori_manifest(kode_cabang, tahun_terpilih):
-    if USE_CLOUD:
-        return None
     query = """
         SELECT DISTINCT r1.tanggal_keluar, r1.no_manifest, r1.truk,
                         COALESCE(m.nama_kapal, ''),
@@ -2233,17 +2337,34 @@ def _upsert_truk_manifest(cursor, kode_cabang, nopol, sopir, jenis, ket_truk):
         (kode_cabang, nopol, jenis or "BELUM DIKETAHUI", sopir, ket_truk),
     )
 
-def _reset_manifest_lama(cursor, manifest_id, kode_cabang):
-    cursor.execute(
-        """
+def _reset_manifest_lama(cursor, manifest_id, kode_cabang, resi_list=None):
+    """Lepas hanya Resi yang dikeluarkan dari Manifest saat edit.
+
+    Resi yang tetap dipilih tidak di-reset dahulu karena itu akan membuat dua
+    update/outbox untuk satu penyimpanan Manifest. Setiap perubahan operasional
+    pada data_resi menaikkan revision agar CAS sinkronisasi dapat menerimanya.
+    """
+    selected_resi = []
+    for item in (resi_list or []):
+        no_resi = str(item[0] if item else "").strip()
+        if no_resi:
+            selected_resi.append(no_resi)
+
+    sql = """
         UPDATE data_resi
         SET truk = NULL, status_resi = 'DI GUDANG', tanggal_keluar = NULL,
             no_manifest = NULL, ket_manifest = NULL,
+            revision = COALESCE(revision, 0) + 1,
+            is_synced = 0,
             updated_at = CURRENT_TIMESTAMP
         WHERE no_manifest = ? AND kode_cabang = ?
-        """,
-        (manifest_id, kode_cabang),
-    )
+    """
+    params = [manifest_id, kode_cabang]
+    if selected_resi:
+        placeholders = ",".join("?" for _ in selected_resi)
+        sql += f" AND no_resi NOT IN ({placeholders})"
+        params.extend(selected_resi)
+    cursor.execute(sql, tuple(params))
 
 def _upsert_header_manifest(cursor, manifest_id, kode_cabang, tgl_k,
                             nopol, sopir, nama_kapal, note_manifest):
@@ -2251,8 +2372,9 @@ def _upsert_header_manifest(cursor, manifest_id, kode_cabang, tgl_k,
         """
         INSERT INTO manifest (
             id_manifest, kode_cabang, tanggal, no_polisi, nama_sopir,
-            nama_kapal, note_manifest, status_manifest, is_synced, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PERJALANAN', 0, CURRENT_TIMESTAMP)
+            nama_kapal, note_manifest, status_manifest, sync_id, deleted_at,
+            is_synced, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PERJALANAN', ?, NULL, 0, CURRENT_TIMESTAMP)
         ON CONFLICT(id_manifest) DO UPDATE SET
             kode_cabang = excluded.kode_cabang,
             tanggal = excluded.tanggal,
@@ -2261,11 +2383,12 @@ def _upsert_header_manifest(cursor, manifest_id, kode_cabang, tgl_k,
             nama_kapal = excluded.nama_kapal,
             note_manifest = excluded.note_manifest,
             status_manifest = excluded.status_manifest,
+            deleted_at = NULL,
             is_synced = 0,
             updated_at = CURRENT_TIMESTAMP
         """,
         (manifest_id, kode_cabang, tgl_k, nopol or None, sopir,
-         nama_kapal or None, note_manifest or None),
+         nama_kapal or None, note_manifest or None, str(uuid.uuid4())),
     )
 
 def _pasang_resi_ke_manifest(cursor, resi_list, nama_truk, tgl_k,
@@ -2281,7 +2404,10 @@ def _pasang_resi_ke_manifest(cursor, resi_list, nama_truk, tgl_k,
             """
             UPDATE data_resi
             SET truk = ?, status_resi = 'PERJALANAN', tanggal_keluar = ?,
-                no_manifest = ?, ket_manifest = ?, updated_at = CURRENT_TIMESTAMP
+                no_manifest = ?, ket_manifest = ?,
+                revision = COALESCE(revision, 0) + 1,
+                is_synced = 0,
+                updated_at = CURRENT_TIMESTAMP
             WHERE no_resi = ? AND kode_cabang = ?
             """,
             (nama_truk, tgl_k, manifest_id, ket_manifest, no_resi, kode_cabang),
@@ -2297,17 +2423,17 @@ def simpan_atau_update_manifest_data(
     is_edit_mode,
     tgl_k,
 ):
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
 
     manifest_id = str(manifest_id or "").strip().upper()
     kode_cabang = str(kode_cabang or "").strip().upper()
-    if not manifest_id:
-        return False, "Nomor manifest tidak boleh kosong."
     if not kode_cabang:
         return False, "Kode cabang tidak boleh kosong."
     if not resi_list:
         return False, "Pilih minimal satu resi."
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     conn = None
     try:
@@ -2319,9 +2445,22 @@ def simpan_atau_update_manifest_data(
         if not nama_truk:
             return False, "Detail truk atau Note manifest tidak boleh kosong."
 
+        if is_edit_mode:
+            if not manifest_id:
+                return False, "Nomor manifest tidak boleh kosong."
+        else:
+            wilayah = str(
+                truk_payload.get("wilayah") or truk_payload.get("provinsi") or ""
+            ).strip().upper()
+            allocated = numbering_service.allocate_number_cursor(
+                cursor, "MANIFEST", kode_cabang,
+                wilayah=wilayah, tanggal=tgl_k,
+            )
+            manifest_id = allocated.nomor
+
         _upsert_truk_manifest(cursor, kode_cabang, nopol, sopir, jenis, ket_truk)
         if is_edit_mode:
-            _reset_manifest_lama(cursor, manifest_id, kode_cabang)
+            _reset_manifest_lama(cursor, manifest_id, kode_cabang, resi_list=resi_list)
         _upsert_header_manifest(
             cursor, manifest_id, kode_cabang, tgl_k,
             nopol, sopir, nama_kapal, note_manifest,
@@ -2330,7 +2469,7 @@ def simpan_atau_update_manifest_data(
             cursor, resi_list, nama_truk, tgl_k, manifest_id, kode_cabang
         )
         conn.commit()
-        return True, ""
+        return True, manifest_id
     except Exception as exc:
         _rollback(conn)
         return False, str(exc)
@@ -2358,8 +2497,6 @@ def _ambil_teks_manifest(kolom, manifest_id, kode_cabang, label_error):
 
 def ambil_note_manifest(manifest_id, kode_cabang):
     """Mengambil Note umum yang tersimpan pada satu Manifest."""
-    if USE_CLOUD:
-        return ""
     return _ambil_teks_manifest(
         "note_manifest", manifest_id, kode_cabang,
         "[Manifest] Gagal mengambil Note manifest: %s",
@@ -2367,16 +2504,12 @@ def ambil_note_manifest(manifest_id, kode_cabang):
 
 def ambil_nama_kapal_manifest(manifest_id, kode_cabang):
     """Mengambil hanya nama kapal yang tersimpan pada satu Manifest."""
-    if USE_CLOUD:
-        return ""
     return _ambil_teks_manifest(
         "nama_kapal", manifest_id, kode_cabang,
         "[Manifest] Gagal mengambil nama kapal: %s",
     )
 
 def ambil_resi_detail_untuk_cetak(kode_cabang, resi_list):
-    if USE_CLOUD:
-        return []
     daftar_resi = [str(no_resi).strip() for no_resi in (resi_list or []) if str(no_resi).strip()]
     if not daftar_resi:
         return []
@@ -2398,8 +2531,6 @@ def ambil_resi_detail_untuk_cetak(kode_cabang, resi_list):
         return []
 
 def ambil_resi_list_by_manifest(manifest_id, kode_cabang):
-    if USE_CLOUD:
-        return None
     rows = _fetchall(
         "SELECT no_resi FROM data_resi WHERE no_manifest = ? AND kode_cabang = ?",
         (manifest_id, kode_cabang),
@@ -2475,8 +2606,6 @@ def _kumpulkan_nomor_resi_snapshot(value, *, izinkan_fallback=True):
 
 def ambil_invoice_terkait_resi(no_resi):
     """Ambil Invoice terkait Resi; prioritaskan relasi invoice_resi, fallback snapshot."""
-    if USE_CLOUD:
-        return []
 
     kandidat = _varian_nomor_resi_pajak(no_resi)
     if not kandidat:
@@ -2598,8 +2727,6 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
     Invoice sebagai ``SELESAI``. ``MACET`` dan ``BELUM LUNAS`` tidak mengubah
     status operasional Resi.
     """
-    if USE_CLOUD:
-        return False, "Perubahan status cloud belum diaktifkan."
 
     invoice = str(no_invoice or "").strip().upper()
     status = str(status_baru or "").strip().upper()
@@ -2611,6 +2738,10 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
     cabang = str(
         kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")
     ).strip().upper()
+    try:
+        _pastikan_boleh_tulis_cabang(cabang)
+    except PermissionError as exc:
+        return False, str(exc)
     conn = None
     try:
         conn = get_db_connection()
@@ -2741,8 +2872,6 @@ def cek_proteksi_invoice_resi(no_resi, perubahan=None, kode_cabang=None):
 
 def ambil_daftar_cabang_billing():
     """Daftar cabang untuk filter Billing Queue."""
-    if USE_CLOUD:
-        return []
     try:
         return _fetchall(
             """
@@ -2802,8 +2931,6 @@ def ambil_resi_belum_ditagihkan(
     limit=1000,
 ):
     """Ambil Resi yang belum mempunyai relasi Invoice untuk Billing Queue."""
-    if USE_CLOUD:
-        return []
 
     cabang = str(
         kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT") or "PUSAT"
@@ -2995,52 +3122,39 @@ def _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items, source_resi=None)
         )
 
 
-def _sequence_invoice_berikutnya_cursor(cursor, prefix):
-    """Hitung sequence Invoice memakai cursor aktif di dalam transaksi."""
-    prefix = str(prefix or "").strip().upper()
-    if not prefix:
+def _sequence_invoice_berikutnya_cursor(cursor, prefix=None):
+    """Preview sequence Invoice fixed; final number is always allocated atomically on save."""
+    row = cursor.execute(
+        """
+        SELECT starting_count,current_count
+        FROM numbering_counters
+        WHERE kode_cabang=? AND document_type='INVOICE' AND series_code='INV'
+          AND COALESCE(aktif,0)=1 AND deleted_at IS NULL
+        LIMIT 1
+        """,
+        (numbering_service.CENTRAL_INVOICE_BRANCH,),
+    ).fetchone()
+    if not row:
         return 1
+    return max(int(row[0] or 0), int(row[1] or 0) + 1)
 
-    cursor.execute(
-        "SELECT no_invoice FROM invoice_header WHERE no_invoice LIKE ?",
-        (f"{prefix}-%",),
-    )
-    max_sequence = 0
-    pola = re.compile(rf"^{re.escape(prefix)}-(\d+)$", re.IGNORECASE)
-    for row in cursor.fetchall():
-        match = pola.search(str(row[0] or "").strip())
-        if match:
-            max_sequence = max(max_sequence, int(match.group(1)))
-    return max_sequence + 1
-
-
-def dapatkan_sequence_invoice_baru(prefix):
-    """Menghasilkan prediksi sequence berikutnya untuk tampilan UI.
-
-    Nomor final invoice otomatis tetap dialokasikan ulang di dalam transaksi
-    simpan agar dua user tidak memakai sequence yang sama.
-    """
-    if USE_CLOUD:
-        return 1
-    prefix = str(prefix or "").strip()
+def dapatkan_sequence_invoice_baru(prefix=None):
+    conn = None
     try:
         conn = get_db_connection()
-        try:
-            return _sequence_invoice_berikutnya_cursor(conn.cursor(), prefix)
-        finally:
-            _close(conn)
+        return _sequence_invoice_berikutnya_cursor(conn.cursor(), prefix)
     except (sqlite3.Error, ValueError) as exc:
-        logger.error("[Invoice] Gagal membuat sequence: %s", exc)
+        logger.error("[Invoice] Gagal membaca sequence: %s", exc)
         return 1
-
+    finally:
+        _close(conn)
 
 def _alokasikan_nomor_invoice_otomatis_cursor(cursor, header):
-    prefix = str(header.get("auto_invoice_prefix") or "").strip().upper()
-    if not prefix:
-        return ""
-    sequence = _sequence_invoice_berikutnya_cursor(cursor, prefix)
-    return f"{prefix}-{sequence:04d}"
-
+    result = numbering_service.allocate_number_cursor(
+        cursor, "INVOICE", numbering_service.CENTRAL_INVOICE_BRANCH,
+        tanggal=header.get("tanggal"),
+    )
+    return result.nomor
 
 def _validasi_source_resi_invoice_cursor(cursor, source_resi):
     sumber = source_resi if isinstance(source_resi, (list, tuple, set)) else []
@@ -3154,26 +3268,46 @@ def _simpan_detail_invoice(cursor, no_invoice, items):
 
 def simpan_atau_update_invoice(header, items, is_update=False):
     """Menyimpan atau memperbarui invoice beserta detailnya secara atomic."""
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
 
     no_invoice = str(header.get("no_invoice", "")).strip().upper()
     auto_prefix = str(header.get("auto_invoice_prefix") or "").strip().upper()
-    if not no_invoice and not (auto_prefix and not is_update):
+    if is_update and not no_invoice:
         return False, "Nomor invoice tidak boleh kosong."
     if not items:
         return False, "Item invoice tidak boleh kosong."
+    # Invoice terpusat di SBY; hak tulis diperiksa pada branch efektif.
+    invoice_branch = str(numbering_service.CENTRAL_INVOICE_BRANCH).strip().upper()
+    try:
+        _pastikan_boleh_tulis_cabang(invoice_branch)
+    except PermissionError as exc:
+        return False, str(exc)
 
     conn = None
     try:
         from datetime import datetime
+
+        creator_name = str(
+            CURRENT_SESSION.get("nama_lengkap")
+            or CURRENT_SESSION.get("username")
+            or "ADMIN"
+        ).strip()
+        if not is_update:
+            try:
+                metadata_obj = json.loads(str(header.get("metadata_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata_obj = {}
+            if not isinstance(metadata_obj, dict):
+                metadata_obj = {}
+            if not str(metadata_obj.get("signer") or "").strip():
+                metadata_obj["signer"] = creator_name.upper()
+                header["metadata_json"] = json.dumps(metadata_obj, ensure_ascii=False)
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
 
-        if not is_update and not no_invoice:
+        if not is_update:
             no_invoice = _alokasikan_nomor_invoice_otomatis_cursor(cursor, header)
             if not no_invoice:
                 conn.rollback()
@@ -3213,11 +3347,9 @@ def simpan_atau_update_invoice(header, items, is_update=False):
 
 def ambil_histori_invoice(limit=300):
     """Mengambil daftar histori invoice untuk tabel sebelah kiri."""
-    if USE_CLOUD:
-        return None
     try:
         return _fetchall(
-            "SELECT no_invoice, tanggal, client, status FROM invoice_header ORDER BY id DESC LIMIT ?",
+            "SELECT no_invoice, tanggal, client, status, created_by_name FROM invoice_header ORDER BY id DESC LIMIT ?",
             (limit,),
         )
     except Exception as e:
@@ -3226,14 +3358,18 @@ def ambil_histori_invoice(limit=300):
 
 def ambil_invoice_by_no(no_invoice):
     """Membaca data lengkap invoice (header & detail) untuk ditampilkan ke editor."""
-    if USE_CLOUD:
-        return None
 
     conn = None
     try:
         conn = get_db_connection()
         header = conn.execute(
-            "SELECT client, tipe_invoice, jenis_pajak, status, tanggal, metadata_json FROM invoice_header WHERE no_invoice = ?",
+            """
+            SELECT client, tipe_invoice, jenis_pajak, status, tanggal, metadata_json,
+                   created_by_user_id, created_by_username, created_by_name,
+                   updated_by_user_id, updated_by_username, updated_by_name
+            FROM invoice_header
+            WHERE no_invoice = ?
+            """,
             (no_invoice,)
         ).fetchone()
 
@@ -3316,6 +3452,10 @@ def tambah_master_pengirim(kode_cabang, nama, no_hp="", kota="", alamat=""):
     )
     if not nama:
         return False, "Nama pengirim tidak boleh kosong."
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     try:
         with _db_transaction(immediate=True) as (conn, cursor):
@@ -3355,6 +3495,10 @@ def update_master_pengirim_dari_tabel(
     )
     if not nama:
         return False, "Nama pengirim tidak boleh kosong."
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     try:
         with _db_transaction() as (_, cursor):
@@ -3448,6 +3592,10 @@ def tambah_master_penerima(
     pembayaran = _upper(pembayaran or "TF / INVOICE") or "TF / INVOICE"
     if not nama:
         return False, "Nama penerima tidak boleh kosong."
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     try:
         with _db_transaction(immediate=True) as (conn, cursor):
@@ -3484,6 +3632,7 @@ def tambah_master_penerima(
 def ubah_status_tagihan_penerima(id_penerima, status_baru, kode_cabang):
     """Mengubah status tagihan penerima."""
     try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
         with _db_transaction() as (_, cursor):
             cursor.execute(
                 """
@@ -3511,6 +3660,10 @@ def update_master_penerima_dari_tabel(
     pembayaran = _upper(pembayaran or "TF / INVOICE")
     if not nama:
         return False, "Nama penerima tidak boleh kosong."
+    try:
+        _pastikan_boleh_tulis_cabang(kode_cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     try:
         with _db_transaction() as (_, cursor):
@@ -3566,6 +3719,10 @@ def simpan_atau_update_truk(
         return False, "No. Polisi wajib diisi."
     if not jenis:
         return False, "Jenis truk wajib diisi."
+    try:
+        _pastikan_boleh_tulis_cabang(cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     try:
         with _db_transaction(db_name, immediate=True) as (_, cursor):
@@ -3646,6 +3803,10 @@ def simpan_atau_update_truk_full(
         return False, "No. Polisi wajib diisi."
     if not jenis:
         return False, "Jenis truk wajib diisi."
+    try:
+        _pastikan_boleh_tulis_cabang(cabang)
+    except PermissionError as exc:
+        return False, str(exc)
 
     try:
         with _db_transaction(immediate=True) as (conn, cursor):
@@ -3769,8 +3930,6 @@ def simpan_atau_update_kapal_full(nama_kapal, tujuan, ket, foto, mode="TAMBAH"):
 
 def ambil_semua_data_cabang(limit=10):
     """Mengambil daftar kantor cabang dari database."""
-    if USE_CLOUD:
-        return []
     try:
         limit = max(1, int(limit))
     except (TypeError, ValueError):
@@ -3790,10 +3949,293 @@ def ambil_semua_data_cabang(limit=10):
         logger.error("[Setting] Gagal mengambil cabang: %s", exc)
         return []
 
+_ADMIN_USER_FUNCTION = "admin-user-management"
+
+
+def _online_user_management_active() -> bool:
+    """True hanya untuk akun Supabase aktif; DEV_SUPER tetap lokal."""
+    return (
+        not bool(CURRENT_SESSION.get("is_developer"))
+        and bool(str(CURRENT_SESSION.get("auth_email") or "").strip())
+    )
+
+
+def _invoke_user_management(action: str, payload: dict | None = None) -> dict:
+    """Panggil Edge Function manajemen user dengan JWT sesi aktif.
+
+    Dipanggil langsung via HTTP agar error body dari Edge Function dapat
+    diteruskan ke UI/log secara jelas, tanpa bergantung pada formatting
+    exception versi supabase-py. Tidak pernah menggunakan service-role key.
+    """
+    if not _online_user_management_active():
+        raise RuntimeError("Manajemen user Supabase hanya tersedia untuk akun online.")
+
+    token = _supabase_access_token()
+    if not token:
+        raise RuntimeError("Sesi Supabase tidak aktif. Silakan login ulang.")
+
+    endpoint = (
+        f"{str(SUPABASE_URL or '').rstrip('/')}/functions/v1/"
+        f"{_ADMIN_USER_FUNCTION}"
+    )
+    if not endpoint.startswith("http"):
+        raise RuntimeError("SUPABASE_URL belum dikonfigurasi.")
+
+    body = {"action": str(action or '').strip().lower()}
+    if isinstance(payload, dict):
+        body.update(payload)
+
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "apikey": str(SUPABASE_PUBLISHABLE_KEY or ""),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            status_code = int(getattr(response, "status", 200) or 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw) if raw else {}
+        except Exception:
+            data = {}
+        detail = str(
+            data.get("error")
+            or data.get("message")
+            or raw
+            or f"HTTP {exc.code}"
+        ).strip()
+        raise RuntimeError(
+            f"Edge Function {_ADMIN_USER_FUNCTION} mengembalikan HTTP "
+            f"{exc.code}: {detail}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Tidak dapat menghubungi Edge Function {_ADMIN_USER_FUNCTION}: {exc.reason}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Gagal memanggil Edge Function {_ADMIN_USER_FUNCTION}: {exc}"
+        ) from exc
+
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception as exc:
+        raise RuntimeError(
+            f"Respons Edge Function {_ADMIN_USER_FUNCTION} bukan JSON yang valid "
+            f"(HTTP {status_code})."
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Respons Edge Function {_ADMIN_USER_FUNCTION} tidak valid "
+            f"(HTTP {status_code})."
+        )
+    if not bool(data.get("ok", False)):
+        raise RuntimeError(
+            str(data.get("error") or data.get("message") or
+                f"Operasi manajemen user gagal (HTTP {status_code}).")
+        )
+    return data
+
+
+def _cache_remote_user_data(payload: dict) -> None:
+    """Cerminkan data user remote ke SQLite hanya sebagai cache/UI offline."""
+    branches = list(payload.get("branches") or [])
+    users = list(payload.get("users") or [])
+    with _db_transaction(immediate=True) as (_, cursor):
+        valid_branches = {
+            _upper(item.get("kode_cabang"))
+            for item in branches
+            if _upper(item.get("kode_cabang"))
+        }
+        # Data user online adalah cache; jangan sentuh DEV_SYS/local sandbox.
+        cursor.execute(
+            "DELETE FROM user_cabang_access WHERE id_user IN (SELECT id_user FROM manajemen_user WHERE UPPER(kode_cabang) <> 'DEV_SYS')"
+        )
+        cursor.execute("DELETE FROM manajemen_user WHERE UPPER(kode_cabang) <> 'DEV_SYS'")
+
+        for user in users:
+            user_id = _text(user.get("id_user"))
+            username = _upper(user.get("username"))
+            home = _upper(user.get("kode_cabang"))
+            if not user_id or not username or not home:
+                continue
+            if home not in valid_branches:
+                continue
+            role_remote = _upper(user.get("role") or "ADMIN") or "ADMIN"
+            role_local = "SUPER_ADMIN" if role_remote == "SUPER" else role_remote
+            status = _upper(user.get("status_user") or "AKTIF") or "AKTIF"
+            cursor.execute(
+                """
+                INSERT INTO manajemen_user(
+                    id_user, username, password, role, nama_lengkap,
+                    kode_cabang, status_user
+                ) VALUES (?, ?, '', ?, ?, ?, ?)
+                """
+                , (
+                    user_id,
+                    username,
+                    role_local,
+                    _text(user.get("nama_lengkap")) or username,
+                    home,
+                    status,
+                ),
+            )
+            akses = {
+                _upper(code)
+                for code in (user.get("akses_cabang") or [])
+                if _upper(code) and _upper(code) in valid_branches
+            }
+            akses.add(home)
+            if bool(user.get("akses_otomatis")):
+                akses = set(valid_branches)
+            cursor.executemany(
+                "INSERT OR IGNORE INTO user_cabang_access(id_user, kode_cabang) VALUES (?, ?)",
+                [(user_id, code) for code in sorted(akses)],
+            )
+
+
+def _remote_user_list() -> dict:
+    payload = _invoke_user_management("list")
+    _cache_remote_user_data(payload)
+    return {
+        "branches": list(payload.get("branches") or []),
+        "users": list(payload.get("users") or []),
+    }
+
+
 def ambil_data_akses_cabang_user():
+    """Remote-first untuk akun Supabase; SQLite tetap dipakai sebagai fallback/cache offline."""
+    if _online_user_management_active():
+        try:
+            return _remote_user_list()
+        except Exception as exc:
+            logger.warning("[User] Remote list gagal, memakai cache lokal: %s", exc)
+    return _ambil_data_akses_cabang_user_local()
+
+
+def simpan_akses_cabang_users(user_access_rows):
+    """Simpan branch scope ke Supabase untuk akun online, lalu refresh cache lokal."""
+    try:
+        _pastikan_super_admin()
+        rows = list(user_access_rows or [])
+        if _online_user_management_active():
+            result = _invoke_user_management(
+                "access",
+                {"rows": [
+                    {
+                        "id_user": _text(row.get("id_user")),
+                        "kode_cabang": [
+                            _upper(code)
+                            for code in (row.get("kode_cabang") or [])
+                            if _upper(code)
+                        ],
+                    }
+                    for row in rows
+                ]},
+            )
+            _cache_remote_user_data(result)
+            return True, str(result.get("message") or "Akses cabang user berhasil disimpan di Supabase.")
+        return _simpan_akses_cabang_users_local(rows)
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal menyimpan akses cabang")
+        return False, str(exc)
+
+
+def buat_user_baru(data_user):
+    """Buat user online di Supabase/Auth + profile + branch access; developer tetap lokal."""
+    try:
+        _pastikan_super_admin()
+        if _online_user_management_active():
+            data = dict(data_user or {})
+            username = _upper(data.get("username"))
+            if "@" not in username:
+                return False, "Username akun online harus berupa email Supabase (contoh: user@mkt.log)."
+            result = _invoke_user_management(
+                "create",
+                {
+                    "username": username,
+                    "nama_lengkap": _text(data.get("nama_lengkap")),
+                    "password": str(data.get("password") or ""),
+                    "role": _upper(data.get("role") or "ADMIN"),
+                    "kode_cabang": _upper(data.get("kode_cabang")),
+                    "akses_cabang": [_upper(code) for code in (data.get("akses_cabang") or []) if _upper(code)],
+                },
+            )
+            _cache_remote_user_data(result)
+            return True, str(result.get("message") or f"User {username} berhasil dibuat di Supabase.")
+        return _buat_user_baru_local(data_user)
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal membuat user")
+        return False, str(exc)
+
+
+def ubah_user(data_user):
+    """Update profile/role/home/access di Supabase untuk akun online."""
+    try:
+        _pastikan_super_admin()
+        data = dict(data_user or {})
+        if _online_user_management_active():
+            result = _invoke_user_management(
+                "update",
+                {
+                    "id_user": _text(data.get("id_user")),
+                    "nama_lengkap": _text(data.get("nama_lengkap")),
+                    "role": _upper(data.get("role") or "ADMIN"),
+                    "kode_cabang": _upper(data.get("kode_cabang")),
+                    "akses_cabang": [_upper(code) for code in (data.get("akses_cabang") or []) if _upper(code)],
+                },
+            )
+            _cache_remote_user_data(result)
+            updated = next(
+                (
+                    item for item in result.get("users", [])
+                    if _text(item.get("id_user")) == _text(data.get("id_user"))
+                ),
+                None,
+            )
+            if updated and _text(updated.get("id_user")) == _text(CURRENT_SESSION.get("id_user")):
+                CURRENT_SESSION["nama_lengkap"] = _text(updated.get("nama_lengkap"))
+                CURRENT_SESSION["home_kode_cabang"] = _upper(updated.get("kode_cabang"))
+                CURRENT_SESSION["home_nama_cabang"] = _text(updated.get("nama_cabang"))
+                CURRENT_SESSION["kode_cabang"] = _upper(updated.get("kode_cabang"))
+                CURRENT_SESSION["role"] = "SUPER_ADMIN" if _upper(updated.get("role")) == "SUPER" else _upper(updated.get("role") or "ADMIN")
+                refresh_session = globals().get("_refresh_current_session_access")
+                if callable(refresh_session):
+                    refresh_session()
+            return True, str(result.get("message") or "User berhasil diperbarui di Supabase.")
+        return _ubah_user_local(data_user)
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal mengubah user")
+        return False, str(exc)
+
+
+def _refresh_current_session_access() -> None:
+    """Refresh helper lokal agar tidak menambah dependency import config secara global."""
+    try:
+        from config import refresh_akses_cabang_session
+        refresh_akses_cabang_session()
+    except Exception as exc:
+        logger.warning("[User] Gagal refresh branch scope sesi aktif: %s", exc)
+
+
+def _ambil_data_akses_cabang_user_local():
     """Data user dan branch scope untuk UI Manajemen Akses Cabang."""
-    if USE_CLOUD:
-        return {"branches": [], "users": []}
 
     try:
         branches = _fetchall(
@@ -3868,15 +4310,13 @@ def ambil_data_akses_cabang_user():
     return {"branches": branch_rows, "users": user_rows}
 
 
-def simpan_akses_cabang_users(user_access_rows):
+def _simpan_akses_cabang_users_local(user_access_rows):
     """
     Menyimpan branch scope user secara atomic.
 
     Home branch selalu dipertahankan. Role pusat dan user ber-home PUSAT
     selalu memperoleh seluruh cabang bisnis, sesuai policy login di config.py.
     """
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
 
     try:
         _pastikan_super_admin()
@@ -4018,10 +4458,8 @@ def _set_akses_user_cursor(cursor, id_user, role, home, requested=None):
     )
 
 
-def buat_user_baru(data_user):
+def _buat_user_baru_local(data_user):
     """Membuat akun + branch access dalam satu transaksi. Khusus SUPER_ADMIN."""
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
     try:
         _pastikan_super_admin()
         data = dict(data_user or {})
@@ -4071,10 +4509,8 @@ def buat_user_baru(data_user):
         return False, str(exc)
 
 
-def ubah_user(data_user):
+def _ubah_user_local(data_user):
     """Mengubah profil/role/home branch tanpa mengubah username/password."""
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
     try:
         _pastikan_super_admin()
         data = dict(data_user or {})
@@ -4126,10 +4562,126 @@ def ubah_user(data_user):
         return False, str(exc)
 
 
+def _supabase_access_token() -> str:
+    """Ambil access token session Supabase saat ini dari client session."""
+    try:
+        session_result = supabase.auth.get_session()
+    except Exception:
+        return ""
+    session_obj = getattr(session_result, "session", None) or session_result
+    return str(getattr(session_obj, "access_token", "") or "").strip()
+
+
+def _resolve_supabase_target_user_id(local_id_user: str) -> tuple[str, str]:
+    """Resolve ID user lokal ke UUID Auth Supabase + username.
+
+    Local SQLite dapat memakai id seperti ``USR-...`` untuk akun yang dibuat
+    dari menu aplikasi, sementara Supabase Auth memakai UUID. Untuk akun online,
+    cari username lokal lalu cocokkan ke public.user_profiles.id.
+    """
+    local_id = _text(local_id_user)
+    if not local_id:
+        return "", ""
+
+    # UUID Supabase dapat dipakai langsung.
+    try:
+        uuid.UUID(local_id)
+        row = _fetchone(
+            "SELECT username FROM manajemen_user WHERE id_user = ? LIMIT 1",
+            (local_id,),
+        )
+        return local_id, _upper(row[0]) if row else ""
+    except (ValueError, AttributeError, TypeError):
+        pass
+
+    local_row = _fetchone(
+        "SELECT username FROM manajemen_user WHERE id_user = ? LIMIT 1",
+        (local_id,),
+    )
+    username = _upper(local_row[0]) if local_row else ""
+    if not username:
+        return "", ""
+
+    try:
+        response = (
+            supabase
+            .table("user_profiles")
+            .select("id, username")
+            .eq("username", username)
+            .limit(1)
+            .execute()
+        )
+        profile = (response.data or [None])[0]
+        if isinstance(profile, dict):
+            return _text(profile.get("id")), _upper(profile.get("username") or username)
+    except Exception as exc:
+        logger.warning("[User] Gagal resolve user Supabase %s: %s", username, exc)
+    return "", username
+
+
+def _reset_password_supabase(id_user: str, password_baru: str) -> tuple[bool, str]:
+    """Reset password user online melalui Edge Function.
+
+    Service-role key tetap hanya berada di Edge Function; desktop app hanya
+    mengirim access token user yang sedang login (SUPER) dan target Auth UUID.
+    """
+    token = _supabase_access_token()
+    if not token:
+        return False, "Session Supabase tidak aktif. Silakan login ulang."
+
+    target_user_id, username = _resolve_supabase_target_user_id(id_user)
+    if not target_user_id:
+        return False, (
+            f"User {username or id_user} belum memiliki ID Auth Supabase yang valid. "
+            "Pastikan user tersebut sudah dibuat di Supabase Authentication dan "
+            "sudah terpetakan di public.user_profiles."
+        )
+
+    endpoint = f"{str(SUPABASE_URL or '').rstrip('/')}/functions/v1/admin-reset-password"
+    if not endpoint.startswith("http"):
+        return False, "SUPABASE_URL belum dikonfigurasi."
+
+    body = json.dumps({
+        "target_user_id": target_user_id,
+        "new_password": str(password_baru),
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "apikey": str(SUPABASE_PUBLISHABLE_KEY or ""),
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw)
+            message = str(data.get("error") or data.get("message") or raw).strip()
+        except Exception:
+            message = raw.strip() or f"HTTP {exc.code}"
+        return False, message
+    except urllib.error.URLError as exc:
+        return False, f"Tidak dapat menghubungi Supabase: {exc.reason}"
+    except Exception as exc:
+        return False, f"Reset password gagal: {exc}"
+
+    try:
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        data = {}
+    if isinstance(data, dict) and data.get("error"):
+        return False, str(data["error"])
+    return True, str(data.get("message") or "Password user berhasil diubah di Supabase.")
+
+
 def reset_password_user(id_user, password_baru):
-    """Reset password user. Mekanisme hash akan ditingkatkan pada tahap security."""
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
+    """Reset password user: offline developer ke SQLite, online ke Supabase Auth."""
     try:
         _pastikan_super_admin()
         user_id = _text(id_user)
@@ -4138,18 +4690,24 @@ def reset_password_user(id_user, password_baru):
             raise ValueError("ID user tidak valid.")
         if not password:
             raise ValueError("Password baru wajib diisi.")
-        with _db_transaction(immediate=True) as (_, cursor):
-            row = cursor.execute(
-                "SELECT username FROM manajemen_user WHERE id_user = ? LIMIT 1",
-                (user_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("User tidak ditemukan.")
-            cursor.execute(
-                "UPDATE manajemen_user SET password = ? WHERE id_user = ?",
-                (password, user_id),
-            )
-        return True, f"Password user {_upper(row[0])} berhasil direset."
+
+        # Akun developer tetap memakai database sandbox offline.
+        if bool(CURRENT_SESSION.get("is_developer")):
+            with _db_transaction(immediate=True) as (_, cursor):
+                row = cursor.execute(
+                    "SELECT username FROM manajemen_user WHERE id_user = ? LIMIT 1",
+                    (user_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("User tidak ditemukan.")
+                cursor.execute(
+                    "UPDATE manajemen_user SET password = ? WHERE id_user = ?",
+                    (password, user_id),
+                )
+            return True, f"Password user {_upper(row[0])} berhasil direset di database offline."
+
+        # Online: sumber password adalah Supabase Auth.
+        return _reset_password_supabase(user_id, password)
     except PermissionError as exc:
         return False, str(exc)
     except Exception as exc:
@@ -4158,9 +4716,33 @@ def reset_password_user(id_user, password_baru):
 
 
 def set_status_user(id_user, aktif):
+    """Aktif/nonaktif user; online melalui Supabase, developer melalui SQLite."""
+    try:
+        _pastikan_super_admin()
+        user_id = _text(id_user)
+        status_baru = "AKTIF" if bool(aktif) else "NONAKTIF"
+        if not user_id:
+            return False, "ID user tidak valid."
+        if user_id == _text(CURRENT_SESSION.get("id_user")) and status_baru != "AKTIF":
+            return False, "Akun SUPER_ADMIN yang sedang login tidak dapat dinonaktifkan."
+
+        if _online_user_management_active():
+            result = _invoke_user_management(
+                "status",
+                {"id_user": user_id, "status_user": status_baru},
+            )
+            _cache_remote_user_data(result)
+            return True, str(result.get("message") or f"User sekarang {status_baru}.")
+        return _set_status_user_local(user_id, aktif)
+    except PermissionError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception("[User] Gagal mengubah status user")
+        return False, str(exc)
+
+
+def _set_status_user_local(id_user, aktif):
     """Aktif/nonaktifkan akun tanpa menghapus row user dan histori terkait."""
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
     try:
         _pastikan_super_admin()
         user_id = _text(id_user)
@@ -4240,8 +4822,6 @@ def _upsert_data_cabang(cursor, data_cabang):
 
 def simpan_semua_pengaturan_dan_cabang(settings_to_save, branches_to_save):
     """Menyimpan pengaturan dan cabang secara atomic tanpa REPLACE parent row."""
-    if USE_CLOUD:
-        return False, "Penyimpanan cloud belum diaktifkan."
 
     try:
         with _db_transaction(immediate=True) as (_, cursor):
@@ -4310,6 +4890,7 @@ def clear_performance_cache():
     """Membersihkan seluruh cache runtime tanpa mengubah data database."""
     for cache in _PERFORMANCE_CACHE.values():
         cache.clear()
+    clear_autocomplete_cache()
 
 
 def clear_invoice_cache():

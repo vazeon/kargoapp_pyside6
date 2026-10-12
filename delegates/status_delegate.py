@@ -1,5 +1,4 @@
 # delegates/status_delegates.py
-# warna higlight baris
 from __future__ import annotations
 
 from typing import Callable, Optional, Tuple, Union

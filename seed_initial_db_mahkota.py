@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+
+from audit_context import install_sqlite_audit_functions
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from database_manager import init_db
 
 try:
-    from config import db_aktif
+    from config import DEVELOPER_DATABASE_NAME
 except ImportError:
-    db_aktif = "database_cargo.db"
+    DEVELOPER_DATABASE_NAME = "database_cargo_dev.db"
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -92,7 +95,11 @@ USERS_AWAL = (
 
 
 def _normalisasi_path_database(path_value: Optional[str] = None) -> Path:
-    raw_path = str(path_value or db_aktif or "database_cargo.db").strip()
+    # Seed Mahkota adalah seed sandbox untuk DEV_SUPER.
+    # Jangan pernah default ke database online utama.
+    raw_path = str(
+        path_value or DEVELOPER_DATABASE_NAME or "database_cargo_dev.db"
+    ).strip()
     database_path = Path(raw_path)
     if not database_path.is_absolute():
         database_path = BASE_DIR / database_path
@@ -210,6 +217,40 @@ def _seed_cabang(cursor: sqlite3.Cursor) -> None:
         )
 
 
+
+def _seed_cabang_wilayah(cursor: sqlite3.Cursor) -> None:
+    """Seed aturan prefix untuk tiga wilayah Mahkota ke database lokal."""
+    if not _table_exists(cursor, "master_wilayah") or not _table_exists(cursor, "cabang_wilayah"):
+        raise RuntimeError(
+            "Tabel master_wilayah/cabang_wilayah belum dibuat oleh database_manager.py."
+        )
+
+    rows = (
+        ("SBY", "KALTIM", "KT"),
+        ("SBY", "KALSEL", "KS"),
+        ("SBY", "LAINNYA", "IND"),
+        ("JKT", "KALTIM", "J-KT"),
+        ("JKT", "KALSEL", "J-KS"),
+        ("JKT", "LAINNYA", "J-IND"),
+    )
+    for kode_cabang, kode_wilayah, prefix in rows:
+        _insert_row_adaptif(
+            cursor,
+            "cabang_wilayah",
+            {
+                "kode_cabang": kode_cabang,
+                "kode_wilayah": kode_wilayah,
+                "prefix_resi": prefix,
+                "aktif": 1,
+                "sync_id": str(uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"kargo:mahkota:{kode_cabang}:{kode_wilayah}",
+                )),
+            },
+            replace=False,
+        )
+
+
 def _seed_users(cursor: sqlite3.Cursor) -> None:
     if not _table_exists(cursor, "manajemen_user"):
         raise RuntimeError(
@@ -229,11 +270,12 @@ def _seed_users(cursor: sqlite3.Cursor) -> None:
 def _seed_data_awal(cursor: sqlite3.Cursor) -> None:
     _seed_pengaturan(cursor)
     _seed_cabang(cursor)
+    _seed_cabang_wilayah(cursor)
     _seed_users(cursor)
 
 
 def _cetak_seed_sudah_ada(database_path: Path) -> None:
-    print(f"ℹ️ Database '{database_path.name}' sudah tersedia.")
+    print(f"Database '{database_path.name}' sudah tersedia.")
     print("Seed dibatalkan agar data yang ada tidak tertimpa.")
     print(
         "Hapus atau ganti nama database tersebut secara manual "
@@ -243,8 +285,8 @@ def _cetak_seed_sudah_ada(database_path: Path) -> None:
 
 def _cetak_seed_sukses(database_path: Path) -> None:
     print("")
-    print("✅ DATABASE AWAL MAHKOTA BERHASIL DIBUAT")
-    print(f"📍 Lokasi: {database_path}")
+    print("DATABASE AWAL MAHKOTA BERHASIL DIBUAT")
+    print(f"Lokasi: {database_path}")
     print("")
     print("Akun awal database:")
     print("  SUPER    / 123")
@@ -252,13 +294,13 @@ def _cetak_seed_sukses(database_path: Path) -> None:
     print("  ADMINJKT / 123")
     print("")
     print(
-        "Akun DEV_SUPER tetap dibaca dari app_env.json, "
-        "bukan dari seed database."
+        "DEV_SUPER memakai database sandbox offline ini; "
+        "password developer sekarang hanya dibaca dari KARGO_DEV_PASSWORD di environment lokal."
     )
     print("")
     print(
-        "Catatan: database ini adalah data awal/testing, "
-        "bukan klaim bahwa integrasi Supabase sudah selesai."
+        "Catatan: database ini hanya untuk mode DEV_SUPER/testing "
+        "dan tidak disinkronkan ke Supabase."
     )
 
 
@@ -267,9 +309,9 @@ def _bersihkan_database_gagal(database_path: Path, database_created: bool) -> No
         return
     try:
         database_path.unlink()
-        print("ℹ️ File database awal yang gagal dibuat telah dibersihkan.")
+        print("File database awal yang gagal dibuat telah dibersihkan.")
     except OSError as cleanup_error:
-        print(f"⚠️ Database gagal dibersihkan otomatis: {cleanup_error}")
+        print(f"Database gagal dibersihkan otomatis: {cleanup_error}")
 
 
 def generate_mahkota_environment(
@@ -292,6 +334,7 @@ def generate_mahkota_environment(
             )
 
         with sqlite3.connect(str(database_path), timeout=30.0) as conn:
+            install_sqlite_audit_functions(conn)
             conn.execute("PRAGMA foreign_keys = ON")
             _seed_data_awal(conn.cursor())
             conn.commit()
@@ -299,7 +342,7 @@ def generate_mahkota_environment(
         _cetak_seed_sukses(database_path)
         return True
     except Exception as exc:
-        print(f"❌ Seed database gagal: {exc}")
+        print(f"Seed database gagal: {exc}")
         _bersihkan_database_gagal(database_path, database_created)
         return False
 

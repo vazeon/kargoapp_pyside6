@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from config import CURRENT_SESSION
 import services.database_service as db_service
+import services.numbering_service as numbering_service
 
 from themes.components.notification import FADE_NOTIFICATION_STYLE
 from themes.components.table import get_table_input_styles
@@ -135,8 +136,10 @@ logger = logging.getLogger(__name__)
 class ResiReadWorker(QThread):
     """Pembacaan database saja; widget dan transaksi tetap di GUI thread."""
 
-    result_ready = Signal(object)
-    error_occurred = Signal(str)
+    # Metadata dikirim bersama hasil agar slot GUI tidak bergantung pada
+    # QObject.sender(), yang dapat menjadi None jika wrapper worker sudah dibuang.
+    result_ready = Signal(str, int, str, object)
+    error_occurred = Signal(str, int, str, str)
     _active_workers = set()
 
     def __init__(self, kind, generation, operation, args, kode_cabang=None):
@@ -159,13 +162,17 @@ class ResiReadWorker(QThread):
             if self.kind == "history":
                 result = list(result or [])
             if not self.isInterruptionRequested():
-                self.result_ready.emit(result)
+                self.result_ready.emit(
+                    self.kind, self.generation, self.kode_cabang, result
+                )
         except Exception as error:
             logger.exception(
                 "[ResiReadWorker] Gagal menjalankan operasi database: %s",
                 self.operation,
             )
-            self.error_occurred.emit(str(error))
+            self.error_occurred.emit(
+                self.kind, self.generation, self.kode_cabang, str(error)
+            )
 
     @Slot()
     def _release(self):
@@ -275,6 +282,9 @@ class TabResi(QWidget):
         self._sedang_simpan = False
         self._read_generation = {"history": 0, "autocomplete": 0}
         self._read_workers = {"history": None, "autocomplete": None}
+        # Token plain-Python; finalisasi tidak perlu memanggil metode pada
+        # wrapper QThread yang mungkin sudah dihapus oleh Qt.
+        self._read_worker_generations = {"history": None, "autocomplete": None}
         self._read_pending = {"history": None, "autocomplete": None}
         self._history_render_state = None
         self._history_display_key = None
@@ -293,7 +303,15 @@ class TabResi(QWidget):
         self._timer_layout.setInterval(250)
         self._timer_layout.timeout.connect(self._simpan_layout_tertunda)
 
+        # Master Pengirim/Penerima dapat berubah melalui sync saat Tab Resi
+        # tetap terbuka. Refresh berkala hanya meminta ulang data lokal; database
+        # service menangani TTL/fingerprint agar cache tidak terus-menerus basi.
+        self._timer_autocomplete_sync = QTimer(self)
+        self._timer_autocomplete_sync.setInterval(10_000)
+        self._timer_autocomplete_sync.timeout.connect(self._refresh_autocomplete_sync)
+
         self.init_ui()
+        self._timer_autocomplete_sync.start()
 
     @staticmethod
     def _kode_cabang_aktif():
@@ -1407,27 +1425,32 @@ class TabResi(QWidget):
             kind, generation, operation, args, kode_cabang
         )
         self._read_workers[kind] = worker
+        self._read_worker_generations[kind] = generation
         worker.result_ready.connect(self._hasil_read, Qt.ConnectionType.QueuedConnection)
         worker.error_occurred.connect(self._error_read, Qt.ConnectionType.QueuedConnection)
-        worker.finished.connect(self._selesai_read, Qt.ConnectionType.QueuedConnection)
+        # Bawa token melalui closure; slot tidak perlu membaca worker/sender.
+        worker.finished.connect(
+            lambda k=kind, g=generation: self._selesai_read(k, g),
+            Qt.ConnectionType.QueuedConnection,
+        )
         worker.start()
 
-    def _read_masih_aktif(self, worker):
-        if not isinstance(worker, ResiReadWorker):
+    def _read_masih_aktif(self, kind, generation, kode_cabang):
+        if kind not in self._read_generation:
             return False
-        kode_cabang = self._kode_cabang_aktif()
+        kode_cabang_aktif = self._kode_cabang_aktif()
         return (
-            worker.generation == self._read_generation[worker.kind]
-            and worker.kode_cabang == str(kode_cabang or "").strip().upper()
+            generation == self._read_generation[kind]
+            and str(kode_cabang or "").strip().upper()
+            == str(kode_cabang_aktif or "").strip().upper()
         )
 
-    @Slot(object)
-    def _hasil_read(self, result):
-        worker = self.sender()
-        if not self._read_masih_aktif(worker):
+    @Slot(str, int, str, object)
+    def _hasil_read(self, kind, generation, kode_cabang, result):
+        if not self._read_masih_aktif(kind, generation, kode_cabang):
             return
         try:
-            if worker.kind == "autocomplete":
+            if kind == "autocomplete":
                 pengirim, penerima = result
                 pengirim = self._normalisasi_autocomplete(pengirim)
                 penerima = self._normalisasi_autocomplete(penerima)
@@ -1441,20 +1464,24 @@ class TabResi(QWidget):
             else:
                 self._isi_tree_histori(result or [])
         except Exception as error:
-            self._gagal_read(worker.kind, str(error))
+            self._gagal_read(kind, str(error))
 
-    @Slot(str)
-    def _error_read(self, error):
-        worker = self.sender()
-        if self._read_masih_aktif(worker):
-            self._gagal_read(worker.kind, error)
+    @Slot(str, int, str, str)
+    def _error_read(self, kind, generation, kode_cabang, error):
+        if self._read_masih_aktif(kind, generation, kode_cabang):
+            self._gagal_read(kind, error)
 
-    @Slot()
-    def _selesai_read(self):
-        worker = self.sender()
-        if self._read_workers[worker.kind] is worker:
-            self._read_workers[worker.kind] = None
-            self._start_read(worker.kind)
+    @Slot(str, int)
+    def _selesai_read(self, kind, generation):
+        # Jangan panggil isRunning() atau metode Qt lainnya di sini: wrapper
+        # worker mungkin sudah tidak memiliki objek C++ yang valid.
+        if kind not in self._read_workers:
+            return
+        if self._read_worker_generations.get(kind) != generation:
+            return
+        self._read_workers[kind] = None
+        self._read_worker_generations[kind] = None
+        self._start_read(kind)
 
     def _gagal_read(self, kind, error):
         logger.error("Gagal membaca %s resi: %s", kind, error)
@@ -1933,39 +1960,22 @@ class TabResi(QWidget):
             self.txt_resi_display.setText(no_resi_edit or self._resi_sedang_diedit)
             return
 
-        cp = self.cb_provinsi.currentText().upper()
+        wilayah = self.cb_provinsi.currentText().strip().upper()
         kode_cabang = self._kode_cabang_aktif()
-
-        kamus_prefix = CURRENT_SESSION.get('aturan_prefix', {})
-
-        prefix_default = (
-                str(CURRENT_SESSION.get("resi_prefix", "SYS")).strip().upper()
-                or "SYS"
-        )
-
-        pref = kamus_prefix.get(
-            cp,
-            kamus_prefix.get("DEFAULT", prefix_default),
-        )
-
-        setting_suf = db_service.get_setting('kode_akhiran_pajak') or '-P'
-        suf = setting_suf if self._transaksi_kena_ppn() else ""
-
+        suffix_setting = db_service.get_setting("kode_akhiran_pajak") or "-P"
+        suffix = suffix_setting if self._transaksi_kena_ppn() else ""
         try:
-            base_number, max_num = db_service.ambil_sekuens_resi(kode_cabang, pref)
-        except Exception:
-            base_number, max_num = 0, 0
-
-        template = db_service.get_setting(
-            'template_no_resi',
-        ) or '[PREFIX][COUNTER][SUFFIX]'
-        counter_final = str(max(base_number, max_num) + 1)
-
-        hasil_resi = template.replace('[PREFIX]', pref).replace('[COUNTER]', counter_final).replace(
-            '[SUFFIX]',
-            suf,
-        )
-        self.txt_resi_display.setText(hasil_resi)
+            result = numbering_service.peek_next_number(
+                "RESI",
+                kode_cabang,
+                wilayah=wilayah,
+                suffix=suffix,
+                tanggal=QDate.currentDate().toString("yyyy-MM-dd"),
+            )
+            self.txt_resi_display.setText(result.nomor)
+        except Exception as exc:
+            logger.warning("[Resi] Gagal preview nomor fixed: %s", exc)
+            self.txt_resi_display.clear()
 
     def _peringatkan_validasi(self, pesan, widget=None):
         QMessageBox.warning(self, "Data Resi Belum Lengkap", pesan)
@@ -2135,6 +2145,9 @@ class TabResi(QWidget):
         data_cetak["tanggal"] = format_tanggal_ke_ui(
             ctx["payload"].get("tanggal_masuk")
         )
+        data_cetak.update(
+            db_service.ambil_identitas_pembuat_resi(ctx["payload"]["no_resi"])
+        )
         return data_cetak
 
     def _subtotal_ongkir_untuk_simpan(self, total_ongkir):
@@ -2170,6 +2183,7 @@ class TabResi(QWidget):
             "prefix": str(prefix or prefix_default).strip().upper(),
             "template": str(template or "[PREFIX][COUNTER][SUFFIX]"),
             "suffix": str(suffix or "").strip().upper(),
+            "wilayah": provinsi,
         }
 
     def _buat_payload_transaksi(
@@ -2892,6 +2906,12 @@ class TabResi(QWidget):
                 "ongkir_per_cbm": fmt_ongkir_m3,
                 "ongkir_kg_raw": ongkir_kg_db,
                 "ongkir_m3_raw": ongkir_m3_db,
+                "created_by_user_id": row[21] if len(row) > 21 else None,
+                "created_by_username": row[22] if len(row) > 22 else None,
+                "created_by_name": row[23] if len(row) > 23 else None,
+                "updated_by_user_id": row[24] if len(row) > 24 else None,
+                "updated_by_username": row[25] if len(row) > 25 else None,
+                "updated_by_name": row[26] if len(row) > 26 else None,
             }
             cetak_resi_ke_printer(formatted_data, self)
         except Exception as exc:
@@ -2909,9 +2929,28 @@ class TabResi(QWidget):
         self.setup_autocomplete()
         self.load_data_resi()
 
+    def _refresh_autocomplete_sync(self):
+        """Muat ulang model completer saat master lokal berubah akibat sync."""
+        if not self.isVisible():
+            return
+        try:
+            kode_cabang = str(self._kode_cabang_aktif() or "").strip().upper()
+            if getattr(self, "_autocomplete_cabang", None) != kode_cabang:
+                # Cabang berubah: setup_autocomplete membersihkan model lama.
+                self.setup_autocomplete()
+                return
+            self._request_read(
+                "autocomplete",
+                "ambil_data_autocomplete",
+                (kode_cabang,),
+            )
+        except Exception:
+            logger.exception("Gagal refresh autocomplete Pengirim/Penerima")
+
     def auto_refresh_histori(self):
         try:
             self.load_data_resi()
+            self._refresh_autocomplete_sync()
         except Exception:
             logger.exception("Gagal auto-refresh histori dari tab utama")
 

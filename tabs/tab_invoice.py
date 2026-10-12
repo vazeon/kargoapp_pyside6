@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from config import CURRENT_SESSION, muat_pengaturan_sistem
 import services.database_service as db_service
+import services.numbering_service as numbering_service
 
 from themes.modules.invoice import get_invoice_dialog_styles, get_invoice_styles
 from utils.input_style_helper import atur_tinggi_input, terapkan_style_input_global
@@ -1240,6 +1241,8 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self._data_loaded = False
         self._invoice_dari_resi = False
         self._source_resi = []
+        self._created_by_name = ""
+        self._created_by_username = ""
 
         # Debounce Timer untuk Pencarian Histori Invoice (250ms)
         self._search_timer = QTimer(self)
@@ -1296,9 +1299,9 @@ class TabInvoice(ZoomTableMixin, QWidget):
         )
 
         self.tabel_histori_invoice = QTableWidget()
-        self.tabel_histori_invoice.setColumnCount(4)
+        self.tabel_histori_invoice.setColumnCount(5)
         self.tabel_histori_invoice.setHorizontalHeaderLabels(
-            ["NO. INV", "TANGGAL", "CLIENT", "STATUS"],
+            ["NO. INV", "TANGGAL", "CLIENT", "STATUS", "PEMBUAT"],
         )
         self.tabel_histori_invoice.verticalHeader().setVisible(False)
         self.tabel_histori_invoice.setSelectionBehavior(
@@ -2139,28 +2142,20 @@ class TabInvoice(ZoomTableMixin, QWidget):
         return True
 
     def _generate_no_invoice(self):
-        prefix = self._prefix_no_invoice_otomatis()
-        sequence = db_service.dapatkan_sequence_invoice_baru(prefix)
         try:
-            sequence_number = int(sequence)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("Sequence invoice dari database tidak valid.") from exc
-        return f"{prefix}-{sequence_number:04d}"
+            result = numbering_service.peek_next_number(
+                "INVOICE",
+                numbering_service.CENTRAL_INVOICE_BRANCH,
+                tanggal=self.date_invoice.date().toString("yyyy-MM-dd"),
+            )
+            return result.nomor
+        except Exception as exc:
+            print(f"Gagal membaca nomor invoice fixed: {exc}")
+            return ""
 
     def _prefix_no_invoice_otomatis(self):
-        try:
-            pengaturan = self._muat_data_perusahaan()
-            prefix_inv = str(
-                pengaturan.get("prefix_invoice", "INV")
-            ).strip().upper() or "INV"
-            branch_code = str(
-                CURRENT_SESSION.get("kode_cabang", "PUSAT")
-            ).strip().upper() or "PUSAT"
-        except Exception as exc:
-            print(f"Gagal membaca konfigurasi nomor invoice: {exc}")
-            prefix_inv, branch_code = "INV", "PUSAT"
-
-        return f"{prefix_inv}-{branch_code}-{datetime.now().strftime('%Y%m%d')}"
+        # Kompatibilitas modul lama; bukan sumber aturan nomor.
+        return "INV-MKT-SUB"
 
     def _metadata_dict(self):
         metadata = {
@@ -2217,13 +2212,11 @@ class TabInvoice(ZoomTableMixin, QWidget):
 
     def _siapkan_header_simpan_invoice(self, client, items):
         manual_number = self.txt_no_invoice.text().strip().upper()
-        auto_prefix = ""
-        no_invoice = self.no_invoice_aktif or manual_number
-        if not no_invoice:
-            auto_prefix = self._prefix_no_invoice_otomatis()
-        no_invoice = str(no_invoice or "").strip().upper()
-        if not no_invoice and not auto_prefix:
+        is_new = self.no_invoice_aktif is None
+        no_invoice = "" if is_new else (self.no_invoice_aktif or manual_number)
+        if not is_new and not no_invoice:
             raise ValueError("Nomor invoice tidak berhasil dibuat.")
+        auto_prefix = ""
 
         return no_invoice, {
             "no_invoice": no_invoice,
@@ -2476,13 +2469,18 @@ class TabInvoice(ZoomTableMixin, QWidget):
         )
 
     def _terapkan_header_invoice_loaded(self, no_invoice, header):
-        client, template_name, tax_name, status, date_text, metadata_text = header
+        client, template_name, tax_name, status, date_text, metadata_text = header[:6]
+        created_by_user_id = header[6] if len(header) > 6 else None
+        created_by_username = header[7] if len(header) > 7 else None
+        created_by_name = header[8] if len(header) > 8 else None
         metadata = self._parse_json_object(metadata_text)
         template_name = str(template_name or "Standar")
         tax_name = str(tax_name or "NONPAJAK")
         status = str(status or "DRAFT")
 
         self.no_invoice_aktif = no_invoice
+        self._created_by_name = str(created_by_name or created_by_username or "").strip()
+        self._created_by_username = str(created_by_username or "").strip().upper()
         self.status_invoice_aktif = status or "DRAFT"
         self.txt_no_invoice.setText(str(no_invoice or "").upper())
         self.txt_client.setText(str(client or "").upper())
@@ -2492,7 +2490,12 @@ class TabInvoice(ZoomTableMixin, QWidget):
         )
         self.txt_catatan.setText(str(metadata.get("notes", "") or "").upper())
         self.txt_penanda_tangan.setText(
-            str(metadata.get("signer", "") or "").upper()
+            str(
+                metadata.get("signer")
+                or self._created_by_name
+                or self._created_by_username
+                or ""
+            ).upper()
         )
         raw_source_resi = metadata.get("source_resi", [])
         self._source_resi = [
@@ -2628,6 +2631,12 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self._loading_invoice = True
         try:
             self.no_invoice_aktif = None
+            self._created_by_name = str(
+                CURRENT_SESSION.get("nama_lengkap")
+                or CURRENT_SESSION.get("username")
+                or "ADMIN"
+            ).strip()
+            self._created_by_username = str(CURRENT_SESSION.get("username") or "ADMIN").strip().upper()
             self.status_invoice_aktif = "DRAFT"
             self.current_template_override = None
             reset_form_input_global(
@@ -2646,6 +2655,9 @@ class TabInvoice(ZoomTableMixin, QWidget):
             self._loading_invoice = False
 
         self._set_rekening_otomatis(tandai_perubahan=False)
+        preview_nomor = self._generate_no_invoice()
+        if preview_nomor:
+            self.txt_no_invoice.setText(preview_nomor)
         self.hitung_ulang_total_tagihan()
         self._dirty = False
         self.btn_simpan_db.setEnabled(True)
@@ -2734,7 +2746,13 @@ class TabInvoice(ZoomTableMixin, QWidget):
             str(data_perusahaan.get("logo_text_html", "")).strip()
             or self._esc(nama_perusahaan)
         )
-        default_signer = str(CURRENT_SESSION.get("username", "")).strip() or "ADMIN"
+        default_signer = str(
+            self._created_by_name
+            or self._created_by_username
+            or CURRENT_SESSION.get("nama_lengkap")
+            or CURRENT_SESSION.get("username", "")
+            or "ADMIN"
+        ).strip() or "ADMIN"
 
         bagian_alamat = []
         if alamat:

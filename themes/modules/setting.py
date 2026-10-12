@@ -30,30 +30,6 @@ def get_setting_styles(
             font-family: '{get_master_font()}';
             font-weight: normal;
         """,
-        'btn_simpan': f"""
-            QPushButton {{
-                background-color: #2563eb;
-                color: #ffffff;
-                font-size: {sz_input}px;
-                font-family: '{get_master_font()}';
-                font-weight: 600;
-                letter-spacing: 0.8px;
-                border: none;
-                border-radius: 8px;
-                padding: 0px 0px;
-                margin-top: 6px;
-            }}
-            QPushButton:hover {{
-                background-color: #1d4ed8;
-            }}
-            QPushButton:pressed {{
-                background-color: #1e40af;
-            }}
-            QPushButton:disabled {{
-                background-color: {_warna_tema(is_dark, "#334155", "#94a3b8")};
-                color: {_warna_tema(is_dark, "#94a3b8", "#e2e8f0")};
-            }}
-        """,
         'btn_secondary': f"""
             QPushButton {{
                 background-color: transparent;

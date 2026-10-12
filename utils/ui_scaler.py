@@ -1,4 +1,4 @@
-
+# utils/ui_scaler.py
 """Penerapan responsive geometry ke tree QWidget secara aman.
 
 Layer ini menangani geometry umum (constraint widget, layout, spacer, icon,
@@ -19,6 +19,11 @@ import re
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QSize, QTimer
+try:
+    from shiboken6 import isValid as _shiboken_is_valid
+except Exception:  # pragma: no cover - fallback untuk environment non-PySide
+    _shiboken_is_valid = None
+
 from PySide6.QtWidgets import (
     QAbstractButton,
     QAbstractItemView,
@@ -220,6 +225,24 @@ def _layout_dalam_message_box(layout: QLayout) -> bool:
     return False
 
 
+def _qt_object_alive(obj) -> bool:
+    """Cek wrapper Qt sebelum menyentuh property/method C++-nya."""
+    if obj is None:
+        return False
+    if _shiboken_is_valid is not None:
+        try:
+            return bool(_shiboken_is_valid(obj))
+        except Exception:
+            pass
+    try:
+        obj.objectName()
+        return True
+    except RuntimeError:
+        return False
+    except Exception:
+        return True
+
+
 class ResponsiveUIScaler(QObject):
     """Manager responsive untuk satu top-level/root QWidget."""
 
@@ -305,6 +328,11 @@ class ResponsiveUIScaler(QObject):
 
     def schedule_apply(self) -> None:
         if self._apply_pending:
+            return
+        root = self._root
+        if root is None or not _qt_object_alive(root):
+            self._root = None
+            self._apply_pending = False
             return
         self._apply_pending = True
         QTimer.singleShot(0, self.apply_now)
@@ -598,7 +626,8 @@ class ResponsiveUIScaler(QObject):
             return
 
         root = self._root
-        if root is None:
+        if root is None or not _qt_object_alive(root):
+            self._root = None
             return
 
         width, height = self._root_available_size()
@@ -620,13 +649,24 @@ class ResponsiveUIScaler(QObject):
                 pass
 
             for widget in widgets:
-                self._scale_widget_stylesheet(widget, self._scale)
-                # Polish dapat menimpa min/max dari QSS tema. Constraint dari
-                # baseline eksplisit diterapkan sesudahnya, termasuk pada
-                # widget tersembunyi yang belum pernah di-polish.
-                if bool(widget.property(_EXPLICIT_GEOMETRY)):
-                    widget.ensurePolished()
-                self._scale_widget_constraints(widget, self._scale)
+                if not _qt_object_alive(widget):
+                    continue
+                try:
+                    self._scale_widget_stylesheet(widget, self._scale)
+                    # Polish dapat menimpa min/max dari QSS tema. Constraint dari
+                    # baseline eksplisit diterapkan sesudahnya, termasuk pada
+                    # widget tersembunyi yang belum pernah di-polish.
+                    try:
+                        explicit_geometry = bool(widget.property(_EXPLICIT_GEOMETRY))
+                    except RuntimeError:
+                        continue
+                    if explicit_geometry:
+                        widget.ensurePolished()
+                    self._scale_widget_constraints(widget, self._scale)
+                except RuntimeError:
+                    # Top-level window dapat dihancurkan oleh deleteLater()
+                    # ketika singleShot(0, apply_now) masih berada di event queue.
+                    continue
 
             for layout in self._iter_layouts():
                 self._scale_layout(layout, self._scale)
@@ -638,6 +678,14 @@ class ResponsiveUIScaler(QObject):
                 pass
         finally:
             self._applying = False
+
+
+    def shutdown(self) -> None:
+        """Lepaskan referensi root agar callback queued tidak menyentuh QWidget mati."""
+        self._apply_pending = False
+        self._root = None
+        self._on_scale_changed = None
+        self._spacer_bases.clear()
 
 
 __all__ = [

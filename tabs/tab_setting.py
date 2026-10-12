@@ -16,8 +16,10 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QMenu,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QMessageBox,
     QPushButton,
@@ -39,6 +41,7 @@ from config import (
 )
 
 import services.database_service as db_service
+import services.numbering_service as numbering_service
 
 from themes.modules.setting import get_setting_styles
 from utils.input_style_helper import atur_tinggi_input, terapkan_style_input_global
@@ -112,15 +115,53 @@ class TabSettingSistem(QWidget):
             "Identitas & Sistem",
             "Dokumen & Penomoran",
             "Rekening Bank",
-            "Cabang & Wilayah",
-            "Operasional",
             "Manajemen User",
             "Tampilan & Font",
         ]
         self.sidebar_list.addItems(menus)
         self.sidebar_list.setCurrentRow(0)
 
-        sidebar_layout.addWidget(self.sidebar_list)
+        sidebar_layout.addWidget(self.sidebar_list, 1)
+
+        # ── INFO SESI LOGIN (selalu terlihat di bawah menu) ──
+        self.session_info_box = QWidget()
+        self.session_info_box.setObjectName("SessionInfoBox")
+        self.session_info_box.setMinimumHeight(66)
+        self.session_info_box.setMaximumHeight(82)
+        session_info_layout = QVBoxLayout(self.session_info_box)
+        session_info_layout.setContentsMargins(10, 8, 10, 8)
+        session_info_layout.setSpacing(2)
+
+        self.lbl_session_user = QLabel()
+        self.lbl_session_user.setObjectName("SessionInfoUser")
+        self.lbl_session_user.setWordWrap(True)
+        self.lbl_session_user.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+        self.lbl_session_branch = QLabel()
+        self.lbl_session_branch.setObjectName("SessionInfoBranch")
+        self.lbl_session_branch.setWordWrap(True)
+        self.lbl_session_branch.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+        session_info_layout.addWidget(self.lbl_session_user)
+        session_info_layout.addWidget(self.lbl_session_branch)
+        sidebar_layout.addWidget(self.session_info_box, 0)
+
+        self.btn_logout = QPushButton("Logout")
+        self.btn_logout.setObjectName("BtnLogoutText")
+        self.btn_logout.setProperty("access_safe_action", True)
+        self.btn_logout.setFlat(True)
+        self.btn_logout.setAutoDefault(False)
+        self.btn_logout.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.btn_logout.clicked.connect(self._logout_dari_aplikasi)
+        sidebar_layout.addWidget(
+            self.btn_logout,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+
         root_layout.addWidget(self.sidebar_container)
 
         # ── 2. KONTEN KANAN (Tumpukan Halaman) ──
@@ -134,16 +175,12 @@ class TabSettingSistem(QWidget):
         self.page_general = QWidget()
         self.page_document = QWidget()
         self.page_bank = QWidget()
-        self.page_cabang = QWidget()
-        self.page_operasional = QWidget()
         self.page_user_access = QWidget()
         self.page_font = QWidget()
 
         self._build_page_general()
         self._build_page_document()
         self._build_page_bank()
-        self._build_page_cabang()
-        self._build_page_operasional()
         self._build_page_user_access()
         self._build_page_font()
 
@@ -155,11 +192,6 @@ class TabSettingSistem(QWidget):
             self.txt_db_path,
             self.txt_suffix_pajak,
             self.cmb_format_resi_manual,
-            self.txt_num_format,
-            self.txt_option_code,
-            self.txt_option_label,
-            self.txt_kode_wilayah,
-            self.txt_nama_wilayah,
             self.txt_in_bank_np,
             self.txt_in_norek_np,
             self.txt_in_nama_np,
@@ -172,8 +204,6 @@ class TabSettingSistem(QWidget):
         self.stacked_widget.addWidget(self.page_general)
         self.stacked_widget.addWidget(self.page_document)
         self.stacked_widget.addWidget(self.page_bank)
-        self.stacked_widget.addWidget(self.page_cabang)
-        self.stacked_widget.addWidget(self.page_operasional)
         self.stacked_widget.addWidget(self.page_user_access)
         self.stacked_widget.addWidget(self.page_font)
 
@@ -185,15 +215,25 @@ class TabSettingSistem(QWidget):
         self.btn_simpan_all = QPushButton("Simpan")
         self.btn_simpan_all.setFixedHeight(SETTING_SAVE_BUTTON_HEIGHT)
         self.btn_simpan_all.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Fixed,
         )
         self.btn_simpan_all.clicked.connect(self.simpan_pengaturan)
-        right_layout.addWidget(self.btn_simpan_all)
+
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(8)
+        action_layout.addStretch(1)
+        action_layout.addWidget(
+            self.btn_simpan_all,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+        )
+        right_layout.addLayout(action_layout)
 
         root_layout.addWidget(right_container)
 
         self._setting_ui_ready = True
+        self._refresh_session_info()
         self.sesuaikan_tema_lokal()
         self.validasi_hak_akses_setting()
 
@@ -245,9 +285,6 @@ class TabSettingSistem(QWidget):
         # --- DATABASE AKTIF ---
         self.txt_db_path = QLineEdit()
         self.txt_db_path.setReadOnly(True)
-        self.txt_db_path.setToolTip(
-            "Database ditentukan dari app_env.json dan tidak dipindahkan dari menu ini."
-        )
 
         form.addRow("Path database (.db):", self.txt_db_path)
 
@@ -255,11 +292,11 @@ class TabSettingSistem(QWidget):
         layout.addStretch()
 
     def _build_page_document(self):
-        """Dokumen & Penomoran: konfigurasi client-side yang disimpan di SQLite + sync.
+        """Dokumen & Penomoran.
 
-        Tanpa QGroupBox/container berlapis — hanya judul section + tabel
-        langsung, mengikuti pola halaman Cabang & Wilayah, agar tidak ada
-        overlap antara tabel, form input, dan teks bantuan.
+        Format/seri nomor Mahkota bersifat fixed. Tabel menjadi satu-satunya
+        tempat konfigurasi counter: SUPER dapat mengubah NOMOR AWAL dan PADDING
+        melalui klik kanan. TERAKHIR selalu read-only dan dikelola otomatis.
         """
         layout = QVBoxLayout(self.page_document)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -269,101 +306,52 @@ class TabSettingSistem(QWidget):
         lbl_title.setProperty("is_page_title", True)
         layout.addWidget(lbl_title)
 
-        # =============================================================
-        # 1. FORMAT NOMOR DOKUMEN
-        # =============================================================
-        lbl_numbering = QLabel("Format Nomor Dokumen")
+        lbl_numbering = QLabel("Penomoran Dokumen")
         lbl_numbering.setStyleSheet("font-weight: 700; margin-top: 2px;")
         layout.addWidget(lbl_numbering)
 
         self.table_numbering = QTableWidget(0, 6)
         self.table_numbering.setHorizontalHeaderLabels([
-            "CABANG", "DOKUMEN", "FORMAT", "START", "CURRENT", "PADDING",
+            "CABANG", "DOKUMEN", "SERI", "NOMOR AWAL", "TERAKHIR", "PADDING",
         ])
         self.table_numbering.setAlternatingRowColors(True)
         self.table_numbering.verticalHeader().setVisible(False)
-        self.table_numbering.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_numbering.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_numbering.setMinimumHeight(160)
-        self.table_numbering.setMaximumHeight(220)
+        self.table_numbering.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table_numbering.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.table_numbering.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.table_numbering.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.table_numbering.customContextMenuRequested.connect(
+            self._show_numbering_context_menu
+        )
+        self.table_numbering.setMinimumHeight(190)
+        self.table_numbering.setFixedHeight(320)
+
         hdr = self.table_numbering.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_numbering.setColumnWidth(0, 90)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.table_numbering.setColumnWidth(1, 120)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table_numbering.setColumnWidth(3, 80)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.table_numbering.setColumnWidth(4, 90)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.table_numbering.setColumnWidth(5, 80)
-        self.table_numbering.itemDoubleClicked.connect(self._edit_numbering_row)
+        for col, width in ((0, 90), (1, 105), (2, 100), (3, 105), (4, 95), (5, 80)):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+            self.table_numbering.setColumnWidth(col, width)
         layout.addWidget(self.table_numbering)
 
         hint = QLabel(
-            "💡 Gunakan {CABANG}, {WILAYAH}, {TAHUN}, {BULAN}, {HARI}, {SEQ}. "
-            "CURRENT adalah nomor terakhir yang terpakai."
+            "Klik kanan pada kolom untuk mengubah nilai."
         )
         hint.setProperty("setting_hint_italic", True)
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        # ── Form Input Penomoran (Dua Baris Rapi) ──
-        row1 = QHBoxLayout()
-        row1.setSpacing(SETTING_ACCOUNT_INPUT_SPACING)
-        row2 = QHBoxLayout()
-        row2.setSpacing(SETTING_ACCOUNT_INPUT_SPACING)
-
-        self.cmb_num_branch = QComboBox()
-        self.cmb_num_branch.setMinimumWidth(90)
-
-        self.cmb_num_document = QComboBox()
-        self.cmb_num_document.addItems(["RESI", "MANIFEST", "INVOICE"])
-
-        self.txt_num_format = QLineEdit()
-        self.txt_num_format.setPlaceholderText("{CABANG}-{WILAYAH}-{SEQ}")
-
-        self.sp_num_start = QSpinBox()
-        self.sp_num_start.setRange(0, 2_000_000_000)
-        self.sp_num_start.setValue(1)
-
-        self.sp_num_current = QSpinBox()
-        self.sp_num_current.setRange(0, 2_000_000_000)
-        self.sp_num_current.setValue(0)
-        self.sp_num_current.setEnabled(False)
-
-        self.sp_num_padding = QSpinBox()
-        self.sp_num_padding.setRange(1, 12)
-        self.sp_num_padding.setValue(5)
-
-        self.btn_num_add = QPushButton("+")
-        self.btn_num_add.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
-        self.btn_num_add.clicked.connect(self._save_numbering_from_form)
-
-        # Baris 1: Cabang, Dokumen, Format Template
-        row1.addWidget(self.cmb_num_branch)
-        row1.addWidget(self.cmb_num_document)
-        row1.addWidget(self.txt_num_format, stretch=1)
-
-        # Baris 2: Start, Current, Padding, Tombol Simpan
-        row2.addWidget(QLabel("Start:"))
-        row2.addWidget(self.sp_num_start)
-        row2.addWidget(QLabel("Current:"))
-        row2.addWidget(self.sp_num_current)
-        row2.addWidget(QLabel("Padding:"))
-        row2.addWidget(self.sp_num_padding)
-        row2.addStretch(1)
-        row2.addWidget(self.btn_num_add)
-
-        layout.addLayout(row1)
-        layout.addLayout(row2)
-
         # =============================================================
-        # 2. PENGATURAN TAMBAHAN
+        # PENGATURAN TAMBAHAN - TETAP DIPERTAHANKAN
         # =============================================================
         lbl_tambahan = QLabel("Pengaturan Tambahan")
-        lbl_tambahan.setStyleSheet("font-weight: 700; margin-top: 12px;")
+        lbl_tambahan.setStyleSheet("font-weight: bold; margin-top: 12px;")
         layout.addWidget(lbl_tambahan)
 
         form_tambahan = QFormLayout()
@@ -382,63 +370,6 @@ class TabSettingSistem(QWidget):
         form_tambahan.addRow("Input nomor resi:", self.cmb_format_resi_manual)
 
         layout.addLayout(form_tambahan)
-        layout.addStretch()
-
-    def _build_page_operasional(self):
-        layout = QVBoxLayout(self.page_operasional)
-        layout.setContentsMargins(0, 0, 0, 0)
-        lbl_title = QLabel("Operasional")
-        lbl_title.setProperty("is_page_title", True)
-        layout.addWidget(lbl_title)
-
-        self.group_ops = QGroupBox("Pilihan Operasional")
-        v = QVBoxLayout(self.group_ops)
-        v.setContentsMargins(*SETTING_ACCOUNT_GROUP_MARGINS)
-        v.setSpacing(SETTING_ACCOUNT_GROUP_SPACING)
-
-        self.table_options = QTableWidget(0, 4)
-        self.table_options.setHorizontalHeaderLabels(["KELOMPOK", "NILAI", "NAMA TAMPILAN", ""])
-        self.table_options.setAlternatingRowColors(True)
-        self.table_options.verticalHeader().setVisible(False)
-        self.table_options.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_options.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_options.setMinimumHeight(320)
-        h = self.table_options.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_options.setColumnWidth(0, 230)
-        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.table_options.setColumnWidth(1, 150)
-        h.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table_options.setColumnWidth(3, SETTING_ACCOUNT_ACTION_WIDTH)
-        self.table_options.itemDoubleClicked.connect(self._edit_option_row)
-        v.addWidget(self.table_options)
-
-        hint = QLabel(
-            "Kelompok yang tersedia: Status Gudang, Status Tagihan, Metode Pembayaran, Jenis Truk, Tujuan Kapal.")
-        hint.setProperty("setting_hint_italic", True)
-        v.addWidget(hint)
-
-        form = QHBoxLayout()
-        self.cmb_option_group = QComboBox()
-        self.cmb_option_group.addItem("STATUS_GUDANG", "BUKU_STATUS_GUDANG")
-        self.cmb_option_group.addItem("STATUS_TAGIHAN", "BUKU_STATUS_TAGIHAN")
-        self.cmb_option_group.addItem("METODE_PEMBAYARAN", "BUKU_METODE_PEMBAYARAN")
-        self.cmb_option_group.addItem("JENIS_TRUK", "ARMADA_JENIS_TRUK")
-        self.cmb_option_group.addItem("TUJUAN_KAPAL", "ARMADA_TUJUAN_KAPAL")
-        self.txt_option_code = QLineEdit()
-        self.txt_option_code.setPlaceholderText("NILAI / KODE")
-        self.txt_option_label = QLineEdit()
-        self.txt_option_label.setPlaceholderText("NAMA TAMPILAN")
-        self.btn_option_add = QPushButton("+")
-        self.btn_option_add.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
-        self.btn_option_add.clicked.connect(self._save_option_from_form)
-        form.addWidget(self.cmb_option_group)
-        form.addWidget(self.txt_option_code)
-        form.addWidget(self.txt_option_label, stretch=1)
-        form.addWidget(self.btn_option_add)
-        v.addLayout(form)
-        layout.addWidget(self.group_ops)
         layout.addStretch()
 
     def _build_page_bank(self):
@@ -539,222 +470,11 @@ class TabSettingSistem(QWidget):
         vbox_p.addLayout(hbox_in_p)
         layout.addWidget(self.group_p)
 
-    def _build_page_cabang(self):
-        layout = QVBoxLayout(self.page_cabang)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        lbl_title = QLabel("Cabang & Wilayah")
-        lbl_title.setProperty("is_page_title", True)
-        layout.addWidget(lbl_title)
-
-        scroll = QScrollArea(self.page_cabang)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(8)
-
-        # =============================================================
-        # 1. CABANG
-        # =============================================================
-        lbl_cabang = QLabel("Manajemen Data Cabang")
-        lbl_cabang.setStyleSheet("font-weight: 700; margin-top: 2px;")
-        content_layout.addWidget(lbl_cabang)
-
-        self.table_cabang = QTableWidget(0, 3)
-        self.table_cabang.setHorizontalHeaderLabels([
-            "KODE", "NAMA KANTOR CABANG", "PREFIX NOTA",
-        ])
-        self.table_cabang.setAlternatingRowColors(True)
-        self.table_cabang.verticalHeader().setVisible(False)
-        self.table_cabang.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows,
-        )
-        self.table_cabang.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.SelectedClicked,
-        )
-        self.table_cabang.setMinimumHeight(120)
-        self.table_cabang.setMaximumHeight(175)
-        self.table_cabang.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-
-        hdr = self.table_cabang.horizontalHeader()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang.setColumnWidth(0, SETTING_BRANCH_CODE_WIDTH)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang.setColumnWidth(2, SETTING_BRANCH_PREFIX_WIDTH)
-        content_layout.addWidget(self.table_cabang)
-
-        hint_cabang = QLabel("💡 Double-click baris untuk mengedit data cabang.")
-        hint_cabang.setProperty("setting_hint_italic", True)
-        hint_cabang.setWordWrap(True)
-        content_layout.addWidget(hint_cabang)
-
-        # =============================================================
-        # 2. MASTER WILAYAH
-        # =============================================================
-        lbl_wilayah = QLabel("Master Wilayah")
-        lbl_wilayah.setStyleSheet("font-weight: 700; margin-top: 2px;")
-        content_layout.addWidget(lbl_wilayah)
-
-        self.table_wilayah = QTableWidget(0, 3)
-        self.table_wilayah.setHorizontalHeaderLabels([
-            "KODE WILAYAH", "NAMA WILAYAH", "",
-        ])
-        self.table_wilayah.setAlternatingRowColors(True)
-        self.table_wilayah.verticalHeader().setVisible(False)
-        self.table_wilayah.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows,
-        )
-        self.table_wilayah.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection,
-        )
-        self.table_wilayah.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers,
-        )
-        self.table_wilayah.setMinimumHeight(120)
-        self.table_wilayah.setMaximumHeight(175)
-        self.table_wilayah.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-
-        hdr_w = self.table_wilayah.horizontalHeader()
-        hdr_w.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_wilayah.setColumnWidth(0, SETTING_BRANCH_CODE_WIDTH + 30)
-        hdr_w.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hdr_w.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table_wilayah.setColumnWidth(2, SETTING_ACCOUNT_ACTION_WIDTH)
-        content_layout.addWidget(self.table_wilayah)
-
-        form_wilayah = QHBoxLayout()
-        form_wilayah.setSpacing(SETTING_ACCOUNT_INPUT_SPACING)
-
-        self.txt_kode_wilayah = QLineEdit()
-        self.txt_kode_wilayah.setPlaceholderText("KODE WILAYAH...")
-        self.txt_kode_wilayah.setFixedWidth(SETTING_BRANCH_CODE_WIDTH + 30)
-        self.txt_kode_wilayah.textChanged.connect(
-            lambda: self.paksa_kapital_lineedit(self.txt_kode_wilayah)
-        )
-
-        self.txt_nama_wilayah = QLineEdit()
-        self.txt_nama_wilayah.setPlaceholderText("NAMA WILAYAH...")
-        self.txt_nama_wilayah.textChanged.connect(
-            lambda: self.paksa_kapital_lineedit(self.txt_nama_wilayah)
-        )
-
-        self.btn_add_wilayah = QPushButton("+")
-        self.btn_add_wilayah.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
-        self.btn_add_wilayah.setProperty("setting_wilayah_add", True)
-        self.btn_add_wilayah.clicked.connect(self.tambah_atau_update_wilayah)
-
-        form_wilayah.addWidget(self.txt_kode_wilayah)
-        form_wilayah.addWidget(self.txt_nama_wilayah, stretch=1)
-        form_wilayah.addWidget(self.btn_add_wilayah)
-        content_layout.addLayout(form_wilayah)
-
-        hint_wilayah = QLabel(
-            "💡 Semua wilayah dianggap provinsi dan aktif. Double-click baris untuk edit."
-        )
-        hint_wilayah.setProperty("setting_hint_italic", True)
-        hint_wilayah.setWordWrap(True)
-        content_layout.addWidget(hint_wilayah)
-
-        self.table_wilayah.itemDoubleClicked.connect(self.edit_wilayah_row)
-        self._editing_wilayah_row = None
-        self._editing_wilayah_original_code = ""
-        self._wilayah_pending_delete = set()
-
-        # =============================================================
-        # 3. ATURAN PREFIX PER CABANG
-        # =============================================================
-        lbl_prefix = QLabel("Aturan Prefix Resi per Cabang")
-        lbl_prefix.setStyleSheet("font-weight: 700; margin-top: 2px;")
-        content_layout.addWidget(lbl_prefix)
-
-        self.table_cabang_wilayah = QTableWidget(0, 4)
-        self.table_cabang_wilayah.setHorizontalHeaderLabels([
-            "CABANG", "WILAYAH", "PREFIX RESI", "",
-        ])
-        self.table_cabang_wilayah.setAlternatingRowColors(True)
-        self.table_cabang_wilayah.verticalHeader().setVisible(False)
-        self.table_cabang_wilayah.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows,
-        )
-        self.table_cabang_wilayah.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection,
-        )
-        self.table_cabang_wilayah.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers,
-        )
-        self.table_cabang_wilayah.setMinimumHeight(120)
-        self.table_cabang_wilayah.setMaximumHeight(175)
-        self.table_cabang_wilayah.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-
-        hdr_cw = self.table_cabang_wilayah.horizontalHeader()
-        hdr_cw.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang_wilayah.setColumnWidth(0, SETTING_BRANCH_CODE_WIDTH + 10)
-        hdr_cw.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hdr_cw.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang_wilayah.setColumnWidth(2, SETTING_BRANCH_PREFIX_WIDTH)
-        hdr_cw.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table_cabang_wilayah.setColumnWidth(3, SETTING_ACCOUNT_ACTION_WIDTH)
-        content_layout.addWidget(self.table_cabang_wilayah)
-
-        form_cw = QHBoxLayout()
-        form_cw.setSpacing(SETTING_ACCOUNT_INPUT_SPACING)
-
-        self.cmb_cabang_rule = QComboBox()
-        self.cmb_wilayah_rule = QComboBox()
-        self.txt_prefix_rule = QLineEdit()
-        self.txt_prefix_rule.setPlaceholderText("PREFIX RESI...")
-        self.txt_prefix_rule.setFixedWidth(SETTING_BRANCH_PREFIX_WIDTH)
-        self.txt_prefix_rule.textChanged.connect(
-            lambda: self.paksa_kapital_lineedit(self.txt_prefix_rule)
-        )
-
-        self.btn_add_cabang_wilayah = QPushButton("+")
-        self.btn_add_cabang_wilayah.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
-        self.btn_add_cabang_wilayah.clicked.connect(
-            self.tambah_atau_update_cabang_wilayah
-        )
-
-        form_cw.addWidget(self.cmb_cabang_rule, 1)
-        form_cw.addWidget(self.cmb_wilayah_rule, 2)
-        form_cw.addWidget(self.txt_prefix_rule)
-        form_cw.addWidget(self.btn_add_cabang_wilayah)
-        content_layout.addLayout(form_cw)
-
-        hint_cw = QLabel(
-            "💡 Satu kombinasi cabang + wilayah hanya boleh memiliki satu prefix."
-        )
-        hint_cw.setProperty("setting_hint_italic", True)
-        hint_cw.setWordWrap(True)
-        content_layout.addWidget(hint_cw)
-
-        self.table_cabang_wilayah.itemDoubleClicked.connect(
-            self.edit_cabang_wilayah_row
-        )
-        self._editing_cabang_wilayah_row = None
-
-        content_layout.addStretch(1)
-        scroll.setWidget(content)
-        layout.addWidget(scroll, 1)
-
     def _build_page_user_access(self):
         layout = QVBoxLayout(self.page_user_access)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        lbl_title = QLabel("Manajemen User & Akses Cabang")
+        lbl_title = QLabel("Manajemen User")
         lbl_title.setProperty("is_page_title", True)
         layout.addWidget(lbl_title)
 
@@ -828,9 +548,11 @@ class TabSettingSistem(QWidget):
     def _akses_user_otomatis(role, home):
         role_bersih = str(role or "ADMIN").strip().upper()
         home_bersih = str(home or "").strip().upper()
+        central_full_homes = {"SBY"}
         return (
                 role_bersih in CENTRAL_BRANCH_ROLES
                 or home_bersih == "PUSAT"
+                or home_bersih in central_full_homes
         )
 
     def load_user_branch_access(self):
@@ -919,15 +641,8 @@ class TabSettingSistem(QWidget):
                     flags = item.flags()
                     if editable:
                         item.setFlags(flags | Qt.ItemFlag.ItemIsUserCheckable)
-                        item.setToolTip(f"Izinkan user mengakses cabang {kode}")
                     else:
                         item.setFlags(flags & ~Qt.ItemFlag.ItemIsUserCheckable)
-                        if otomatis:
-                            item.setToolTip("Akses otomatis berdasarkan role/home PUSAT")
-                        elif kode == home:
-                            item.setToolTip("Home branch wajib selalu aktif")
-                        elif not boleh_edit:
-                            item.setToolTip("Mode read-only")
                     table.setItem(row_index, branch_offset, item)
         finally:
             table.setUpdatesEnabled(True)
@@ -1056,7 +771,7 @@ class TabSettingSistem(QWidget):
         form = QFormLayout()
         self._init_form(form)
         txt_username = QLineEdit()
-        txt_username.setPlaceholderText("Contoh: ADMINSBY")
+        txt_username.setPlaceholderText("Contoh: sinta@mkt.log")
         txt_nama = QLineEdit()
         txt_nama.setPlaceholderText("Nama lengkap user")
         cmb_role = QComboBox()
@@ -1070,7 +785,7 @@ class TabSettingSistem(QWidget):
             if kode:
                 cmb_home.addItem(f"{nama} ({kode})", kode)
 
-        form.addRow("Username:", txt_username)
+        form.addRow("Username / Email:", txt_username)
         form.addRow("Nama Lengkap:", txt_nama)
         form.addRow("Role:", cmb_role)
         form.addRow("Home Branch:", cmb_home)
@@ -1114,8 +829,8 @@ class TabSettingSistem(QWidget):
         root.addWidget(group_access)
 
         lbl_info = QLabel(
-            "HOME selalu aktif. Role pusat (SUPER_ADMIN/OWNER/ADMIN_PUSAT/FINANCE) "
-            "mendapat akses AUTO ke seluruh cabang bisnis."
+            "Akun online dikelola terpusat di Supabase. HOME selalu aktif. "
+            "Role SUPER memakai akses AUTO ke seluruh cabang bisnis."
         )
         lbl_info.setWordWrap(True)
         lbl_info.setProperty("setting_hint_italic", True)
@@ -1159,7 +874,6 @@ class TabSettingSistem(QWidget):
 
             if str(user.get("id_user") or "") == str(CURRENT_SESSION.get("id_user") or ""):
                 cmb_role.setEnabled(False)
-                cmb_role.setToolTip("Role akun SUPER yang sedang login dikunci.")
         sync_access()
 
         hasil_dialog = {}
@@ -1169,7 +883,7 @@ class TabSettingSistem(QWidget):
             username = txt_username.text().strip().upper()
             nama = txt_nama.text().strip()
             role = cmb_role.currentText().strip().upper()
-            # Local database_service lama masih mengenal SUPER_ADMIN; mapping sementara.
+            # UI memakai label SUPER; service memetakan ke role database SUPABASE SUPER.
             role_service = "SUPER_ADMIN" if role == "SUPER" else role
             home = str(cmb_home.currentData() or "").strip().upper()
 
@@ -1445,6 +1159,49 @@ class TabSettingSistem(QWidget):
     # HAK AKSES ROLE VALIDATION
     # ─────────────────────────────────────────────────────────────────
 
+    def _ambil_main_window(self):
+        """Cari MainWindow tanpa bergantung pada kedalaman parent widget."""
+        current = self
+        while current is not None:
+            parent = current.parentWidget() if hasattr(current, "parentWidget") else None
+            if parent is None:
+                break
+            current = parent
+            if current.__class__.__name__ == "MainWindow":
+                return current
+        return None
+
+    def _refresh_session_info(self):
+        """Tampilkan identitas user dan cabang yang sedang aktif."""
+        nama = str(
+            CURRENT_SESSION.get("nama_lengkap")
+            or CURRENT_SESSION.get("username")
+            or "-"
+        ).strip()
+        kode_cabang = str(CURRENT_SESSION.get("kode_cabang") or "").strip().upper()
+        nama_cabang = str(
+            CURRENT_SESSION.get("nama_cabang")
+            or kode_cabang
+            or "-"
+        ).strip()
+        # Tampilkan hanya nama cabang, tanpa label/kode tambahan.
+        nama_cabang = nama_cabang.split("(", 1)[0].strip() or kode_cabang or "-"
+        role = str(CURRENT_SESSION.get("role") or "ADMIN").strip().upper()
+
+        self.lbl_session_user.setText(f"{nama}  •  {role}")
+        self.lbl_session_branch.setText(nama_cabang)
+
+    def _logout_dari_aplikasi(self):
+        main_window = self._ambil_main_window()
+        if main_window is None:
+            QMessageBox.warning(
+                self,
+                "Logout",
+                "Jendela utama aplikasi tidak ditemukan.",
+            )
+            return
+        main_window.logout_session()
+
     def validasi_hak_akses_setting(self):
         role = str(CURRENT_SESSION.get("role", "ADMIN")).strip().upper()
         boleh_edit = role in {"SUPER", "SUPER_ADMIN"}
@@ -1452,14 +1209,12 @@ class TabSettingSistem(QWidget):
 
         self.btn_simpan_all.setEnabled(boleh_edit)
         self.btn_simpan_all.setText(
-            "SIMPAN PENGATURAN"
+            "SIMPAN"
             if boleh_edit
-            else "🔒 PENGATURAN TERKUNCI (VIEW-ONLY MODE)"
+            else "PENGATURAN TERKUNCI"
         )
-        self.btn_simpan_all.setToolTip(
-            "" if boleh_edit else
-            "Hanya SUPER yang dapat memodifikasi konfigurasi sistem."
-        )
+        if hasattr(self, "btn_logout"):
+            self.btn_logout.setEnabled(True)
 
         self.btn_add_np.setEnabled(boleh_edit)
         self.btn_add_p.setEnabled(boleh_edit)
@@ -1481,986 +1236,12 @@ class TabSettingSistem(QWidget):
 
         self.txt_db_path.setReadOnly(True)
 
-    # ─────────────────────────────────────────────────────────────────
-    # MASTER WILAYAH
-    # ─────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _normalisasi_kode_wilayah(value):
-        return re.sub(
-            r"[^A-Z0-9_-]+",
-            "",
-            str(value or "").strip().upper(),
-        )[:20]
-
-    @staticmethod
-    def _normalisasi_nama_wilayah(value):
-        return " ".join(str(value or "").strip().upper().split())
-
     def _wilayah_connection(self):
         conn = db_service.get_db_connection(
             CURRENT_SESSION.get("db_name", "database_cargo.db")
         )
         conn.execute("PRAGMA busy_timeout = 20000")
         return conn
-
-    def _style_wilayah_delete_button(self, button):
-        styles = getattr(self, "_setting_styles", {})
-        key = (
-            "btn_row_delete"
-            if button.isEnabled()
-            else "btn_row_delete_disabled"
-        )
-        button.setStyleSheet(styles.get(key, ""))
-
-    def _insert_wilayah_row(self, kode, nama, sync_id=""):
-        row = self.table_wilayah.rowCount()
-        self.table_wilayah.insertRow(row)
-
-        item_kode = QTableWidgetItem(str(kode or "").strip().upper())
-        item_kode.setData(Qt.ItemDataRole.UserRole, str(sync_id or ""))
-        self.table_wilayah.setItem(row, 0, item_kode)
-        self.table_wilayah.setItem(
-            row, 1, QTableWidgetItem(self._normalisasi_nama_wilayah(nama))
-        )
-
-        button = QPushButton("-")
-        button.setProperty("setting_row_delete", True)
-        button.clicked.connect(
-            lambda _, b=button: self.hapus_wilayah_via_tombol(b)
-        )
-        self.table_wilayah.setCellWidget(row, 2, button)
-        self._style_wilayah_delete_button(button)
-
-    def load_master_wilayah(self):
-        if not hasattr(self, "table_wilayah"):
-            return
-
-        self.table_wilayah.setUpdatesEnabled(False)
-        self.table_wilayah.blockSignals(True)
-        try:
-            self.table_wilayah.setRowCount(0)
-            conn = self._wilayah_connection()
-            try:
-                rows = conn.execute(
-                    """
-                    SELECT kode_wilayah, nama_wilayah, tipe_wilayah,
-                           aktif, sync_id
-                    FROM master_wilayah
-                    WHERE COALESCE(aktif, 1) = 1
-                    ORDER BY COALESCE(urutan, 0), nama_wilayah COLLATE NOCASE
-                    """
-                ).fetchall()
-            finally:
-                conn.close()
-
-            for row in rows:
-                self._insert_wilayah_row(
-                    kode=row[0],
-                    nama=row[1],
-                    sync_id=row[4],
-                )
-        except Exception as exc:
-            print(f"[TabSetting] Gagal memuat master wilayah: {exc}")
-        finally:
-            self.table_wilayah.blockSignals(False)
-            self.table_wilayah.setUpdatesEnabled(True)
-
-    def _reset_form_wilayah(self):
-        self._editing_wilayah_row = None
-        self._editing_wilayah_original_code = ""
-        self.txt_kode_wilayah.clear()
-        self.txt_nama_wilayah.clear()
-        self.btn_add_wilayah.setText("+")
-        self.btn_add_wilayah.setToolTip("Tambah wilayah")
-
-    def tambah_atau_update_wilayah(self):
-        if not self._boleh_edit_setting():
-            QMessageBox.warning(
-                self,
-                "Akses Ditolak",
-                "Hanya SUPER yang dapat menambah atau mengubah wilayah.",
-            )
-            return
-
-        kode = self._normalisasi_kode_wilayah(self.txt_kode_wilayah.text())
-        nama = self._normalisasi_nama_wilayah(self.txt_nama_wilayah.text())
-
-        if len(kode) < 2:
-            QMessageBox.warning(
-                self, "Data Belum Lengkap", "Kode wilayah minimal 2 karakter."
-            )
-            return
-        if not nama:
-            QMessageBox.warning(
-                self, "Data Belum Lengkap", "Nama wilayah wajib diisi."
-            )
-            return
-
-        edit_row = self._editing_wilayah_row
-        for row in range(self.table_wilayah.rowCount()):
-            if row == edit_row:
-                continue
-            item = self.table_wilayah.item(row, 0)
-            if item and self._normalisasi_kode_wilayah(item.text()) == kode:
-                QMessageBox.warning(
-                    self,
-                    "Kode Duplikat",
-                    f"Kode wilayah '{kode}' sudah digunakan.",
-                )
-                return
-
-        if edit_row is not None and 0 <= edit_row < self.table_wilayah.rowCount():
-            original_code = self._normalisasi_kode_wilayah(
-                self._editing_wilayah_original_code
-            )
-            item_code = self.table_wilayah.item(edit_row, 0)
-            if original_code and original_code != kode:
-                self._wilayah_pending_delete.add(original_code)
-                if item_code is not None:
-                    item_code.setData(Qt.ItemDataRole.UserRole, str(uuid.uuid4()))
-
-            self.table_wilayah.item(edit_row, 0).setText(kode)
-            self.table_wilayah.item(edit_row, 1).setText(nama)
-            self._wilayah_pending_delete.discard(kode)
-        else:
-            self._insert_wilayah_row(
-                kode=kode,
-                nama=nama,
-                sync_id=str(uuid.uuid4()),
-            )
-
-        self._reset_form_wilayah()
-
-    def edit_wilayah_row(self, item):
-        row = item.row()
-        if row < 0 or row >= self.table_wilayah.rowCount():
-            return
-
-        self._editing_wilayah_row = row
-        self._editing_wilayah_original_code = (
-            self.table_wilayah.item(row, 0).text().strip().upper()
-            if self.table_wilayah.item(row, 0) else ""
-        )
-        self.txt_kode_wilayah.setText(
-            self.table_wilayah.item(row, 0).text()
-            if self.table_wilayah.item(row, 0) else ""
-        )
-        self.txt_nama_wilayah.setText(
-            self.table_wilayah.item(row, 1).text()
-            if self.table_wilayah.item(row, 1) else ""
-        )
-        self.btn_add_wilayah.setText("✓")
-        self.btn_add_wilayah.setToolTip("Terapkan perubahan baris ini")
-
-    def hapus_wilayah_via_tombol(self, button):
-        for row in range(self.table_wilayah.rowCount()):
-            if self.table_wilayah.cellWidget(row, 2) is not button:
-                continue
-
-            kode = (
-                self.table_wilayah.item(row, 0).text().strip().upper()
-                if self.table_wilayah.item(row, 0)
-                else ""
-            )
-            nama = (
-                self.table_wilayah.item(row, 1).text().strip()
-                if self.table_wilayah.item(row, 1)
-                else kode
-            )
-
-            answer = QMessageBox.question(
-                self,
-                "Nonaktifkan Wilayah",
-                f"Nonaktifkan wilayah berikut?\n\n"
-                f"{kode} — {nama}\n\n"
-                "Wilayah tidak dihapus permanen agar histori sinkronisasi tetap aman.",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-
-            item_kode = self.table_wilayah.item(row, 0)
-            sync_id = (
-                str(item_kode.data(Qt.ItemDataRole.UserRole) or "").strip()
-                if item_kode else ""
-            )
-            if sync_id:
-                self._wilayah_pending_delete.add(kode)
-
-            self.table_wilayah.removeRow(row)
-            self._editing_wilayah_row = None
-            self._reset_form_wilayah()
-            return
-
-    def _ambil_wilayah_tabel(self):
-        rows = []
-        codes = set()
-
-        for row in range(self.table_wilayah.rowCount()):
-            item_kode = self.table_wilayah.item(row, 0)
-            item_nama = self.table_wilayah.item(row, 1)
-
-            kode = self._normalisasi_kode_wilayah(
-                item_kode.text() if item_kode else ""
-            )
-            nama = self._normalisasi_nama_wilayah(
-                item_nama.text() if item_nama else ""
-            )
-            sync_id = (
-                str(item_kode.data(Qt.ItemDataRole.UserRole) or "").strip()
-                if item_kode else ""
-            )
-
-            if not kode and not nama:
-                continue
-            if not kode or not nama:
-                raise ValueError(f"Baris wilayah {row + 1} belum lengkap.")
-            if kode in codes:
-                raise ValueError(f"Kode wilayah '{kode}' digunakan dua kali.")
-
-            rows.append({
-                "kode_wilayah": kode,
-                "nama_wilayah": nama,
-                "tipe_wilayah": "PROVINSI",
-                "aktif": 1,
-                "urutan": (row + 1) * 10,
-                "sync_id": sync_id or str(uuid.uuid4()),
-            })
-            codes.add(kode)
-
-        return rows
-
-    # ────────────────────────────────────────────────────────────────
-    # ATURAN PREFIX PER CABANG
-    # ────────────────────────────────────────────────────────────────
-
-    def _reset_form_cabang_wilayah(self):
-        self._editing_cabang_wilayah_row = None
-        self.cmb_cabang_rule.setCurrentIndex(
-            0 if self.cmb_cabang_rule.count() else -1
-        )
-        self.cmb_wilayah_rule.setCurrentIndex(
-            0 if self.cmb_wilayah_rule.count() else -1
-        )
-        self.txt_prefix_rule.clear()
-        self.btn_add_cabang_wilayah.setText("+")
-        self.btn_add_cabang_wilayah.setToolTip("Tambah aturan prefix")
-
-    def _load_cabang_wilayah_combos(self):
-        try:
-            conn = self._wilayah_connection()
-            try:
-                branch_rows = conn.execute(
-                    "SELECT kode_cabang, nama_cabang "
-                    "FROM data_cabang ORDER BY kode_cabang"
-                ).fetchall()
-                wilayah_rows = conn.execute(
-                    """
-                    SELECT kode_wilayah, nama_wilayah
-                    FROM master_wilayah
-                    WHERE COALESCE(aktif, 1) = 1
-                    ORDER BY COALESCE(urutan, 0), nama_wilayah COLLATE NOCASE
-                    """
-                ).fetchall()
-            finally:
-                conn.close()
-
-            current_branch = self.cmb_cabang_rule.currentData()
-            current_wilayah = self.cmb_wilayah_rule.currentData()
-
-            self.cmb_cabang_rule.blockSignals(True)
-            self.cmb_wilayah_rule.blockSignals(True)
-            try:
-                self.cmb_cabang_rule.clear()
-                for kode, nama in branch_rows:
-                    kode = str(kode or "").strip().upper()
-                    nama = str(nama or kode).strip()
-                    if kode:
-                        self.cmb_cabang_rule.addItem(
-                            f"{kode} — {nama}", kode
-                        )
-
-                self.cmb_wilayah_rule.clear()
-                for kode, nama in wilayah_rows:
-                    kode = str(kode or "").strip().upper()
-                    nama = str(nama or kode).strip()
-                    if kode:
-                        self.cmb_wilayah_rule.addItem(
-                            f"{kode} — {nama}", kode
-                        )
-            finally:
-                self.cmb_cabang_rule.blockSignals(False)
-                self.cmb_wilayah_rule.blockSignals(False)
-
-            if current_branch is not None:
-                idx = self.cmb_cabang_rule.findData(
-                    str(current_branch).upper()
-                )
-                if idx >= 0:
-                    self.cmb_cabang_rule.setCurrentIndex(idx)
-
-            if current_wilayah is not None:
-                idx = self.cmb_wilayah_rule.findData(
-                    str(current_wilayah).upper()
-                )
-                if idx >= 0:
-                    self.cmb_wilayah_rule.setCurrentIndex(idx)
-        except Exception as exc:
-            print(
-                f"[TabSetting] Gagal memuat pilihan cabang/wilayah: {exc}"
-            )
-
-    def _insert_cabang_wilayah_row(
-            self,
-            kode_cabang,
-            kode_wilayah,
-            prefix_resi,
-            sync_id="",
-            nama_wilayah=None,
-    ):
-        row = self.table_cabang_wilayah.rowCount()
-        self.table_cabang_wilayah.insertRow(row)
-
-        kode_cabang = str(kode_cabang or "").strip().upper()
-        kode_wilayah = str(kode_wilayah or "").strip().upper()
-        prefix_resi = str(prefix_resi or "").strip().upper()
-        nama_wilayah = str(nama_wilayah or kode_wilayah).strip()
-
-        item_cabang = QTableWidgetItem(kode_cabang)
-        item_cabang.setData(
-            Qt.ItemDataRole.UserRole,
-            {
-                "sync_id": str(sync_id or ""),
-                "kode_cabang": kode_cabang,
-                "kode_wilayah": kode_wilayah,
-            },
-        )
-        self.table_cabang_wilayah.setItem(row, 0, item_cabang)
-        self.table_cabang_wilayah.setItem(
-            row,
-            1,
-            QTableWidgetItem(f"{kode_wilayah} — {nama_wilayah}"),
-        )
-        self.table_cabang_wilayah.setItem(
-            row, 2, QTableWidgetItem(prefix_resi)
-        )
-
-        button = QPushButton("-")
-        button.setProperty("setting_row_delete", True)
-        button.clicked.connect(
-            lambda _, b=button: self.hapus_cabang_wilayah_via_tombol(b)
-        )
-        self.table_cabang_wilayah.setCellWidget(row, 3, button)
-        self._style_wilayah_delete_button(button)
-
-    def load_cabang_wilayah(self):
-        if not hasattr(self, "table_cabang_wilayah"):
-            return
-
-        self._load_cabang_wilayah_combos()
-        self.table_cabang_wilayah.setUpdatesEnabled(False)
-        self.table_cabang_wilayah.blockSignals(True)
-        try:
-            self.table_cabang_wilayah.setRowCount(0)
-            conn = self._wilayah_connection()
-            try:
-                rows = conn.execute(
-                    """
-                    SELECT cw.kode_cabang,
-                           cw.kode_wilayah,
-                           cw.prefix_resi,
-                           cw.sync_id,
-                           COALESCE(mw.nama_wilayah, cw.kode_wilayah)
-                    FROM cabang_wilayah cw
-                    LEFT JOIN master_wilayah mw
-                      ON mw.kode_wilayah = cw.kode_wilayah
-                    WHERE COALESCE(cw.aktif, 1) = 1
-                      AND cw.deleted_at IS NULL
-                    ORDER BY cw.kode_cabang,
-                             COALESCE(mw.urutan, 0),
-                             mw.nama_wilayah COLLATE NOCASE
-                    """
-                ).fetchall()
-            finally:
-                conn.close()
-
-            for row in rows:
-                self._insert_cabang_wilayah_row(*row)
-        except Exception as exc:
-            print(
-                f"[TabSetting] Gagal memuat aturan prefix cabang: {exc}"
-            )
-        finally:
-            self.table_cabang_wilayah.blockSignals(False)
-            self.table_cabang_wilayah.setUpdatesEnabled(True)
-
-        self._reset_form_cabang_wilayah()
-
-    def _find_cabang_wilayah_duplicate(
-            self, kode_cabang, kode_wilayah, skip_row=None
-    ):
-        for row in range(self.table_cabang_wilayah.rowCount()):
-            if row == skip_row:
-                continue
-            item = self.table_cabang_wilayah.item(row, 0)
-            meta = item.data(Qt.ItemDataRole.UserRole) if item else {}
-            if not isinstance(meta, dict):
-                meta = {}
-            row_cabang = str(meta.get("kode_cabang") or "").strip().upper()
-            row_wilayah = str(meta.get("kode_wilayah") or "").strip().upper()
-            if row_cabang == kode_cabang and row_wilayah == kode_wilayah:
-                return row
-        return None
-
-    def tambah_atau_update_cabang_wilayah(self):
-        if not self._boleh_edit_setting():
-            QMessageBox.warning(
-                self,
-                "Akses Ditolak",
-                "Hanya SUPER yang dapat mengatur prefix resi per cabang.",
-            )
-            return
-
-        kode_cabang = str(
-            self.cmb_cabang_rule.currentData() or ""
-        ).strip().upper()
-        kode_wilayah = str(
-            self.cmb_wilayah_rule.currentData() or ""
-        ).strip().upper()
-        prefix = str(
-            self.txt_prefix_rule.text() or ""
-        ).strip().upper()
-
-        if not kode_cabang or not kode_wilayah or not prefix:
-            QMessageBox.warning(
-                self,
-                "Data Belum Lengkap",
-                "Cabang, wilayah, dan prefix wajib diisi.",
-            )
-            return
-
-        edit_row = self._editing_cabang_wilayah_row
-        duplicate = self._find_cabang_wilayah_duplicate(
-            kode_cabang, kode_wilayah, edit_row
-        )
-        if duplicate is not None:
-            QMessageBox.warning(
-                self,
-                "Data Duplikat",
-                f"Aturan {kode_cabang} + {kode_wilayah} sudah ada.",
-            )
-            return
-
-        if edit_row is not None and 0 <= edit_row < self.table_cabang_wilayah.rowCount():
-            item = self.table_cabang_wilayah.item(edit_row, 0)
-            meta = item.data(Qt.ItemDataRole.UserRole) if item else {}
-            if not isinstance(meta, dict):
-                meta = {}
-            meta["kode_cabang"] = kode_cabang
-            meta["kode_wilayah"] = kode_wilayah
-            if not meta.get("sync_id"):
-                meta["sync_id"] = str(uuid.uuid4())
-
-            item.setText(kode_cabang)
-            item.setData(Qt.ItemDataRole.UserRole, meta)
-            self.table_cabang_wilayah.item(edit_row, 1).setText(
-                self.cmb_wilayah_rule.currentText()
-            )
-            self.table_cabang_wilayah.item(edit_row, 2).setText(prefix)
-        else:
-            self._insert_cabang_wilayah_row(
-                kode_cabang,
-                kode_wilayah,
-                prefix,
-                str(uuid.uuid4()),
-                self.cmb_wilayah_rule.currentText().split("—", 1)[-1].strip(),
-            )
-
-        self._reset_form_cabang_wilayah()
-
-    def edit_cabang_wilayah_row(self, item):
-        row = item.row()
-        if row < 0 or row >= self.table_cabang_wilayah.rowCount():
-            return
-
-        item_cabang = self.table_cabang_wilayah.item(row, 0)
-        meta = item_cabang.data(Qt.ItemDataRole.UserRole) if item_cabang else {}
-        if not isinstance(meta, dict):
-            meta = {}
-
-        kode_cabang = str(meta.get("kode_cabang") or "").strip().upper()
-        kode_wilayah = str(meta.get("kode_wilayah") or "").strip().upper()
-        prefix_item = self.table_cabang_wilayah.item(row, 2)
-        prefix = str(prefix_item.text() if prefix_item else "").strip().upper()
-
-        idx = self.cmb_cabang_rule.findData(kode_cabang)
-        if idx >= 0:
-            self.cmb_cabang_rule.setCurrentIndex(idx)
-        idx = self.cmb_wilayah_rule.findData(kode_wilayah)
-        if idx >= 0:
-            self.cmb_wilayah_rule.setCurrentIndex(idx)
-
-        self.txt_prefix_rule.setText(prefix)
-        self._editing_cabang_wilayah_row = row
-        self.btn_add_cabang_wilayah.setText("✓")
-        self.btn_add_cabang_wilayah.setToolTip(
-            "Terapkan perubahan baris ini"
-        )
-
-    def hapus_cabang_wilayah_via_tombol(self, button):
-        for row in range(self.table_cabang_wilayah.rowCount()):
-            if self.table_cabang_wilayah.cellWidget(row, 3) is not button:
-                continue
-
-            item = self.table_cabang_wilayah.item(row, 0)
-            meta = item.data(Qt.ItemDataRole.UserRole) if item else {}
-            if not isinstance(meta, dict):
-                meta = {}
-
-            kode_cabang = str(meta.get("kode_cabang") or "").strip().upper()
-            kode_wilayah = str(meta.get("kode_wilayah") or "").strip().upper()
-
-            answer = QMessageBox.question(
-                self,
-                "Nonaktifkan Aturan Prefix",
-                (
-                    f"Nonaktifkan aturan {kode_cabang} + {kode_wilayah}?\n\n"
-                    "Aturan tidak dihapus permanen."
-                ),
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-
-            self.table_cabang_wilayah.removeRow(row)
-            self._reset_form_cabang_wilayah()
-            return
-
-    def _ambil_cabang_wilayah_tabel(self):
-        rows = []
-        keys = set()
-
-        for row in range(self.table_cabang_wilayah.rowCount()):
-            item_cabang = self.table_cabang_wilayah.item(row, 0)
-            item_prefix = self.table_cabang_wilayah.item(row, 2)
-            meta = item_cabang.data(Qt.ItemDataRole.UserRole) if item_cabang else {}
-            if not isinstance(meta, dict):
-                meta = {}
-
-            kode_cabang = str(meta.get("kode_cabang") or "").strip().upper()
-            kode_wilayah = str(meta.get("kode_wilayah") or "").strip().upper()
-            prefix = str(
-                item_prefix.text() if item_prefix else ""
-            ).strip().upper()
-
-            if not kode_cabang or not kode_wilayah or not prefix:
-                raise ValueError(
-                    f"Aturan prefix baris {row + 1} belum lengkap."
-                )
-
-            key = (kode_cabang, kode_wilayah)
-            if key in keys:
-                raise ValueError(
-                    f"Aturan {kode_cabang} + {kode_wilayah} digunakan dua kali."
-                )
-
-            rows.append(
-                {
-                    "kode_cabang": kode_cabang,
-                    "kode_wilayah": kode_wilayah,
-                    "prefix_resi": prefix,
-                    "aktif": 1,
-                    "sync_id": str(meta.get("sync_id") or uuid.uuid4()),
-                }
-            )
-            keys.add(key)
-
-        return rows
-
-    def _simpan_cabang_wilayah_local(self, desired_rows):
-        conn = self._wilayah_connection()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-
-            existing_rows = conn.execute(
-                """
-                SELECT kode_cabang, kode_wilayah, prefix_resi, aktif,
-                       sync_id, deleted_at
-                FROM cabang_wilayah
-                """
-            ).fetchall()
-            existing = {
-                (str(row[0]).strip().upper(), str(row[1]).strip().upper()): {
-                    "prefix_resi": row[2],
-                    "aktif": row[3],
-                    "sync_id": row[4],
-                    "deleted_at": row[5],
-                }
-                for row in existing_rows
-            }
-
-            desired_keys = set()
-
-            def enqueue(operation, payload):
-                record_key = str(
-                    payload.get("sync_id")
-                    or f"{payload.get('kode_cabang')}::{payload.get('kode_wilayah')}"
-                )
-                conn.execute(
-                    """
-                    DELETE FROM sync_outbox
-                    WHERE table_name = 'cabang_wilayah'
-                      AND record_key = ?
-                      AND status = 'PENDING'
-                    """,
-                    (record_key,),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO sync_outbox(
-                        table_name, record_key, operation, payload_json
-                    ) VALUES ('cabang_wilayah', ?, ?, ?)
-                    """,
-                    (
-                        record_key,
-                        operation,
-                        json.dumps(payload, ensure_ascii=False),
-                    ),
-                )
-
-            for row in desired_rows:
-                key = (row["kode_cabang"], row["kode_wilayah"])
-                desired_keys.add(key)
-                old = existing.get(key)
-                sync_id = str(
-                    row.get("sync_id")
-                    or (old or {}).get("sync_id")
-                    or uuid.uuid4()
-                )
-                payload = dict(row)
-                payload["sync_id"] = sync_id
-
-                if old is None:
-                    conn.execute(
-                        """
-                        INSERT INTO cabang_wilayah(
-                            kode_cabang, kode_wilayah, prefix_resi, aktif,
-                            sync_id, created_at, updated_at, deleted_at
-                        ) VALUES (?, ?, ?, 1, ?, CURRENT_TIMESTAMP,
-                                  CURRENT_TIMESTAMP, NULL)
-                        """,
-                        (
-                            row["kode_cabang"],
-                            row["kode_wilayah"],
-                            row["prefix_resi"],
-                            sync_id,
-                        ),
-                    )
-                    enqueue("INSERT", payload)
-                    continue
-
-                changed = (
-                        str(old.get("prefix_resi") or "").upper()
-                        != row["prefix_resi"]
-                        or int(old.get("aktif") or 0) != 1
-                        or old.get("deleted_at") is not None
-                        or str(old.get("sync_id") or "") != sync_id
-                )
-                if changed:
-                    conn.execute(
-                        """
-                        UPDATE cabang_wilayah
-                        SET prefix_resi = ?,
-                            aktif = 1,
-                            sync_id = ?,
-                            updated_at = CURRENT_TIMESTAMP,
-                            deleted_at = NULL
-                        WHERE kode_cabang = ?
-                          AND kode_wilayah = ?
-                        """,
-                        (
-                            row["prefix_resi"],
-                            sync_id,
-                            row["kode_cabang"],
-                            row["kode_wilayah"],
-                        ),
-                    )
-                    enqueue("UPDATE", payload)
-
-            for key, old in existing.items():
-                if key in desired_keys:
-                    continue
-                if int(old.get("aktif") or 0) != 1:
-                    continue
-                if old.get("deleted_at") is not None:
-                    continue
-
-                payload = {
-                    "kode_cabang": key[0],
-                    "kode_wilayah": key[1],
-                    "prefix_resi": old.get("prefix_resi"),
-                    "aktif": 0,
-                    "sync_id": old.get("sync_id") or str(uuid.uuid4()),
-                    "deleted_at": datetime.now().astimezone().isoformat(),
-                }
-                conn.execute(
-                    """
-                    UPDATE cabang_wilayah
-                    SET aktif = 0,
-                        updated_at = CURRENT_TIMESTAMP,
-                        deleted_at = CURRENT_TIMESTAMP
-                    WHERE kode_cabang = ?
-                      AND kode_wilayah = ?
-                    """,
-                    key,
-                )
-                enqueue("DELETE", payload)
-
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    @staticmethod
-    def _enqueue_wilayah(cursor, operation, payload):
-        cursor.execute(
-            """
-            INSERT INTO sync_outbox(
-                table_name, record_key, operation, payload_json
-            ) VALUES ('master_wilayah', ?, ?, ?)
-            """,
-            (
-                str(payload.get("sync_id") or payload.get("kode_wilayah")),
-                operation,
-                json.dumps(payload, ensure_ascii=False),
-            ),
-        )
-
-    def _simpan_master_wilayah_local(self, rows):
-        conn = self._wilayah_connection()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-
-            existing_rows = {
-                str(row[0]).strip().upper(): row
-                for row in conn.execute(
-                    """
-                    SELECT kode_wilayah, nama_wilayah, tipe_wilayah, aktif,
-                           urutan, sync_id, created_at, updated_at, deleted_at
-                    FROM master_wilayah
-                    """
-                ).fetchall()
-            }
-
-            for row in rows:
-                kode = row["kode_wilayah"]
-                existing = existing_rows.get(kode)
-
-                if existing:
-                    (
-                        _old_kode,
-                        old_nama,
-                        old_tipe,
-                        old_aktif,
-                        old_urutan,
-                        old_sync_id,
-                        _old_created,
-                        _old_updated,
-                        old_deleted,
-                    ) = existing
-
-                    changed = (
-                            self._normalisasi_nama_wilayah(old_nama) != row["nama_wilayah"]
-                            or str(old_tipe or "PROVINSI").upper() != row["tipe_wilayah"]
-                            or int(old_aktif or 0) != int(row["aktif"])
-                            or int(old_urutan or 0) != int(row["urutan"])
-                            or bool(old_deleted) != (not bool(row["aktif"]))
-                    )
-                    if not changed:
-                        continue
-
-                    conn.execute(
-                        """
-                        UPDATE master_wilayah
-                        SET nama_wilayah = ?,
-                            tipe_wilayah = ?,
-                            aktif = ?,
-                            urutan = ?,
-                            updated_at = CURRENT_TIMESTAMP,
-                            deleted_at = ?
-                        WHERE kode_wilayah = ?
-                        """,
-                        (
-                            row["nama_wilayah"],
-                            row["tipe_wilayah"],
-                            int(row["aktif"]),
-                            int(row["urutan"]),
-                            None if row["aktif"] else None,
-                            kode,
-                        ),
-                    )
-                    if not row["aktif"]:
-                        conn.execute(
-                            """
-                            UPDATE master_wilayah
-                            SET deleted_at = CURRENT_TIMESTAMP
-                            WHERE kode_wilayah = ?
-                            """,
-                            (kode,),
-                        )
-
-                    fresh = conn.execute(
-                        """
-                        SELECT kode_wilayah, nama_wilayah, tipe_wilayah, aktif,
-                               urutan, sync_id, created_at, updated_at, deleted_at
-                        FROM master_wilayah
-                        WHERE kode_wilayah = ?
-                        LIMIT 1
-                        """,
-                        (kode,),
-                    ).fetchone()
-
-                    payload = {
-                        "kode_wilayah": fresh[0],
-                        "nama_wilayah": fresh[1],
-                        "tipe_wilayah": fresh[2],
-                        "aktif": int(fresh[3] or 0),
-                        "urutan": int(fresh[4] or 0),
-                        "sync_id": fresh[5],
-                        "created_at": fresh[6],
-                        "updated_at": fresh[7],
-                        "deleted_at": fresh[8],
-                    }
-                    self._enqueue_wilayah(
-                        conn,
-                        "DELETE" if not row["aktif"] else "UPDATE",
-                        payload,
-                    )
-                else:
-                    conn.execute(
-                        """
-                        INSERT INTO master_wilayah(
-                            kode_wilayah, nama_wilayah, tipe_wilayah,
-                            aktif, urutan, sync_id
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            kode,
-                            row["nama_wilayah"],
-                            row["tipe_wilayah"],
-                            int(row["aktif"]),
-                            int(row["urutan"]),
-                            row["sync_id"],
-                        ),
-                    )
-                    fresh = conn.execute(
-                        """
-                        SELECT kode_wilayah, nama_wilayah, tipe_wilayah, aktif,
-                               urutan, sync_id, created_at, updated_at, deleted_at
-                        FROM master_wilayah
-                        WHERE kode_wilayah = ?
-                        LIMIT 1
-                        """,
-                        (kode,),
-                    ).fetchone()
-                    payload = {
-                        "kode_wilayah": fresh[0],
-                        "nama_wilayah": fresh[1],
-                        "tipe_wilayah": int(1 if fresh[3] else 0),
-                        "aktif": int(fresh[3] or 0),
-                        "urutan": int(fresh[4] or 0),
-                        "sync_id": fresh[5],
-                        "created_at": fresh[6],
-                        "updated_at": fresh[7],
-                        "deleted_at": fresh[8],
-                    }
-                    payload["tipe_wilayah"] = fresh[2]
-                    self._enqueue_wilayah(conn, "INSERT", payload)
-
-            for kode in list(self._wilayah_pending_delete):
-                existing = conn.execute(
-                    """
-                    SELECT kode_wilayah, nama_wilayah, tipe_wilayah,
-                           aktif, urutan, sync_id, created_at, updated_at, deleted_at
-                    FROM master_wilayah
-                    WHERE kode_wilayah = ?
-                    LIMIT 1
-                    """,
-                    (kode,),
-                ).fetchone()
-                if existing is None:
-                    continue
-
-                conn.execute(
-                    """
-                    UPDATE master_wilayah
-                    SET aktif = 0,
-                        updated_at = CURRENT_TIMESTAMP,
-                        deleted_at = CURRENT_TIMESTAMP
-                    WHERE kode_wilayah = ?
-                    """,
-                    (kode,),
-                )
-                fresh = conn.execute(
-                    """
-                    SELECT kode_wilayah, nama_wilayah, tipe_wilayah, aktif,
-                           urutan, sync_id, created_at, updated_at, deleted_at
-                    FROM master_wilayah
-                    WHERE kode_wilayah = ?
-                    LIMIT 1
-                    """,
-                    (kode,),
-                ).fetchone()
-                self._enqueue_wilayah(
-                    conn,
-                    "DELETE",
-                    {
-                        "kode_wilayah": fresh[0],
-                        "nama_wilayah": fresh[1],
-                        "tipe_wilayah": fresh[2],
-                        "aktif": 0,
-                        "urutan": int(fresh[4] or 0),
-                        "sync_id": fresh[5],
-                        "created_at": fresh[6],
-                        "updated_at": fresh[7],
-                        "deleted_at": fresh[8],
-                    },
-                )
-
-            active_names = [
-                row["nama_wilayah"]
-                for row in rows
-                if int(row["aktif"]) == 1
-            ]
-            conn.execute(
-                """
-                INSERT INTO pengaturan_sistem(kunci, nilai)
-                VALUES ('provinsi_tujuan', ?)
-                ON CONFLICT(kunci) DO UPDATE SET nilai = excluded.nilai
-                """,
-                (json.dumps(active_names, ensure_ascii=False),),
-            )
-
-            conn.commit()
-            self._wilayah_pending_delete.clear()
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    # ─────────────────────────────────────────────────────────────────
-    # AKSI TAMBAHAN KHUSUS (REKENING & FONT)
-    # ─────────────────────────────────────────────────────────────────
 
     def paksa_kapital_lineedit(self, edit_widget):
         edit_widget.blockSignals(True)
@@ -2655,6 +1436,7 @@ class TabSettingSistem(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._refresh_session_info()
         self.sesuaikan_tema_lokal()
 
     def sesuaikan_tema_lokal(self):
@@ -2679,11 +1461,20 @@ class TabSettingSistem(QWidget):
         self.sidebar_container.setStyleSheet(s['sidebar_container'])
         self.sidebar_list.setStyleSheet(s['sidebar_list'])
 
+        if hasattr(self, 'session_info_box'):
+            # Info sesi ditampilkan sebagai teks biasa tanpa kotak/border.
+            self.session_info_box.setStyleSheet("background: transparent; border: none;")
+            self.lbl_session_user.setStyleSheet(
+                "font-weight: 700; border: none; background: transparent;"
+            )
+            self.lbl_session_branch.setStyleSheet(
+                "font-size: 11px; border: none; background: transparent;"
+            )
+
         if hasattr(self, 'lbl_menu'):
             self.lbl_menu.setStyleSheet(s['lbl_menu'])
 
         groups = [
-            self.group_ops,
             self.group_user_access,
             self.group_font,
         ]
@@ -2708,14 +1499,10 @@ class TabSettingSistem(QWidget):
 
         tabel_setting = tuple(
             table for table in (
-                getattr(self, "table_cabang", None),
                 getattr(self, "table_user_access", None),
-                getattr(self, "table_wilayah", None),
-                getattr(self, "table_cabang_wilayah", None),
                 getattr(self, "table_numbering", None),
                 getattr(self, "table_np", None),
                 getattr(self, "table_p", None),
-                getattr(self, "table_options", None),
             ) if table is not None
         )
 
@@ -2743,13 +1530,14 @@ class TabSettingSistem(QWidget):
                 self.btn_simpan_akses_user,
         ):
             button.setStyleSheet(s.get('btn_secondary', ''))
-        self.btn_simpan_all.setStyleSheet(s['btn_simpan'])
+        # Tombol simpan memakai style default global PyQtDarkTheme.
+        if hasattr(self, 'btn_logout'):
+            # Logout sengaja tanpa border/background custom; hanya teks.
+            self.btn_logout.setStyleSheet('border: none; background: transparent; padding: 0;')
 
         if hasattr(self, 'table_np'):
             self.btn_add_np.setStyleSheet(s["btn_add_rekening"])
             self.btn_add_p.setStyleSheet(s["btn_add_rekening"])
-        if hasattr(self, "btn_add_wilayah"):
-            self.btn_add_wilayah.setStyleSheet(s.get("btn_add_rekening", ""))
 
         for button in self.findChildren(QPushButton):
             if not button.property("setting_row_delete"):
@@ -2783,217 +1571,166 @@ class TabSettingSistem(QWidget):
         return list(value) if isinstance(value, tuple) else []
 
     # ─────────────────────────────────────────────────────────────────
-    # DOKUMEN & OPERASIONAL - GENERIC SETTINGS
+    # DOKUMEN & PENOMORAN - TABLE EDITOR
     # ─────────────────────────────────────────────────────────────────
 
-    def _load_numbering_branches(self):
-        self.cmb_num_branch.blockSignals(True)
-        try:
-            self.cmb_num_branch.clear()
-            rows = db_service.ambil_semua_data_cabang(limit=200) or []
-            for row in rows:
-                kode = str(row.get("kode_cabang") if isinstance(row, dict) else row[0]).strip().upper()
-                nama = str(row.get("nama_cabang") if isinstance(row, dict) else row[1]).strip()
-                if kode:
-                    self.cmb_num_branch.addItem(f"{kode} — {nama}", kode)
-        finally:
-            self.cmb_num_branch.blockSignals(False)
-
     def _load_numbering_settings(self):
-        self._load_numbering_branches()
-        self.table_numbering.setRowCount(0)
+        """Muat seluruh counter aktif ke tabel; tidak ada form kedua."""
         conn = self._wilayah_connection()
         try:
             rows = conn.execute("""
-                SELECT kode_cabang, document_type, format_template, starting_count,
-                       current_count, padding, aktif, sync_id
-                FROM numbering_settings
-                WHERE aktif = 1 AND document_type != 'BUKU_GUDANG'
-                ORDER BY kode_cabang, document_type
+                SELECT kode_cabang, document_type, series_code,
+                       starting_count, current_count, padding, sync_id
+                FROM numbering_counters
+                WHERE aktif=1 AND deleted_at IS NULL
+                ORDER BY kode_cabang, document_type, series_code
             """).fetchall()
         finally:
             conn.close()
-        for row in rows:
-            self._insert_numbering_row(*row)
-        self._reset_numbering_form()
 
-    def _insert_numbering_row(self, kode_cabang, doc_type, fmt, start, current, padding, aktif=1,
-                              sync_id=None):
-        row = self.table_numbering.rowCount();
+        table = self.table_numbering
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            table.setRowCount(0)
+            for row in rows:
+                self._insert_numbering_row(*row)
+        finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(False)
+
+        table.resizeRowsToContents()
+        self.validasi_hak_akses_setting()
+
+    def _insert_numbering_row(
+            self, kode_cabang, doc_type, series, start, current, padding, sync_id=None
+    ):
+        row = self.table_numbering.rowCount()
         self.table_numbering.insertRow(row)
-        vals = [kode_cabang, doc_type, fmt, str(start), str(current), str(padding)]
-        for col, val in enumerate(vals): self.table_numbering.setItem(row, col, QTableWidgetItem(str(val)))
-        for col in range(6): self.table_numbering.item(row, col).setData(Qt.ItemDataRole.UserRole, sync_id or "")
+        values = [
+            str(kode_cabang or "").strip().upper(),
+            str(doc_type or "").strip().upper(),
+            str(series or "").strip().upper(),
+            str(int(start or 0)),
+            str(int(current or 0)),
+            str(max(1, int(padding or 1))),
+        ]
+        for col, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setData(Qt.ItemDataRole.UserRole, sync_id or "")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_numbering.setItem(row, col, item)
 
-    def _reset_numbering_form(self):
-        self.txt_num_format.clear();
-        self.sp_num_start.setValue(1);
-        self.sp_num_current.setValue(0);
-        self.sp_num_padding.setValue(5);
-        self.btn_num_add.setText("+")
-        if self.cmb_num_branch.count(): self.cmb_num_branch.setCurrentIndex(0)
+        # Tandai kolom read-only secara semantik; seluruh tabel tetap non-editable
+        # dan perubahan hanya lewat context menu.
 
-    def _edit_numbering_row(self, item):
-        row = item.row()
-        self.cmb_num_branch.setCurrentIndex(
-            max(0, self.cmb_num_branch.findData(self.table_numbering.item(row, 0).text())))
-        idx = self.cmb_num_document.findText(self.table_numbering.item(row, 1).text(), Qt.MatchFlag.MatchFixedString)
-        if idx >= 0: self.cmb_num_document.setCurrentIndex(idx)
-        self.txt_num_format.setText(self.table_numbering.item(row, 2).text())
-        self.sp_num_start.setValue(int(self.table_numbering.item(row, 3).text() or 0));
-        self.sp_num_current.setValue(int(self.table_numbering.item(row, 4).text() or 0));
-        self.sp_num_padding.setValue(int(self.table_numbering.item(row, 5).text() or 5))
-        self.btn_num_add.setText("✓")
+    def _show_numbering_context_menu(self, pos):
+        if not self._boleh_edit_setting():
+            return
 
-    def _save_numbering_from_form(self):
-        if not self._boleh_edit_setting(): QMessageBox.warning(self, "Akses Ditolak",
-                                                                     "Hanya SUPER yang dapat mengubah penomoran."); return
-        branch = str(self.cmb_num_branch.currentData() or "").strip().upper();
-        doc = self.cmb_num_document.currentText().strip().upper();
-        fmt = self.txt_num_format.text().strip()
-        if not branch or not fmt: QMessageBox.warning(self, "Data Belum Lengkap",
-                                                      "Cabang dan format nomor wajib diisi."); return
-        current = self.sp_num_current.value();
-        start = self.sp_num_start.value()
-        if current and current < start - 1: QMessageBox.warning(self, "Counter Tidak Valid",
-                                                                "CURRENT tidak boleh lebih kecil dari START-1."); return
-        conn = self._wilayah_connection()
-        try:
-            old = conn.execute("SELECT sync_id FROM numbering_settings WHERE kode_cabang=? AND document_type=?",
-                               (branch, doc)).fetchone()
-            sid = old[0] if old and old[0] else str(uuid.uuid4())
-            conn.execute("""
-                INSERT INTO numbering_settings(kode_cabang, document_type, format_template, starting_count, current_count, padding, reset_rule, aktif, sync_id, updated_at, deleted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, NULL)
-                ON CONFLICT(kode_cabang, document_type) DO UPDATE SET
-                    format_template=excluded.format_template, starting_count=excluded.starting_count, current_count=excluded.current_count,
-                    padding=excluded.padding, reset_rule=excluded.reset_rule, aktif=1, sync_id=excluded.sync_id, updated_at=CURRENT_TIMESTAMP, deleted_at=NULL
-            """, (branch, doc, fmt, start, current, self.sp_num_padding.value(), "NONE", sid))
-            row = conn.execute(
-                "SELECT kode_cabang,document_type,format_template,starting_count,current_count,padding,reset_rule,aktif,sync_id,created_at,updated_at,deleted_at FROM numbering_settings WHERE kode_cabang=? AND document_type=?",
-                (branch, doc)).fetchone()
-            payload = {"kode_cabang": row[0], "document_type": row[1], "format_template": row[2],
-                       "starting_count": row[3], "current_count": row[4], "padding": row[5], "reset_rule": row[6],
-                       "aktif": row[7], "sync_id": row[8], "created_at": row[9], "updated_at": row[10],
-                       "deleted_at": row[11]}
-            conn.execute(
-                "INSERT INTO sync_outbox(table_name,record_key,operation,payload_json) VALUES ('numbering_settings',?,?,?)",
-                (sid, "UPDATE" if old else "INSERT", json.dumps(payload, ensure_ascii=False)))
-            conn.commit()
-        except Exception:
-            conn.rollback();
-            raise
-        finally:
-            conn.close()
-        self._load_numbering_settings()
+        index = self.table_numbering.indexAt(pos)
+        if not index.isValid():
+            return
 
-    def _load_option_settings(self):
-        self.table_options.setRowCount(0)
-        conn = self._wilayah_connection()
-        try:
-            rows = conn.execute(
-                "SELECT option_group, option_code, option_label, aktif, sync_id FROM master_option WHERE aktif=1 ORDER BY option_group, urutan, option_label").fetchall()
-        finally:
-            conn.close()
-        labels = {"BUKU_STATUS_GUDANG": "Status Gudang", "BUKU_STATUS_TAGIHAN": "Status Tagihan",
-                  "BUKU_METODE_PEMBAYARAN": "Metode Pembayaran", "ARMADA_JENIS_TRUK": "Jenis Truk",
-                  "ARMADA_TUJUAN_KAPAL": "Tujuan Kapal"}
-        for group, code, label, _aktif, sid in rows:
-            row = self.table_options.rowCount();
-            self.table_options.insertRow(row)
-            vals = [labels.get(group, group), code, label, "-"]
-            for c, val in enumerate(vals): self.table_options.setItem(row, c, QTableWidgetItem(str(val)))
-            self.table_options.item(row, 1).setData(Qt.ItemDataRole.UserRole, group)
-            self.table_options.item(row, 1).setData(Qt.ItemDataRole.UserRole + 1, sid)
-            btn = QPushButton("-");
-            btn.setFixedWidth(SETTING_ACCOUNT_ACTION_WIDTH)
-            if self._boleh_edit_setting():
-                btn.clicked.connect(lambda _, b=btn: self._delete_option_row(b))
-            else:
-                btn.setEnabled(False)
-            self.table_options.setCellWidget(row, 3, btn)
+        row = index.row()
+        col = index.column()
+        if col not in (3, 5):
+            return
 
-    def _edit_option_row(self, item):
-        row = item.row();
-        group = str(self.table_options.item(row, 1).data(Qt.ItemDataRole.UserRole) or "")
-        idx = self.cmb_option_group.findData(group);
-        self.cmb_option_group.setCurrentIndex(max(0, idx));
-        self.txt_option_code.setText(self.table_options.item(row, 1).text());
-        self.txt_option_label.setText(self.table_options.item(row, 2).text());
-        self.btn_option_add.setText("✓")
+        item = self.table_numbering.item(row, col)
+        if item is None:
+            return
 
-    def _save_option_from_form(self):
-        if not self._boleh_edit_setting(): QMessageBox.warning(self, "Akses Ditolak",
-                                                                     "Hanya SUPER yang dapat mengubah pengaturan operasional."); return
-        group = str(self.cmb_option_group.currentData() or "").strip().upper();
-        code = self.txt_option_code.text().strip().upper();
-        label = self.txt_option_label.text().strip().upper()
-        if not code or not label: QMessageBox.warning(self, "Data Belum Lengkap",
-                                                      "Nilai dan nama tampilan wajib diisi."); return
-        conn = self._wilayah_connection()
-        try:
-            old = conn.execute(
-                "SELECT sync_id FROM master_option WHERE option_group=? AND option_code=? AND kode_cabang='*'",
-                (group, code)).fetchone()
-            sid = old[0] if old and old[0] else str(uuid.uuid4())
-            conn.execute("""
-                INSERT INTO master_option(option_group, option_code, option_label, kode_cabang, urutan, aktif, sync_id, updated_at, deleted_at)
-                VALUES (?, ?, ?, '*', 999, 1, ?, CURRENT_TIMESTAMP, NULL)
-                ON CONFLICT(kode_cabang, option_group, option_code) DO UPDATE SET option_label=excluded.option_label, aktif=1, sync_id=excluded.sync_id, updated_at=CURRENT_TIMESTAMP, deleted_at=NULL
-            """, (group, code, label, sid))
-            row = conn.execute(
-                "SELECT option_group,option_code,option_label,kode_cabang,urutan,aktif,sync_id,created_at,updated_at,deleted_at FROM master_option WHERE option_group=? AND option_code=? AND kode_cabang='*'",
-                (group, code)).fetchone()
-            payload = {"option_group": row[0], "option_code": row[1], "option_label": row[2], "kode_cabang": row[3],
-                       "urutan": row[4], "aktif": row[5], "sync_id": row[6], "created_at": row[7], "updated_at": row[8],
-                       "deleted_at": row[9]}
-            conn.execute(
-                "INSERT INTO sync_outbox(table_name,record_key,operation,payload_json) VALUES ('master_option',?,?,?)",
-                (sid, "UPDATE" if old else "INSERT", json.dumps(payload, ensure_ascii=False)))
-            conn.commit()
-        except Exception:
-            conn.rollback();
-            raise
-        finally:
-            conn.close()
-        self._load_option_settings();
-        self._reset_option_form()
+        menu = QMenu(self.table_numbering)
+        action_edit = menu.addAction("Edit")
+        action = menu.exec(self.table_numbering.viewport().mapToGlobal(pos))
+        if action == action_edit:
+            self._edit_numbering_cell(row, col)
 
-    def _reset_option_form(self):
-        self.txt_option_code.clear();
-        self.txt_option_label.clear();
-        self.btn_option_add.setText("+")
+    def _edit_numbering_cell(self, row: int, col: int):
+        if not self._boleh_edit_setting():
+            return
 
-    def _delete_option_row(self, button):
-        for row in range(self.table_options.rowCount()):
-            if self.table_options.cellWidget(row, 3) is button:
-                group = str(self.table_options.item(row, 1).data(Qt.ItemDataRole.UserRole) or "");
-                code = self.table_options.item(row, 1).text().strip().upper()
-                if QMessageBox.question(self, "Konfirmasi",
-                                        f"Nonaktifkan '{code}'?") != QMessageBox.StandardButton.Yes: return
-                conn = self._wilayah_connection()
-                try:
-                    conn.execute(
-                        "UPDATE master_option SET aktif=0, updated_at=CURRENT_TIMESTAMP, deleted_at=CURRENT_TIMESTAMP WHERE option_group=? AND option_code=? AND kode_cabang='*'",
-                        (group, code))
-                    r = conn.execute(
-                        "SELECT option_group,option_code,option_label,kode_cabang,urutan,aktif,sync_id,created_at,updated_at,deleted_at FROM master_option WHERE option_group=? AND option_code=? AND kode_cabang='*'",
-                        (group, code)).fetchone()
-                    if r:
-                        payload = {"option_group": r[0], "option_code": r[1], "option_label": r[2], "kode_cabang": r[3],
-                                   "urutan": r[4], "aktif": r[5], "sync_id": r[6], "created_at": r[7],
-                                   "updated_at": r[8], "deleted_at": r[9]}
-                        conn.execute(
-                            "INSERT INTO sync_outbox(table_name,record_key,operation,payload_json) VALUES ('master_option',?,?,?)",
-                            (r[6], "DELETE", json.dumps(payload, ensure_ascii=False)))
-                    conn.commit()
-                except Exception:
-                    conn.rollback();
-                    raise
-                finally:
-                    conn.close()
-                self._load_option_settings();
+        branch_item = self.table_numbering.item(row, 0)
+        doc_item = self.table_numbering.item(row, 1)
+        series_item = self.table_numbering.item(row, 2)
+        start_item = self.table_numbering.item(row, 3)
+        current_item = self.table_numbering.item(row, 4)
+        padding_item = self.table_numbering.item(row, 5)
+        if not all((branch_item, doc_item, series_item, start_item, current_item, padding_item)):
+            return
+
+        branch = branch_item.text().strip().upper()
+        doc = doc_item.text().strip().upper()
+        series = series_item.text().strip().upper()
+        old_start = int(start_item.text() or 0)
+        current = int(current_item.text() or 0)
+        old_padding = max(1, int(padding_item.text() or 1))
+
+        if col == 3:
+            value, ok = QInputDialog.getInt(
+                self,
+                "Edit Nomor Awal",
+                f"Nomor awal {branch} / {doc} / {series}:",
+                old_start,
+                0,
+                2_000_000_000,
+                1,
+            )
+            if not ok or value == old_start:
                 return
+
+            next_number = max(value, current + 1)
+            jawaban = QMessageBox.question(
+                self,
+                "Konfirmasi Nomor Awal",
+                f"Nomor Awal akan diubah dari {old_start:,} menjadi {value:,}.\n\n"
+                f"Nomor berikutnya yang dapat dipakai: {next_number:,}.\n"
+                "Nomor yang sudah pernah digunakan tidak akan dipakai kembali.\n\n"
+                "Lanjutkan?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if jawaban != QMessageBox.StandardButton.Yes:
+                return
+
+            new_start = value
+            new_padding = old_padding
+        else:
+            value, ok = QInputDialog.getInt(
+                self,
+                "Edit Padding",
+                f"Padding {branch} / {doc} / {series}:",
+                old_padding,
+                1,
+                12,
+                1,
+            )
+            if not ok or value == old_padding:
+                return
+
+            new_start = old_start
+            new_padding = value
+
+        try:
+            numbering_service.update_counter_settings(
+                branch,
+                doc,
+                series,
+                starting_count=new_start,
+                current_count=None,
+                padding=new_padding,
+                db_name=CURRENT_SESSION.get("db_name"),
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Gagal Mengubah Penomoran",
+                str(exc),
+            )
+            return
+
+        self._load_numbering_settings()
 
     def load_current_settings(self):
         try:
@@ -3017,12 +1754,7 @@ class TabSettingSistem(QWidget):
         raw_logo = str(settings.get("logo_text_html", "KARGO EKSPEDISI"))
         self.txt_logo_aplikasi.setText(re.sub(r"<[^>]*>", "", raw_logo).strip())
 
-        self.load_master_wilayah()
-        self.load_cabang_wilayah()
-        self._reset_form_wilayah()
-        self._reset_form_cabang_wilayah()
         self._load_numbering_settings()
-        self._load_option_settings()
 
         def load_rekening(table, values):
             table.setUpdatesEnabled(False)
@@ -3048,56 +1780,6 @@ class TabSettingSistem(QWidget):
         load_rekening(self.table_np, settings.get("rekening_nonpajak", []))
         load_rekening(self.table_p, settings.get("rekening_pajak", []))
 
-        self.table_cabang.setUpdatesEnabled(False)
-        self.table_cabang.blockSignals(True)
-        try:
-            self.table_cabang.clearContents()
-            rows = db_service.ambil_semua_data_cabang(limit=100) or []
-            self.table_cabang.setRowCount(max(10, len(rows)))
-
-            for row_index, row_data in enumerate(rows):
-                if isinstance(row_data, dict):
-                    kode = row_data.get("kode_cabang", "")
-                    nama = row_data.get("nama_cabang", "")
-                    prefix = row_data.get("resi_prefix", "")
-                    start_seq = row_data.get("start_seq_json", '{"DEFAULT": 0}')
-                    aturan_prefix = row_data.get(
-                        "aturan_prefix", '{"DEFAULT": "INV"}'
-                    )
-                else:
-                    values = list(row_data)
-                    kode = values[0] if len(values) > 0 else ""
-                    nama = values[1] if len(values) > 1 else ""
-                    prefix = values[2] if len(values) > 2 else ""
-                    start_seq = values[3] if len(values) > 3 and values[3] else '{"DEFAULT": 0}'
-                    aturan_prefix = values[4] if len(values) > 4 and values[4] else '{"DEFAULT": "INV"}'
-
-                item_kode = QTableWidgetItem(str(kode or "").strip().upper())
-                item_kode.setData(
-                    Qt.ItemDataRole.UserRole,
-                    {
-                        "start_seq_json": str(start_seq or '{"DEFAULT": 0}').strip(),
-                        "aturan_prefix": str(aturan_prefix or '{"DEFAULT": "INV"}').strip(),
-                    },
-                )
-                self.table_cabang.setItem(row_index, 0, item_kode)
-                self.table_cabang.setItem(
-                    row_index,
-                    1,
-                    QTableWidgetItem(str(nama or "").strip().upper()),
-                )
-                self.table_cabang.setItem(
-                    row_index,
-                    2,
-                    QTableWidgetItem(str(prefix or "").strip().upper()),
-                )
-        except Exception as exc:
-            self.table_cabang.setRowCount(10)
-            print(f"[TabSetting] Gagal memuat data cabang: {exc}")
-        finally:
-            self.table_cabang.blockSignals(False)
-            self.table_cabang.setUpdatesEnabled(True)
-
         self.load_user_branch_access()
         self.validasi_hak_akses_setting()
 
@@ -3122,64 +1804,6 @@ class TabSettingSistem(QWidget):
                 )
             result.append(f"{bank}, {norek}, {nama}")
         return result
-
-    def _ambil_cabang_tabel(self):
-        """Ambil tiga kolom yang terlihat dan pertahankan metadata DB lama."""
-        branches = []
-        kode_terpakai = set()
-        default_start_seq = '{"DEFAULT": 0}'
-        default_aturan = '{"DEFAULT": "INV"}'
-
-        for row in range(self.table_cabang.rowCount()):
-            item_kode = self.table_cabang.item(row, 0)
-            kode = str(item_kode.text() if item_kode else "").strip().upper()
-            if not kode:
-                continue
-
-            nama_item = self.table_cabang.item(row, 1)
-            prefix_item = self.table_cabang.item(row, 2)
-            nama = str(nama_item.text() if nama_item else "").strip().upper()
-            prefix = str(prefix_item.text() if prefix_item else "").strip().upper()
-
-            if not nama or not prefix:
-                raise ValueError(
-                    f"Nama dan prefix cabang baris {row + 1} wajib diisi."
-                )
-            if kode in kode_terpakai:
-                raise ValueError(f"Kode cabang '{kode}' digunakan dua kali.")
-
-            metadata = item_kode.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(metadata, dict):
-                metadata = {}
-
-            seq_text = str(metadata.get("start_seq_json") or default_start_seq).strip()
-            route_text = str(metadata.get("aturan_prefix") or default_aturan).strip()
-            try:
-                seq_data = json.loads(seq_text)
-                route_data = json.loads(route_text)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Metadata cabang '{kode}' tidak valid sebagai JSON."
-                ) from exc
-
-            if not isinstance(seq_data, dict) or not isinstance(route_data, dict):
-                raise ValueError(
-                    f"Metadata cabang '{kode}' harus berupa object JSON."
-                )
-
-            branches.append({
-                "kode_cabang": kode,
-                "nama_cabang": nama,
-                "resi_prefix": prefix,
-                "start_seq_json": json.dumps(seq_data, ensure_ascii=False),
-                "aturan_prefix": json.dumps(route_data, ensure_ascii=False),
-            })
-            kode_terpakai.add(kode)
-
-        if not branches:
-            raise ValueError("Minimal harus tersedia satu kantor cabang.")
-
-        return branches
 
     def simpan_pengaturan(self):
         if not self._boleh_edit_setting():
@@ -3210,17 +1834,12 @@ class TabSettingSistem(QWidget):
             return
 
         try:
-            wilayah_rows = self._ambil_wilayah_tabel()
-            if not wilayah_rows:
-                raise ValueError("Minimal harus tersedia satu wilayah.")
-
             rekening_np = self._ambil_rekening_tabel(
                 self.table_np, "Rekening non-pajak"
             )
             rekening_p = self._ambil_rekening_tabel(
                 self.table_p, "Rekening pajak"
             )
-            branches = self._ambil_cabang_tabel()
         except ValueError as exc:
             QMessageBox.warning(self, "Data Tidak Valid", str(exc))
             return
@@ -3235,17 +1854,15 @@ class TabSettingSistem(QWidget):
                 "format_resi_manual",
                 "1" if self.cmb_format_resi_manual.currentData() else "0"
             ),
-            ("provinsi_tujuan",
-             json.dumps([row["nama_wilayah"] for row in wilayah_rows if int(row["aktif"])], ensure_ascii=False)),
             ("rekening_nonpajak", json.dumps(rekening_np, ensure_ascii=False)),
             ("rekening_pajak", json.dumps(rekening_p, ensure_ascii=False)),
         ]
 
         try:
-            self._simpan_master_wilayah_local(wilayah_rows)
-
+            # Simpan hanya pengaturan sistem. Data cabang dikelola oleh
+            # bootstrap/seed dan bukan melalui halaman Settings.
             sukses, pesan = db_service.simpan_semua_pengaturan_dan_cabang(
-                settings_to_save, branches
+                settings_to_save, []
             )
             if not sukses:
                 QMessageBox.critical(
@@ -3254,22 +1871,7 @@ class TabSettingSistem(QWidget):
                 )
                 return
 
-            self._simpan_cabang_wilayah_local(
-                self._ambil_cabang_wilayah_tabel()
-            )
             refresh_data_client()
-
-            kode_aktif = str(
-                CURRENT_SESSION.get("kode_cabang", "")
-            ).strip().upper()
-            for branch in branches:
-                if branch["kode_cabang"] == kode_aktif:
-                    CURRENT_SESSION.update({
-                        "nama_cabang": branch["nama_cabang"],
-                        "resi_prefix": branch["resi_prefix"],
-                        "aturan_prefix": json.loads(branch["aturan_prefix"]),
-                    })
-                    break
 
             self.load_current_settings()
             QMessageBox.information(

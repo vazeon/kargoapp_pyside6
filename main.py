@@ -2,8 +2,9 @@
 import os
 import sys
 import faulthandler
+import threading
 import traceback
-from PySide6.QtCore import QLocale, QSettings, Qt
+from PySide6.QtCore import QLocale, QSettings, QTimer, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -38,7 +39,10 @@ from utils.ui_scaler import ResponsiveUIScaler
 from config import (
     DATA_CLIENT,
     CURRENT_SESSION,
+    BRANCH_ACCESS_FULL,
+    BRANCH_ACCESS_VIEW,
     aktifkan_cabang_session,
+    mode_akses_cabang,
     muat_pengaturan_sistem,
     refresh_akses_cabang_session,
 )
@@ -100,6 +104,26 @@ class _LazyTabPage(QWidget):
         return widget.load_invoice_by_no(*args, **kwargs)
 
 
+def _logout_error_is_network(exc: BaseException) -> bool:
+    """True bila sign-out gagal hanya karena Supabase sedang tidak terjangkau."""
+    seen = set()
+    current = exc
+    markers = (
+        "connecterror", "getaddrinfo failed", "name or service not known",
+        "network is unreachable", "connection reset", "connection refused",
+        "connection aborted", "winerror 10054", "winerror 10060",
+        "errno 11001", "errno 10054", "errno 10060", "timed out",
+    )
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).lower()
+        name = type(current).__name__.lower()
+        if any(marker in text or marker in name for marker in markers):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class MainWindow(QMainWindow):
     SETTINGS_ORGANIZATION = ORGANIZATION_NAME
     SETTINGS_APPLICATION = APPLICATION_NAME
@@ -117,8 +141,12 @@ class MainWindow(QMainWindow):
         self._cache_tema_tab = {}
         self._tema_tab_sedang_diterapkan = set()
         self.dialog_setting = None
-        self._setting_access_overlay = None
         self._sedang_sinkron_cabang = False
+        self._logout_sedang_berjalan = False
+        self._logout_login_window = None
+        self._logout_signout_thread = None
+        self._logout_signout_error = None
+        self._logout_poll_timer = None
 
         app = QApplication.instance()
         self._siapkan_tema_aplikasi(app)
@@ -213,9 +241,10 @@ class MainWindow(QMainWindow):
 
         self.lbl_info_cabang = QLabel("")
         self.lbl_info_cabang.setObjectName("LabelCabang")
+        self.lbl_info_cabang.hide()
 
         self.cmb_cabang_aktif = QComboBox(self)
-        self.cmb_cabang_aktif.setMinimumWidth(180)
+        self.cmb_cabang_aktif.setMinimumWidth(100)
         self.cmb_cabang_aktif.setFixedHeight(TOP_RIGHT_CONTROL_HEIGHT)
         self.cmb_cabang_aktif.setToolTip("Ganti cabang operasional tanpa logout")
         self.cmb_cabang_aktif.currentIndexChanged.connect(self._ganti_cabang_aktif)
@@ -419,6 +448,7 @@ class MainWindow(QMainWindow):
             self._konfigurasi_scrolling_widget(tab_aktif)
 
         self._terapkan_tema_lokal(tab_aktif)
+        self._terapkan_mode_akses_widget(tab_aktif)
 
     def refresh_semua_data(self):
         for widget in self._iter_tab_utama():
@@ -472,6 +502,79 @@ class MainWindow(QMainWindow):
         elif widget.__class__.__name__ == "TabManifest":
             self._panggil_opsional(widget, "setup_autocomplete_truk")
 
+    @staticmethod
+    def _normalisasi_label_akses(mode: str) -> str:
+        return "FULL" if str(mode or "").strip().upper() == BRANCH_ACCESS_FULL else "VIEW ONLY"
+
+    @staticmethod
+    def _button_write_related(widget) -> bool:
+        # Aksi sesi seperti LOGOUT harus selalu aktif, termasuk pada mode VIEW ONLY.
+        if bool(widget.property("access_safe_action")):
+            return False
+        text = " ".join(str(widget.text() or "").upper().split())
+        if not text:
+            return False
+        read_markers = (
+            "CARI", "SEARCH", "REFRESH", "MUAT", "DETAIL", "LIHAT",
+            "CETAK", "PRINT", "PREVIEW", "EXPORT", "PDF", "CSV",
+            "PILIH", "BUKA", "TUTUP", "KEMBALI", "CLEAR", "BERSIHKAN",
+        )
+        if any(marker in text for marker in read_markers) and not any(
+            marker in text for marker in ("SIMPAN", "UPDATE", "UBAH", "EDIT", "HAPUS", "DELETE", "TAMBAH", "BUAT", "POSTING")
+        ):
+            return False
+        write_markers = (
+            "SIMPAN", "SAVE", "TAMBAH", "ADD", "EDIT", "UBAH", "UPDATE",
+            "HAPUS", "DELETE", "BUAT", "CREATE", "POSTING", "PROSES",
+            "SELESAI", "NONAKTIF", "AKTIFKAN", "RESET", "SUBMIT",
+            "KIRIM", "TERIMA", "TAGIH", "LUNAS", "MANIFEST BARU",
+        )
+        return any(marker in text for marker in write_markers)
+
+    def _terapkan_mode_akses_widget(self, widget):
+        """Terapkan mode FULL/VIEW ONLY tanpa mematikan kontrol baca/filter."""
+        if widget is None:
+            return
+
+        mode = str(
+            CURRENT_SESSION.get("active_access_mode") or mode_akses_cabang()
+        ).strip().upper()
+        view_only = mode == BRANCH_ACCESS_VIEW
+
+        # Modul yang memahami struktur editornya sendiri mendapat prioritas.
+        targets = (widget, *widget.findChildren(QWidget))
+        for target in targets:
+            handler = getattr(target, "set_branch_access_mode", None)
+            if not callable(handler):
+                continue
+            try:
+                handler(mode)
+            except Exception as exc:
+                print(
+                    f"[BranchAccess] Gagal menerapkan mode pada "
+                    f"{target.__class__.__name__}: {type(exc).__name__}: {exc}"
+                )
+
+        for child in widget.findChildren(QWidget):
+            try:
+                if isinstance(child, QTableWidget):
+                    if not hasattr(child, "_branch_access_original_edit_triggers"):
+                        child._branch_access_original_edit_triggers = child.editTriggers()
+                    if view_only:
+                        child.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+                    else:
+                        child.setEditTriggers(child._branch_access_original_edit_triggers)
+                    continue
+
+                if isinstance(child, QPushButton) and self._button_write_related(child):
+                    if not hasattr(child, "_branch_access_original_enabled"):
+                        child._branch_access_original_enabled = child.isEnabled()
+                    child.setEnabled(
+                        False if view_only else bool(child._branch_access_original_enabled)
+                    )
+            except (RuntimeError, AttributeError):
+                continue
+
     def _sinkronkan_pemilih_cabang(self):
         branches = CURRENT_SESSION.get("allowed_branches") or []
         current = str(CURRENT_SESSION.get("kode_cabang") or "PUSAT").strip().upper()
@@ -484,8 +587,20 @@ class MainWindow(QMainWindow):
                 kode = str(item.get("kode_cabang") or "").strip().upper()
                 if not kode:
                     continue
-                nama = str(item.get("nama_cabang") or kode).strip()
-                self.cmb_cabang_aktif.addItem(f"{nama} ({kode})", kode)
+                # Label combobox dibuat sederhana: hanya nama kota/cabang.
+                # Kode cabang dan status akses tetap disimpan pada data item
+                # sehingga logika session tidak berubah.
+                nama_cabang = {
+                    "SBY": "SURABAYA",
+                    "JKT": "JAKARTA",
+                }.get(kode)
+                if not nama_cabang:
+                    nama_cabang = str(item.get("nama_cabang") or kode).strip()
+                    for suffix in (" (PUSAT)", " (CABANG)", " PUSAT", " CABANG"):
+                        if nama_cabang.upper().endswith(suffix):
+                            nama_cabang = nama_cabang[:-len(suffix)].strip()
+                            break
+                self.cmb_cabang_aktif.addItem(nama_cabang, kode)
 
             index = self.cmb_cabang_aktif.findData(current)
             if index < 0 and self.cmb_cabang_aktif.count() > 0:
@@ -503,14 +618,10 @@ class MainWindow(QMainWindow):
         kode = str(self.cmb_cabang_aktif.currentData() or "").strip().upper()
         current = str(CURRENT_SESSION.get("kode_cabang") or "").strip().upper()
         if not kode or kode == current:
+            self.update_session_ui()
             return
 
         if not aktifkan_cabang_session(kode):
-            QMessageBox.warning(
-                self,
-                "Akses Cabang Ditolak",
-                "Akun ini tidak memiliki akses ke cabang yang dipilih.",
-            )
             self._sinkronkan_pemilih_cabang()
             return
 
@@ -528,13 +639,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"{nama_perusahaan} - {nama_cabang} - PANEL ADMIN v1.0"
         )
-        self.lbl_info_cabang.setText("")
+        # Status akses tidak ditampilkan di header. Mode FULL/VIEW ONLY
+        # tetap dipakai secara internal untuk mengunci/membuka operasi tulis.
+        self.lbl_info_cabang.clear()
+        self.lbl_info_cabang.setToolTip("")
 
         role_aktif = str(CURRENT_SESSION.get('role', '')).strip().upper()
         self.btn_setting.setToolTip(
             "Pengaturan Sistem (Super Admin / Owner)"
             if role_aktif in {"SUPER_ADMIN", "OWNER"}
-            else "Pengaturan Sistem (akses terbatas)"
+            else "Pengaturan Sistem (View-Only)"
         )
 
         self._cache_tema_tab.clear()
@@ -567,6 +681,9 @@ class MainWindow(QMainWindow):
 
         if tab_aktif is not None:
             self._terapkan_tema_lokal(tab_aktif, force=True)
+            self._terapkan_mode_akses_widget(tab_aktif)
+        for widget in self._iter_tab_utama():
+            self._terapkan_mode_akses_widget(widget)
 
     def toggle_theme(self):
         if self._sedang_ganti_tema:
@@ -649,16 +766,13 @@ class MainWindow(QMainWindow):
             scale,
         )
 
-        role_aktif = str(CURRENT_SESSION.get("role", "")).strip().upper()
-        self._setting_access_overlay = None
-        if role_aktif not in {"SUPER_ADMIN", "OWNER"}:
-            self._pasang_overlay_akses_setting(widget_setting, role_aktif)
-
+        # TabSettingSistem menangani mode read-only berdasarkan role melalui
+        # validasi hak akses internal. Tidak ada overlay/warning yang menutupi
+        # halaman Settings untuk user non-SUPER.
         try:
             self.dialog_setting.exec()
         finally:
             dialog = self.dialog_setting
-            self._setting_access_overlay = None
             self.dialog_setting = None
             if dialog is not None:
                 dialog.deleteLater()
@@ -676,46 +790,234 @@ class MainWindow(QMainWindow):
             self.dialog_setting = None
         return False
 
-    def _pasang_overlay_akses_setting(self, widget_setting, role_aktif):
-        widget_setting.setEnabled(False)
-        overlay = QWidget(self.dialog_setting)
-        overlay.setObjectName("SettingAccessOverlay")
-        overlay.setStyleSheet(
-            "QWidget#SettingAccessOverlay {"
-            "background-color: rgba(25, 25, 30, 0.9);"
-            "border-radius: 6px;}"
-        )
-        overlay.resize(self.dialog_setting.width(), self.dialog_setting.height())
+    def logout_session(self):
+        """Logout eksplisit dengan urutan cleanup yang aman dan non-blocking."""
+        if getattr(self, "_logout_sedang_berjalan", False):
+            return
 
-        label = QLabel(
-            "🔒 AKSES TERBATAS\n\n"
-            "Hanya akun SUPER ADMIN / OWNER yang memiliki otoritas\n"
-            "untuk mengubah struktur data perusahaan.\n\n"
-            f"(Role Anda Saat Ini: {role_aktif if role_aktif else 'TIDAK DIKETAHUI'})",
-            overlay,
+        # QMessageBox default mewarisi stylesheet global aplikasi.
+        # Pada kombinasi theme/palette tertentu, teks tombol Yes/No bisa
+        # menjadi putih di atas background terang sehingga terlihat disabled.
+        # Gunakan style lokal hanya untuk dialog konfirmasi ini agar selalu terbaca.
+        box = QMessageBox(self)
+        box.setWindowTitle("Konfirmasi Logout")
+        box.setText("Keluar dari akun saat ini?")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet(
-            "color: #ff4d4d; font-size: 12pt; font-weight: bold; line-height: 150%;"
-        )
-        QVBoxLayout(overlay).addWidget(label)
-        overlay.raise_()
-        self._setting_access_overlay = overlay
+        box.setDefaultButton(QMessageBox.StandardButton.No)
 
-        if hasattr(widget_setting, "btn_simpan_all"):
-            widget_setting.btn_simpan_all.setEnabled(False)
-            widget_setting.btn_simpan_all.setText("❌ AKSES DITOLAK")
+        if self.current_theme == self.THEME_DARK:
+            box.setStyleSheet("""
+                QMessageBox {
+                    background: #2b2b2b;
+                }
+                QMessageBox QLabel {
+                    color: #f1f1f1;
+                }
+                QMessageBox QPushButton {
+                    min-width: 72px;
+                    min-height: 28px;
+                    padding: 4px 14px;
+                    color: #f1f1f1;
+                    background: #3a3a3a;
+                    border: 1px solid #666666;
+                    border-radius: 4px;
+                }
+                QMessageBox QPushButton:hover {
+                    background: #4a4a4a;
+                }
+            """)
+        else:
+            box.setStyleSheet("""
+                QMessageBox {
+                    background: #ffffff;
+                }
+                QMessageBox QLabel {
+                    color: #1f2937;
+                }
+                QMessageBox QPushButton {
+                    min-width: 72px;
+                    min-height: 28px;
+                    padding: 4px 14px;
+                    color: #1f2937;
+                    background: #ffffff;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 4px;
+                }
+                QMessageBox QPushButton:hover {
+                    background: #f1f5f9;
+                }
+            """)
+
+        konfirmasi = box.exec()
+        if konfirmasi != QMessageBox.StandardButton.Yes:
+            return
+
+        self._logout_sedang_berjalan = True
+        self._logout_signout_thread = None
+        self._logout_signout_error = None
+        self._logout_login_window = None
+
+        try:
+            from session_store import clear_last_login
+
+            # Credential auto-login dihapus segera setelah user menekan Logout.
+            clear_last_login()
+
+            # Hentikan scheduling sync, tetapi JANGAN reset session atau sign-out
+            # sebelum worker yang sedang aktif benar-benar selesai. Ini mencegah
+            # worker lama memakai DB/session milik akun baru.
+            auto_sync = getattr(self, "_auto_sync", None)
+            if auto_sync is not None:
+                auto_sync.stop(wait=False)
+
+            dialog = getattr(self, "dialog_setting", None)
+            if dialog is not None:
+                try:
+                    dialog.close()
+                except RuntimeError:
+                    pass
+                self.dialog_setting = None
+
+            self.hide()
+
+            app = QApplication.instance()
+            if app is None:
+                self._logout_sedang_berjalan = False
+                return
+
+            show_login = getattr(app, "_show_login_window", None)
+            if not callable(show_login):
+                self._logout_sedang_berjalan = False
+                return
+
+            login_window = show_login(show=True)
+            self._logout_login_window = login_window
+            set_external_busy = getattr(login_window, "set_external_busy", None)
+            if callable(set_external_busy):
+                set_external_busy(True)
+
+            self._logout_poll_timer = QTimer(self)
+            self._logout_poll_timer.setInterval(50)
+            self._logout_poll_timer.timeout.connect(self._proses_logout_async)
+            self._logout_poll_timer.start()
+            self._proses_logout_async()
+        except Exception as exc:
+            self._logout_sedang_berjalan = False
+            print(
+                f"[LOGOUT] Gagal memulai logout bersih: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    def _proses_logout_async(self):
+        """Jalankan cleanup logout tahap demi tahap lewat event loop GUI."""
+        if not getattr(self, "_logout_sedang_berjalan", False):
+            return
+
+        auto_sync = getattr(self, "_auto_sync", None)
+        if auto_sync is not None and auto_sync.is_running():
+            return
+
+        # Hanya setelah worker sync benar-benar selesai kita boleh memutus Auth.
+        thread = getattr(self, "_logout_signout_thread", None)
+        if thread is None:
+            thread = threading.Thread(
+                target=self._logout_signout_worker,
+                name="KargoLogoutWorker",
+                daemon=True,
+            )
+            self._logout_signout_thread = thread
+            thread.start()
+            return
+
+        if thread.is_alive():
+            return
+
+        timer = getattr(self, "_logout_poll_timer", None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._logout_poll_timer = None
+
+        error = getattr(self, "_logout_signout_error", None)
+        if error is not None and not _logout_error_is_network(error):
+            print(
+                f"[LOGOUT] Supabase sign-out tidak sempurna: "
+                f"{type(error).__name__}: {error}",
+                flush=True,
+            )
+
+        # Offline: sign-out server boleh gagal karena jaringan. Logout lokal
+        # tetap dianggap sukses setelah credential/session lokal dibersihkan.
+
+        # Auth sudah diputus. Baru sekarang state aplikasi dikosongkan.
+        try:
+            from config import reset_current_session
+            reset_current_session()
+        except Exception as exc:
+            print(
+                f"[LOGOUT] Gagal reset CURRENT_SESSION: {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+        app = QApplication.instance()
+        window_holder = getattr(app, "_window_holder", None) if app is not None else None
+        if isinstance(window_holder, dict):
+            window_holder["main"] = None
+
+        login_window = getattr(self, "_logout_login_window", None)
+        if login_window is not None:
+            try:
+                set_external_busy = getattr(login_window, "set_external_busy", None)
+                if callable(set_external_busy):
+                    set_external_busy(False)
+                login_window.txt_pwd.clear()
+                login_window.txt_user.clear()
+                login_window.txt_user.setFocus()
+                login_window.raise_()
+                login_window.activateWindow()
+            except RuntimeError:
+                pass
+
+        scaler = getattr(self, "_ui_scaler", None)
+        if scaler is not None:
+            try:
+                scaler.shutdown()
+            except Exception:
+                pass
+
+        self._logout_login_window = None
+        self._logout_signout_thread = None
+        self._logout_signout_error = None
+        self._logout_sedang_berjalan = False
+        self.deleteLater()
+
+    def _logout_signout_worker(self):
+        """Lakukan sign-out Supabase di thread background."""
+        try:
+            from supabase_client import supabase
+            supabase.auth.sign_out()
+        except Exception as exc:
+            self._logout_signout_error = exc
 
     def closeEvent(self, event):
         try:
             self._lepas_resource_native()
+            scaler = getattr(self, "_ui_scaler", None)
+            if scaler is not None:
+                try:
+                    scaler.shutdown()
+                except Exception:
+                    pass
         finally:
             super().closeEvent(event)
 
     def _lepas_resource_native(self):
         auto_sync = getattr(self, "_auto_sync", None)
         if auto_sync is not None:
-            auto_sync.stop()
+            auto_sync.stop(wait=False)
         for viewport in getattr(self, "_viewport_scroller", []):
             try:
                 QScroller.ungrabGesture(viewport)
@@ -855,13 +1157,29 @@ def jalankan_aplikasi():
         main_window.raise_()
         main_window.activateWindow()
 
-    login_window = LoginWindow(
-        buka_dashboard_kargo
-    )
+    def buat_login_window(show=True):
+        """Buat login window baru untuk startup maupun setelah logout eksplisit."""
+        login = LoginWindow(buka_dashboard_kargo)
+        app._login_window = login
+        if show:
+            login.show()
+        return login
 
-    app._login_window = login_window
     app._window_holder = window_holder
-    login_window.show()
+    app._show_login_window = buat_login_window
+
+    login_window = buat_login_window(show=False)
+
+    # Auto-login dijalankan asynchronous agar startup tidak freeze ketika
+    # Supabase/database lambat. Form login hanya ditampilkan bila restore gagal.
+    def _selesai_restore(restored):
+        if not restored:
+            login_window.show()
+
+    login_window.restore_finished.connect(_selesai_restore)
+    restore_started = login_window.try_restore_last_session()
+    if not restore_started:
+        login_window.show()
 
     print("[NATIVE] Memulai event loop", flush=True)
     exit_code = app.exec()

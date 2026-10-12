@@ -106,15 +106,24 @@ class _FormInputStyles(QObject):
             app.installEventFilter(self)
 
     def _owns(self, widget):
+        """Return True only for QWidget instances owned by this manager."""
+        if not isinstance(widget, QWidget):
+            return False
+
         parent = widget
-        while parent is not None:
+        while isinstance(parent, QWidget):
             owner = getattr(parent, "_global_form_input_styles", None)
             if owner is not None:
                 return owner is self
             parent = parent.parentWidget()
+
         return False
 
     def _apply(self, widget):
+        """Apply global input styling only to actual QWidget instances."""
+        if not isinstance(widget, QWidget):
+            return
+
         if not self._owns(widget) or not is_input_form(widget):
             return
         if not widget.property("globalFormInput"):

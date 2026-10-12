@@ -6,9 +6,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from audit_context import install_sqlite_audit_functions
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_NAME = "database_cargo.db"
-DB_SCHEMA_VERSION = 7
+DB_SCHEMA_VERSION = 17
 
 _SCHEMA_STATEMENTS = (
     """
@@ -690,6 +692,12 @@ def _migration_v5(cursor) -> None:
         "'created_at', NEW.created_at",
         "'updated_at', NEW.updated_at",
         "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', NEW.created_by_user_id",
+        "'created_by_username', NEW.created_by_username",
+        "'created_by_name', NEW.created_by_name",
+        "'updated_by_user_id', NEW.updated_by_user_id",
+        "'updated_by_username', NEW.updated_by_username",
+        "'updated_by_name', NEW.updated_by_name",
     ]) + ")"
     payload_old = payload_new.replace("NEW.", "OLD.")
 
@@ -752,6 +760,12 @@ def _migration_v5(cursor) -> None:
         "'created_at', NEW.created_at",
         "'updated_at', NEW.updated_at",
         "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', NEW.created_by_user_id",
+        "'created_by_username', NEW.created_by_username",
+        "'created_by_name', NEW.created_by_name",
+        "'updated_by_user_id', NEW.updated_by_user_id",
+        "'updated_by_username', NEW.updated_by_username",
+        "'updated_by_name', NEW.updated_by_name",
     ]) + ")"
     detail_payload_old = detail_payload_new.replace("NEW.", "OLD.")
 
@@ -1149,6 +1163,12 @@ def _migration_v7(cursor) -> None:
         "'created_at', NEW.created_at",
         "'updated_at', NEW.updated_at",
         "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', NEW.created_by_user_id",
+        "'created_by_username', NEW.created_by_username",
+        "'created_by_name', NEW.created_by_name",
+        "'updated_by_user_id', NEW.updated_by_user_id",
+        "'updated_by_username', NEW.updated_by_username",
+        "'updated_by_name', NEW.updated_by_name",
     ]) + ")"
     num_payload_old = num_payload_new.replace('NEW.', 'OLD.')
     for name in (
@@ -1196,6 +1216,12 @@ def _migration_v7(cursor) -> None:
         "'created_at', NEW.created_at",
         "'updated_at', NEW.updated_at",
         "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', NEW.created_by_user_id",
+        "'created_by_username', NEW.created_by_username",
+        "'created_by_name', NEW.created_by_name",
+        "'updated_by_user_id', NEW.updated_by_user_id",
+        "'updated_by_username', NEW.updated_by_username",
+        "'updated_by_name', NEW.updated_by_name",
     ]) + ")"
     opt_payload_old = opt_payload_new.replace('NEW.', 'OLD.')
     for name in (
@@ -1234,15 +1260,1294 @@ def _migration_v7(cursor) -> None:
 
 
 
-_SCHEMA_MIGRATIONS = {
-    1: _migration_v1,
-    2: _migration_v2,
-    3: _migration_v3,
-    4: _migration_v4,
-    5: _migration_v5,
-    6: _migration_v6,
-    7: _migration_v7,
-}
+def _migration_v8(cursor) -> None:
+    """Penomoran fixed: counter terpisah per seri."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS numbering_counters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kode_cabang TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            series_code TEXT NOT NULL,
+            starting_count INTEGER NOT NULL DEFAULT 1,
+            current_count INTEGER NOT NULL DEFAULT 0,
+            padding INTEGER NOT NULL DEFAULT 5,
+            aktif INTEGER NOT NULL DEFAULT 1,
+            sync_id TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP,
+            UNIQUE (kode_cabang, document_type, series_code),
+            FOREIGN KEY (kode_cabang) REFERENCES data_cabang(kode_cabang)
+                ON UPDATE CASCADE ON DELETE CASCADE
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_numbering_counters_lookup
+        ON numbering_counters(kode_cabang, document_type, series_code, aktif)
+    """)
+
+    def _json(value):
+        try:
+            return json.loads(value or '{}') if value else {}
+        except Exception:
+            return {}
+
+    def _branch(code):
+        row = cursor.execute(
+            'SELECT start_seq_json, aturan_prefix FROM data_cabang WHERE kode_cabang=?',
+            (code,),
+        ).fetchone()
+        if not row:
+            return {}, {}
+        starts = {str(k).strip().upper(): int(v or 0) for k,v in _json(row[0]).items() if str(k).strip()}
+        rules = {str(k).strip().upper(): str(v or '').strip().upper() for k,v in _json(row[1]).items() if str(k).strip()}
+        return starts, rules
+
+    def _max_resi(code, prefix):
+        rows = cursor.execute(
+            'SELECT no_resi FROM data_resi WHERE kode_cabang=? AND no_resi LIKE ?',
+            (code, f'{prefix}%'),
+        ).fetchall()
+        best = 0
+        for (raw,) in rows:
+            text = str(raw or '').strip().upper()
+            if text.startswith(prefix.upper()):
+                nums = re.findall(r'\d+', text[len(prefix):])
+                if nums:
+                    best = max(best, int(nums[-1]))
+        return best
+
+    def _max_manifest(code, prefix):
+        rows = cursor.execute(
+            'SELECT no_manifest FROM data_resi WHERE kode_cabang=? AND no_manifest IS NOT NULL',
+            (code,),
+        ).fetchall()
+        best = 0
+        for (raw,) in rows:
+            text = str(raw or '').strip().upper()
+            if text.startswith(prefix.upper() + '-'):
+                m = re.search(r'-(\d+)$', text)
+                if m:
+                    best = max(best, int(m.group(1)))
+        return best
+
+    def _max_invoice():
+        rows = cursor.execute('SELECT no_invoice FROM invoice_header').fetchall()
+        best = 0
+        for (raw,) in rows:
+            text = str(raw or '').strip().upper()
+            m = re.match(r'^(\d+)/INV/MKT-SUB/\d{2}$', text)
+            if m:
+                best = max(best, int(m.group(1)))
+        return best
+
+    branches = [str(r[0] or '').strip().upper() for r in cursor.execute(
+        "SELECT kode_cabang FROM data_cabang WHERE TRIM(COALESCE(kode_cabang,'')) <> ''"
+    ).fetchall()]
+
+    def _insert(code, doc, series, start, current, padding):
+        cursor.execute("""
+            INSERT OR IGNORE INTO numbering_counters(
+                kode_cabang, document_type, series_code,
+                starting_count, current_count, padding, aktif, sync_id
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        """, (code, doc, series, int(start), int(current), int(padding), str(uuid.uuid4())))
+
+    for code in branches:
+        starts, rules = _branch(code)
+        series_list = []
+        for key in ('KALIMANTAN TIMUR','KALIMANTAN SELATAN','DEFAULT'):
+            val = rules.get(key, '')
+            if val and val not in series_list:
+                series_list.append(val)
+        if not series_list:
+            series_list = ['IND']
+        for series in series_list:
+            start = starts.get(series, starts.get('DEFAULT', 1000))
+            _insert(code, 'RESI', series, start, _max_resi(code, series), 5)
+
+        jmark = 'J-' if rules.get('KALIMANTAN TIMUR','').startswith('J-') else ''
+        for base in ('MT','MS','MI'):
+            _insert(code, 'MANIFEST', f'{jmark}{base}', 1, _max_manifest(code, f'{jmark}{base}'), 4)
+
+        if code == 'SBY':
+            _insert(code, 'INVOICE', 'INV', 1, _max_invoice(), 4)
+
+
+    # Local outbox triggers for fixed-series counters.
+    # suppress_outbox prevents pull/bootstrap loops.
+    counter_payload_new = "json_object(" + ", ".join([
+        "'kode_cabang', NEW.kode_cabang",
+        "'document_type', NEW.document_type",
+        "'series_code', NEW.series_code",
+        "'starting_count', NEW.starting_count",
+        "'current_count', NEW.current_count",
+        "'padding', NEW.padding",
+        "'aktif', NEW.aktif",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', NEW.created_by_user_id",
+        "'created_by_username', NEW.created_by_username",
+        "'created_by_name', NEW.created_by_name",
+        "'updated_by_user_id', NEW.updated_by_user_id",
+        "'updated_by_username', NEW.updated_by_username",
+        "'updated_by_name', NEW.updated_by_name",
+    ]) + ")"
+    counter_payload_old = counter_payload_new.replace('NEW.', 'OLD.')
+    for name in (
+        'trg_local_numbering_counter_insert',
+        'trg_local_numbering_counter_update',
+        'trg_local_numbering_counter_delete',
+    ):
+        cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_numbering_counter_insert
+        AFTER INSERT ON numbering_counters
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('numbering_counters',NEW.sync_id,'INSERT',{counter_payload_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_numbering_counter_update
+        AFTER UPDATE ON numbering_counters
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('numbering_counters',NEW.sync_id,'UPDATE',{counter_payload_new});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_numbering_counter_delete
+        AFTER DELETE ON numbering_counters
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+        BEGIN
+          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+          VALUES('numbering_counters',OLD.sync_id,'DELETE',{counter_payload_old});
+        END
+    """)
+
+
+def _migration_v9(cursor) -> None:
+    """Kunci wilayah Mahkota menjadi 3 wilayah tetap.
+
+    master_wilayah tetap merupakan tabel lokal SQLite karena dipakai sebagai
+    referensi UI/validasi dan parent untuk cabang_wilayah. Tabel ini tidak lagi
+    disinkronkan ke Supabase dan tidak boleh berkembang dari Settings.
+    """
+    fixed_regions = (
+        ("KALTIM", "KALIMANTAN TIMUR", 10),
+        ("KALSEL", "KALIMANTAN SELATAN", 20),
+        ("LAINNYA", "PROVINSI LAINNYA", 30),
+    )
+    allowed = tuple(row[0] for row in fixed_regions)
+    placeholders = ", ".join("?" for _ in allowed)
+
+    # Hapus relasi wilayah lama terlebih dahulu karena cabang_wilayah
+    # mempunyai foreign key ke master_wilayah pada SQLite lokal.
+    cursor.execute(
+        f"DELETE FROM cabang_wilayah WHERE kode_wilayah NOT IN ({placeholders})",
+        allowed,
+    )
+    cursor.execute(
+        f"DELETE FROM master_wilayah WHERE kode_wilayah NOT IN ({placeholders})",
+        allowed,
+    )
+
+    for kode, nama, urutan in fixed_regions:
+        existing = cursor.execute(
+            "SELECT sync_id FROM master_wilayah WHERE kode_wilayah = ? LIMIT 1",
+            (kode,),
+        ).fetchone()
+        sync_id = str(existing[0]) if existing and existing[0] else str(uuid.uuid5(uuid.NAMESPACE_URL, f"kargo:mahkota:wilayah:{kode}"))
+        cursor.execute(
+            """
+            INSERT INTO master_wilayah(
+                kode_wilayah, nama_wilayah, tipe_wilayah,
+                aktif, urutan, sync_id, deleted_at, updated_at
+            ) VALUES (?, ?, 'PROVINSI', 1, ?, ?, NULL, CURRENT_TIMESTAMP)
+            ON CONFLICT(kode_wilayah) DO UPDATE SET
+                nama_wilayah = excluded.nama_wilayah,
+                tipe_wilayah = excluded.tipe_wilayah,
+                aktif = 1,
+                urutan = excluded.urutan,
+                sync_id = excluded.sync_id,
+                deleted_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (kode, nama, urutan, sync_id),
+        )
+
+    # Pengaturan tujuan juga dikunci ke tiga wilayah yang sama agar dropdown
+    # Resi/Buku Gudang/Kontak tidak dapat kembali menampilkan wilayah tambahan.
+    cursor.execute(
+        "INSERT OR REPLACE INTO pengaturan_sistem(kunci, nilai) VALUES (?, ?)",
+        (
+            "provinsi_tujuan",
+            json.dumps(
+                [
+                    "KALIMANTAN TIMUR",
+                    "KALIMANTAN SELATAN",
+                    "PROVINSI LAINNYA",
+                ],
+                ensure_ascii=False,
+            ),
+        ),
+    )
+
+
+
+def _migration_v10(cursor) -> None:
+    """Bersihkan cabang dummy lama TEST/PUSAT pada database Mahkota.
+
+    Hanya dijalankan bila database sudah mengenal SBY dan JKT, sehingga
+    migration ini tidak mengubah database white-label/non-Mahkota yang belum
+    memiliki struktur cabang Mahkota.
+    """
+    def table_exists(name: str) -> bool:
+        return cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (name,),
+        ).fetchone() is not None
+
+    if not table_exists("data_cabang"):
+        return
+
+    rows = cursor.execute(
+        "SELECT kode_cabang FROM data_cabang WHERE kode_cabang IN ('SBY','JKT')"
+    ).fetchall()
+    if len({str(r[0]).strip().upper() for r in rows}) < 2:
+        return
+
+    target = ("TEST", "PUSAT")
+
+    # Hapus data turunan terlebih dahulu agar FK SQLite tetap konsisten.
+    if table_exists("user_cabang_access"):
+        cursor.execute(
+            "DELETE FROM user_cabang_access WHERE kode_cabang IN (?, ?)",
+            target,
+        )
+    if table_exists("manajemen_user"):
+        cursor.execute(
+            "DELETE FROM manajemen_user WHERE kode_cabang IN (?, ?)",
+            target,
+        )
+    if table_exists("data_resi_detail") and table_exists("data_resi"):
+        cursor.execute(
+            "DELETE FROM data_resi_detail WHERE no_resi IN ("
+            "SELECT no_resi FROM data_resi WHERE kode_cabang IN (?, ?)"
+            ")",
+            target,
+        )
+    if table_exists("buku_gudang"):
+        if table_exists("data_resi"):
+            cursor.execute(
+                "DELETE FROM buku_gudang WHERE kode_cabang IN (?, ?) "
+                "OR no_resi IN (SELECT no_resi FROM data_resi WHERE kode_cabang IN (?, ?))",
+                target + target,
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM buku_gudang WHERE kode_cabang IN (?, ?)", target
+            )
+    for table in (
+        "manifest",
+        "invoice_resi",
+        "master_pengirim",
+        "master_penerima",
+        "truk",
+        "cabang_wilayah",
+        "numbering_settings",
+        "numbering_counters",
+        "resi_audit",
+    ):
+        if table_exists(table):
+            cursor.execute(
+                f"DELETE FROM {table} WHERE kode_cabang IN (?, ?)",
+                target,
+            )
+    if table_exists("data_resi"):
+        cursor.execute(
+            "DELETE FROM data_resi WHERE kode_cabang IN (?, ?)", target
+        )
+    cursor.execute(
+        "DELETE FROM data_cabang WHERE kode_cabang IN (?, ?)", target
+    )
+
+
+
+def _migration_v11(cursor) -> None:
+    """Audit identitas pembuat/perubahan untuk seluruh tabel data aplikasi."""
+    audit_tables = {
+        "data_cabang": ["kode_cabang"],
+        "manajemen_user": ["id_user"],
+        "user_cabang_access": ["id_user", "kode_cabang"],
+        "data_resi": ["no_resi"],
+        "data_resi_detail": ["id_detail"],
+        "buku_gudang": ["id_gudang"],
+        "manifest": ["id_manifest"],
+        "invoice_header": ["id"],
+        "invoice_detail": ["id"],
+        "invoice_resi": ["id"],
+        "master_pengirim": ["id_pengirim"],
+        "master_penerima": ["id_penerima"],
+        "truk": ["kode_cabang", "no_polisi"],
+        "kapal": ["nama_kapal"],
+        "master_wilayah": ["id"],
+        "cabang_wilayah": ["id"],
+        "numbering_settings": ["id"],
+        "numbering_counters": ["id"],
+        "master_option": ["id"],
+        "resi_audit": ["id_audit"],
+    }
+
+    audit_columns = (
+        "created_by_user_id",
+        "created_by_username",
+        "created_by_name",
+        "updated_by_user_id",
+        "updated_by_username",
+        "updated_by_name",
+    )
+
+    def table_exists(table):
+        return cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone() is not None
+
+    def columns(table):
+        return {
+            str(row[1]).strip()
+            for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+    for table, keys in audit_tables.items():
+        if not table_exists(table):
+            continue
+        existing = columns(table)
+        for column in audit_columns:
+            if column not in existing:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_created_by_user "
+            f"ON {table}(created_by_user_id)"
+        )
+
+        quoted_table = table.replace('"', '""')
+
+        trigger_insert = f"trg_local_audit_{table}_insert"
+        cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_insert}")
+        where_insert = " AND ".join(f"{key}=NEW.{key}" for key in keys)
+        cursor.execute(
+            f"""
+            CREATE TRIGGER {trigger_insert}
+            AFTER INSERT ON {quoted_table}
+            WHEN mkt_audit_is_sync() = 0
+            BEGIN
+                UPDATE {quoted_table}
+                SET created_by_user_id = COALESCE(created_by_user_id, mkt_audit_user_id()),
+                    created_by_username = COALESCE(NULLIF(created_by_username, ''), mkt_audit_username()),
+                    created_by_name = COALESCE(NULLIF(created_by_name, ''), mkt_audit_name()),
+                    updated_by_user_id = COALESCE(updated_by_user_id, mkt_audit_user_id()),
+                    updated_by_username = COALESCE(NULLIF(updated_by_username, ''), mkt_audit_username()),
+                    updated_by_name = COALESCE(NULLIF(updated_by_name, ''), mkt_audit_name())
+                WHERE {where_insert};
+            END
+            """
+        )
+
+        all_columns = columns(table)
+        business_columns = [
+            c for c in sorted(all_columns)
+            if c not in set(audit_columns)
+            and c not in {"updated_at", "created_at"}
+        ]
+        trigger_update = f"trg_local_audit_{table}_update"
+        cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_update}")
+        if business_columns:
+            update_of = ", ".join(business_columns)
+            where_update = " AND ".join(f"{key}=NEW.{key}" for key in keys)
+            cursor.execute(
+                f"""
+                CREATE TRIGGER {trigger_update}
+                AFTER UPDATE OF {update_of} ON {quoted_table}
+                WHEN mkt_audit_is_sync() = 0
+                BEGIN
+                    UPDATE {quoted_table}
+                    SET updated_by_user_id = mkt_audit_user_id(),
+                        updated_by_username = mkt_audit_username(),
+                        updated_by_name = mkt_audit_name()
+                    WHERE {where_update};
+                END
+                """
+            )
+
+
+def _migration_v12(cursor) -> None:
+    """Perbaiki snapshot actor pada sync_outbox untuk Resi dan detail.
+
+    Outbox dibuat di trigger SQLite. Trigger harus membawa identitas pembuat
+    dari ROW lokal saat perubahan terjadi, bukan mengandalkan user yang sedang
+    login ketika antrean akhirnya dikirim ke Supabase.
+    """
+    # --- data_resi ---------------------------------------------------------
+    payload_insert = "json_object(" + ", ".join([
+        "'no_resi', NEW.no_resi",
+        "'kode_cabang', NEW.kode_cabang",
+        "'tanggal_masuk', NEW.tanggal_masuk",
+        "'tanggal_keluar', NEW.tanggal_keluar",
+        "'pengirim', NEW.pengirim",
+        "'hp_pengirim', NEW.hp_pengirim",
+        "'alamat_pengirim', NEW.alamat_pengirim",
+        "'kota_asal', NEW.kota_asal",
+        "'penerima', NEW.penerima",
+        "'hp_penerima', NEW.hp_penerima",
+        "'alamat_penerima', NEW.alamat_penerima",
+        "'kota_tujuan', NEW.kota_tujuan",
+        "'nama_barang', NEW.nama_barang",
+        "'koli', NEW.koli",
+        "'berat', NEW.berat",
+        "'cbm', NEW.cbm",
+        "'ongkir_per_kg', NEW.ongkir_per_kg",
+        "'ongkir_per_cbm', NEW.ongkir_per_cbm",
+        "'subtotal_ongkir', NEW.subtotal_ongkir",
+        "'jenis_pajak', NEW.jenis_pajak",
+        "'total_ongkir', NEW.total_ongkir",
+        "'pembayaran', NEW.pembayaran",
+        "'status_resi', NEW.status_resi",
+        "'foto_bukti', NEW.foto_bukti",
+        "'truk', NEW.truk",
+        "'ket_buku_gudang', NEW.ket_buku_gudang",
+        "'no_manifest', NEW.no_manifest",
+        "'ket_manifest', NEW.ket_manifest",
+        "'rincian_json', NEW.rincian_json",
+        "'revision', NEW.revision",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', COALESCE(NEW.created_by_user_id, mkt_audit_user_id())",
+        "'created_by_username', COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())",
+        "'created_by_name', COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())",
+        "'updated_by_user_id', COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())",
+        "'updated_by_username', COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())",
+        "'updated_by_name', COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())",
+    ]) + ")"
+    payload_update = "json_object(" + ", ".join([
+        "'no_resi', NEW.no_resi",
+        "'kode_cabang', NEW.kode_cabang",
+        "'tanggal_masuk', NEW.tanggal_masuk",
+        "'tanggal_keluar', NEW.tanggal_keluar",
+        "'pengirim', NEW.pengirim",
+        "'hp_pengirim', NEW.hp_pengirim",
+        "'alamat_pengirim', NEW.alamat_pengirim",
+        "'kota_asal', NEW.kota_asal",
+        "'penerima', NEW.penerima",
+        "'hp_penerima', NEW.hp_penerima",
+        "'alamat_penerima', NEW.alamat_penerima",
+        "'kota_tujuan', NEW.kota_tujuan",
+        "'nama_barang', NEW.nama_barang",
+        "'koli', NEW.koli",
+        "'berat', NEW.berat",
+        "'cbm', NEW.cbm",
+        "'ongkir_per_kg', NEW.ongkir_per_kg",
+        "'ongkir_per_cbm', NEW.ongkir_per_cbm",
+        "'subtotal_ongkir', NEW.subtotal_ongkir",
+        "'jenis_pajak', NEW.jenis_pajak",
+        "'total_ongkir', NEW.total_ongkir",
+        "'pembayaran', NEW.pembayaran",
+        "'status_resi', NEW.status_resi",
+        "'foto_bukti', NEW.foto_bukti",
+        "'truk', NEW.truk",
+        "'ket_buku_gudang', NEW.ket_buku_gudang",
+        "'no_manifest', NEW.no_manifest",
+        "'ket_manifest', NEW.ket_manifest",
+        "'rincian_json', NEW.rincian_json",
+        "'revision', NEW.revision",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', COALESCE(NEW.created_by_user_id, OLD.created_by_user_id)",
+        "'created_by_username', COALESCE(NULLIF(NEW.created_by_username, ''), NULLIF(OLD.created_by_username, ''))",
+        "'created_by_name', COALESCE(NULLIF(NEW.created_by_name, ''), NULLIF(OLD.created_by_name, ''))",
+        "'updated_by_user_id', COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())",
+        "'updated_by_username', COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())",
+        "'updated_by_name', COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())",
+    ]) + ")"
+    payload_delete = "json_object(" + ", ".join([
+        "'no_resi', OLD.no_resi", "'kode_cabang', OLD.kode_cabang",
+        "'tanggal_masuk', OLD.tanggal_masuk", "'tanggal_keluar', OLD.tanggal_keluar",
+        "'pengirim', OLD.pengirim", "'hp_pengirim', OLD.hp_pengirim",
+        "'alamat_pengirim', OLD.alamat_pengirim", "'kota_asal', OLD.kota_asal",
+        "'penerima', OLD.penerima", "'hp_penerima', OLD.hp_penerima",
+        "'alamat_penerima', OLD.alamat_penerima", "'kota_tujuan', OLD.kota_tujuan",
+        "'nama_barang', OLD.nama_barang", "'koli', OLD.koli", "'berat', OLD.berat",
+        "'cbm', OLD.cbm", "'ongkir_per_kg', OLD.ongkir_per_kg",
+        "'ongkir_per_cbm', OLD.ongkir_per_cbm", "'subtotal_ongkir', OLD.subtotal_ongkir",
+        "'jenis_pajak', OLD.jenis_pajak", "'total_ongkir', OLD.total_ongkir",
+        "'pembayaran', OLD.pembayaran", "'status_resi', OLD.status_resi",
+        "'foto_bukti', OLD.foto_bukti", "'truk', OLD.truk",
+        "'ket_buku_gudang', OLD.ket_buku_gudang", "'no_manifest', OLD.no_manifest",
+        "'ket_manifest', OLD.ket_manifest", "'rincian_json', OLD.rincian_json",
+        "'revision', OLD.revision", "'sync_id', OLD.sync_id",
+        "'created_at', OLD.created_at", "'updated_at', OLD.updated_at",
+        "'deleted_at', OLD.deleted_at",
+        "'created_by_user_id', OLD.created_by_user_id",
+        "'created_by_username', OLD.created_by_username",
+        "'created_by_name', OLD.created_by_name",
+        "'updated_by_user_id', OLD.updated_by_user_id",
+        "'updated_by_username', OLD.updated_by_username",
+        "'updated_by_name', OLD.updated_by_name",
+    ]) + ")"
+
+    for name in (
+        'trg_local_data_resi_outbox_insert',
+        'trg_local_data_resi_outbox_update',
+        'trg_local_data_resi_outbox_delete',
+    ):
+        cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
+
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_outbox_insert
+        AFTER INSERT ON data_resi
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi', NEW.no_resi, 'INSERT', {payload_insert});
+        END
+    """)
+    update_changed = " OR ".join([
+        f"NEW.{c} IS NOT OLD.{c}" for c in (
+            "no_resi","kode_cabang","tanggal_masuk","tanggal_keluar","pengirim",
+            "hp_pengirim","alamat_pengirim","kota_asal","penerima","hp_penerima",
+            "alamat_penerima","kota_tujuan","nama_barang","koli","berat","cbm",
+            "ongkir_per_kg","ongkir_per_cbm","subtotal_ongkir","jenis_pajak",
+            "total_ongkir","pembayaran","status_resi","foto_bukti","truk",
+            "ket_buku_gudang","no_manifest","ket_manifest","rincian_json","revision",
+            "sync_id","created_at","deleted_at",
+        )
+    ])
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_outbox_update
+        AFTER UPDATE ON data_resi
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+         AND ({update_changed})
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi', NEW.no_resi, 'UPDATE', {payload_update});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_outbox_delete
+        AFTER DELETE ON data_resi
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi', OLD.no_resi, 'DELETE', {payload_delete});
+        END
+    """)
+
+    # --- data_resi_detail --------------------------------------------------
+    detail_insert = "json_object(" + ", ".join([
+        "'id_detail', NEW.id_detail", "'no_resi', NEW.no_resi", "'urutan', NEW.urutan",
+        "'nama_barang', NEW.nama_barang", "'koli', NEW.koli", "'berat', NEW.berat",
+        "'cbm', NEW.cbm", "'sync_id', NEW.sync_id", "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at", "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', COALESCE(NEW.created_by_user_id, mkt_audit_user_id())",
+        "'created_by_username', COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())",
+        "'created_by_name', COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())",
+        "'updated_by_user_id', COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())",
+        "'updated_by_username', COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())",
+        "'updated_by_name', COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())",
+    ]) + ")"
+    detail_update = "json_object(" + ", ".join([
+        "'id_detail', NEW.id_detail", "'no_resi', NEW.no_resi", "'urutan', NEW.urutan",
+        "'nama_barang', NEW.nama_barang", "'koli', NEW.koli", "'berat', NEW.berat",
+        "'cbm', NEW.cbm", "'sync_id', NEW.sync_id", "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at", "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', COALESCE(NEW.created_by_user_id, OLD.created_by_user_id)",
+        "'created_by_username', COALESCE(NULLIF(NEW.created_by_username, ''), NULLIF(OLD.created_by_username, ''))",
+        "'created_by_name', COALESCE(NULLIF(NEW.created_by_name, ''), NULLIF(OLD.created_by_name, ''))",
+        "'updated_by_user_id', COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())",
+        "'updated_by_username', COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())",
+        "'updated_by_name', COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())",
+    ]) + ")"
+    detail_delete = "json_object(" + ", ".join([
+        "'id_detail', OLD.id_detail", "'no_resi', OLD.no_resi", "'urutan', OLD.urutan",
+        "'nama_barang', OLD.nama_barang", "'koli', OLD.koli", "'berat', OLD.berat",
+        "'cbm', OLD.cbm", "'sync_id', OLD.sync_id", "'created_at', OLD.created_at",
+        "'updated_at', OLD.updated_at", "'deleted_at', OLD.deleted_at",
+        "'created_by_user_id', OLD.created_by_user_id",
+        "'created_by_username', OLD.created_by_username",
+        "'created_by_name', OLD.created_by_name",
+        "'updated_by_user_id', OLD.updated_by_user_id",
+        "'updated_by_username', OLD.updated_by_username",
+        "'updated_by_name', OLD.updated_by_name",
+    ]) + ")"
+
+    for name in (
+        'trg_local_data_resi_detail_outbox_insert',
+        'trg_local_data_resi_detail_outbox_update',
+        'trg_local_data_resi_detail_outbox_delete',
+    ):
+        cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
+
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_detail_outbox_insert
+        AFTER INSERT ON data_resi_detail
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi_detail', COALESCE(NEW.sync_id, CAST(NEW.id_detail AS TEXT)), 'INSERT', {detail_insert});
+        END
+    """)
+    detail_changed = " OR ".join([
+        f"NEW.{c} IS NOT OLD.{c}" for c in (
+            "id_detail","no_resi","urutan","nama_barang","koli","berat","cbm",
+            "sync_id","created_at","deleted_at",
+        )
+    ])
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_detail_outbox_update
+        AFTER UPDATE ON data_resi_detail
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+         AND ({detail_changed})
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi_detail', COALESCE(NEW.sync_id, CAST(NEW.id_detail AS TEXT)), 'UPDATE', {detail_update});
+        END
+    """)
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_data_resi_detail_outbox_delete
+        AFTER DELETE ON data_resi_detail
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('data_resi_detail', COALESCE(OLD.sync_id, CAST(OLD.id_detail AS TEXT)), 'DELETE', {detail_delete});
+        END
+    """)
+
+
+
+def _migration_v13(cursor) -> None:
+    """Fondasi sync Buku Gudang: sync_id, soft-delete, actor snapshot, dan outbox."""
+    table = "buku_gudang"
+    columns = {
+        str(row[1]).strip()
+        for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+    if "sync_id" not in columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN sync_id TEXT")
+    if "deleted_at" not in columns:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at TEXT")
+
+    actor_columns = (
+        "created_by_user_id",
+        "created_by_username",
+        "created_by_name",
+        "updated_by_user_id",
+        "updated_by_username",
+        "updated_by_name",
+    )
+    for column in actor_columns:
+        if column not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+
+    # Row lama mendapat identitas lintas perangkat yang stabil.
+    rows = cursor.execute(
+        f"SELECT rowid FROM {table} WHERE sync_id IS NULL OR TRIM(sync_id) = ''"
+    ).fetchall()
+    for (rowid,) in rows:
+        cursor.execute(
+            f"UPDATE {table} SET sync_id = ? WHERE rowid = ?",
+            (str(uuid.uuid4()), rowid),
+        )
+
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_buku_gudang_sync_id "
+        "ON buku_gudang(sync_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_buku_gudang_cabang_sync "
+        "ON buku_gudang(kode_cabang, sync_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_buku_gudang_resi "
+        "ON buku_gudang(no_resi, kode_cabang)"
+    )
+
+    payload_new = "json_object(" + ", ".join([
+        "'id_gudang', NEW.id_gudang",
+        "'kode_cabang', NEW.kode_cabang",
+        "'tanggal', NEW.tanggal",
+        "'no_resi', NEW.no_resi",
+        "'jenis', NEW.jenis",
+        "'status_resi', NEW.status_resi",
+        "'sync_id', NEW.sync_id",
+        "'created_at', NEW.created_at",
+        "'updated_at', NEW.updated_at",
+        "'deleted_at', NEW.deleted_at",
+        "'created_by_user_id', COALESCE(NEW.created_by_user_id, mkt_audit_user_id())",
+        "'created_by_username', COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())",
+        "'created_by_name', COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())",
+        "'updated_by_user_id', COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())",
+        "'updated_by_username', COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())",
+        "'updated_by_name', COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())",
+    ]) + ")"
+    payload_old = "json_object(" + ", ".join([
+        "'id_gudang', OLD.id_gudang",
+        "'kode_cabang', OLD.kode_cabang",
+        "'tanggal', OLD.tanggal",
+        "'no_resi', OLD.no_resi",
+        "'jenis', OLD.jenis",
+        "'status_resi', OLD.status_resi",
+        "'sync_id', OLD.sync_id",
+        "'created_at', OLD.created_at",
+        "'updated_at', OLD.updated_at",
+        "'deleted_at', OLD.deleted_at",
+        "'created_by_user_id', OLD.created_by_user_id",
+        "'created_by_username', OLD.created_by_username",
+        "'created_by_name', OLD.created_by_name",
+        "'updated_by_user_id', OLD.updated_by_user_id",
+        "'updated_by_username', OLD.updated_by_username",
+        "'updated_by_name', OLD.updated_by_name",
+    ]) + ")"
+
+    for name in (
+        "trg_local_buku_gudang_outbox_insert",
+        "trg_local_buku_gudang_outbox_update",
+        "trg_local_buku_gudang_outbox_delete",
+    ):
+        cursor.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_buku_gudang_outbox_insert
+        AFTER INSERT ON buku_gudang
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('buku_gudang', NEW.sync_id, 'INSERT', {payload_new});
+        END
+    """)
+
+    changed = " OR ".join(
+        f"NEW.{column} IS NOT OLD.{column}"
+        for column in (
+            "id_gudang", "kode_cabang", "tanggal", "no_resi", "jenis",
+            "status_resi", "sync_id", "created_at", "deleted_at",
+            "created_by_user_id", "created_by_username", "created_by_name",
+            "updated_by_user_id", "updated_by_username", "updated_by_name",
+        )
+    )
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_buku_gudang_outbox_update
+        AFTER UPDATE ON buku_gudang
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+         AND ({changed})
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('buku_gudang', NEW.sync_id, 'UPDATE', {payload_new});
+        END
+    """)
+
+    cursor.execute(f"""
+        CREATE TRIGGER trg_local_buku_gudang_outbox_delete
+        AFTER DELETE ON buku_gudang
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('buku_gudang', OLD.sync_id, 'DELETE', {payload_old});
+        END
+    """)
+
+def _migration_v14(cursor) -> None:
+    """Lengkapi metadata sync untuk master operasional lama.
+
+    Tabel master_pengirim/master_penerima/truk/kapal dibuat pada schema awal
+    sebelum fondasi offline-first diperluas. Schema lama itu belum memiliki
+    sync_id/deleted_at, padahal services.sync_service sudah mensyaratkan kedua
+    kolom tersebut. Migration ini dibuat idempotent dan aman untuk DB existing.
+    """
+    tables = (
+        "master_pengirim",
+        "master_penerima",
+        "truk",
+        "kapal",
+    )
+
+    for table in tables:
+        columns = {
+            str(row[1]).strip().lower()
+            for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+
+        if "sync_id" not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN sync_id TEXT")
+        if "deleted_at" not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN deleted_at TEXT")
+
+        # Row lama mendapat identitas lintas perangkat yang stabil.
+        rows = cursor.execute(
+            f"SELECT rowid FROM {table} WHERE sync_id IS NULL OR TRIM(sync_id) = ''"
+        ).fetchall()
+        for (rowid,) in rows:
+            cursor.execute(
+                f"UPDATE {table} SET sync_id = ? WHERE rowid = ?",
+                (str(uuid.uuid4()), rowid),
+            )
+
+        cursor.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_sync_id ON {table}(sync_id)"
+        )
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_deleted_at ON {table}(deleted_at)"
+        )
+
+
+
+def _migration_v15(cursor) -> None:
+    """Pastikan Buku Gudang lama/baru benar-benar masuk antrean push.
+
+    Buku Gudang adalah projection dari transaksi Resi. Versi sebelumnya sudah
+    memasang trigger/outbox, tetapi database yang pernah dibuat sebelum trigger
+    terpasang dapat memiliki row buku_gudang tanpa outbox. Migration ini:
+    - memastikan schema/trigger Buku Gudang tetap terpasang;
+    - membuat ulang antrean INSERT untuk row lokal yang belum tersinkron;
+    - tidak membuat antrean baru untuk row yang sudah ditandai synced.
+    """
+    _migration_v13(cursor)
+
+    rows = cursor.execute(
+        """
+        SELECT id_gudang, sync_id, kode_cabang, tanggal, no_resi, jenis,
+               status_resi, created_at, updated_at, deleted_at,
+               created_by_user_id, created_by_username, created_by_name,
+               updated_by_user_id, updated_by_username, updated_by_name
+        FROM buku_gudang
+        WHERE COALESCE(is_synced, 0) = 0
+          AND sync_id IS NOT NULL
+          AND TRIM(sync_id) <> ''
+        """
+    ).fetchall()
+
+    for row in rows:
+        (
+            id_gudang, sync_id, kode_cabang, tanggal, no_resi, jenis,
+            status_resi, created_at, updated_at, deleted_at,
+            created_by_user_id, created_by_username, created_by_name,
+            updated_by_user_id, updated_by_username, updated_by_name,
+        ) = row
+        already_pending = cursor.execute(
+            """
+            SELECT 1
+            FROM sync_outbox
+            WHERE table_name = 'buku_gudang'
+              AND record_key = ?
+              AND status = 'PENDING'
+            LIMIT 1
+            """,
+            (str(sync_id),),
+        ).fetchone()
+        if already_pending:
+            continue
+
+        payload = json.dumps({
+            "id_gudang": id_gudang,
+            "kode_cabang": kode_cabang,
+            "tanggal": tanggal,
+            "no_resi": no_resi,
+            "jenis": jenis,
+            "status_resi": status_resi,
+            "sync_id": sync_id,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "deleted_at": deleted_at,
+            "created_by_user_id": created_by_user_id,
+            "created_by_username": created_by_username,
+            "created_by_name": created_by_name,
+            "updated_by_user_id": updated_by_user_id,
+            "updated_by_username": updated_by_username,
+            "updated_by_name": updated_by_name,
+        }, ensure_ascii=False)
+        cursor.execute(
+            """
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('buku_gudang', ?, 'INSERT', ?)
+            """,
+            (str(sync_id), payload),
+        )
+
+def _migration_v16(cursor) -> None:
+    """Tambahkan outbox trigger two-way untuk master pengirim/penerima, truk, dan kapal.
+
+    Versi sebelumnya memiliki kolom sync_id/deleted_at pada empat master, tetapi
+    belum memiliki trigger lokal yang memasukkan INSERT/UPDATE/DELETE ke sync_outbox.
+    Akibatnya data master baru/hasil edit dapat tersimpan di SQLite namun tidak
+    pernah masuk antrean push ke Supabase.
+
+    Migration ini hanya memasang trigger. Rekonsiliasi row legacy yang belum
+    tersinkron ditangani oleh sync_service setelah pull server memberi tanda
+    is_synced=1 pada row yang memang berasal dari server.
+    """
+    # Pastikan kolom inti tersedia sebelum trigger dibuat.
+    required = {
+        "master_penerima": (
+            "id_penerima", "kode_cabang", "nama", "no_hp", "alamat", "kota",
+            "provinsi", "total_transaksi", "pembayaran", "status_tagihan",
+            "sync_id", "created_at", "updated_at", "deleted_at",
+            "created_by_user_id", "created_by_username", "created_by_name",
+            "updated_by_user_id", "updated_by_username", "updated_by_name",
+        ),
+        "master_pengirim": (
+            "id_pengirim", "kode_cabang", "nama", "no_hp", "alamat", "kota",
+            "sync_id", "created_at", "updated_at", "deleted_at",
+            "created_by_user_id", "created_by_username", "created_by_name",
+            "updated_by_user_id", "updated_by_username", "updated_by_name",
+        ),
+        "truk": (
+            "kode_cabang", "jenis_truk", "no_polisi", "nama_sopir", "hp_sopir",
+            "ket_truk", "foto_truk", "sync_id", "created_at", "updated_at",
+            "deleted_at", "created_by_user_id", "created_by_username",
+            "created_by_name", "updated_by_user_id", "updated_by_username",
+            "updated_by_name",
+        ),
+        "kapal": (
+            "nama_kapal", "tujuan", "ket_kapal", "foto_kapal", "sync_id",
+            "created_at", "updated_at", "deleted_at",
+            "created_by_user_id", "created_by_username", "created_by_name",
+            "updated_by_user_id", "updated_by_username", "updated_by_name",
+        ),
+    }
+
+    payloads = {
+        "master_penerima": [
+            ("id_penerima", "NEW.id_penerima"),
+            ("kode_cabang", "NEW.kode_cabang"),
+            ("nama", "NEW.nama"),
+            ("no_hp", "NEW.no_hp"),
+            ("alamat", "NEW.alamat"),
+            ("kota", "NEW.kota"),
+            ("provinsi", "NEW.provinsi"),
+            ("total_transaksi", "NEW.total_transaksi"),
+            ("pembayaran", "NEW.pembayaran"),
+            ("status_tagihan", "NEW.status_tagihan"),
+            ("sync_id", "NEW.sync_id"),
+            ("created_at", "NEW.created_at"),
+            ("updated_at", "NEW.updated_at"),
+            ("deleted_at", "NEW.deleted_at"),
+            ("created_by_user_id", "COALESCE(NEW.created_by_user_id, mkt_audit_user_id())"),
+            ("created_by_username", "COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())"),
+            ("created_by_name", "COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())"),
+            ("updated_by_user_id", "COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())"),
+            ("updated_by_username", "COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())"),
+            ("updated_by_name", "COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())"),
+        ],
+        "master_pengirim": [
+            ("id_pengirim", "NEW.id_pengirim"),
+            ("kode_cabang", "NEW.kode_cabang"),
+            ("nama", "NEW.nama"),
+            ("no_hp", "NEW.no_hp"),
+            ("alamat", "NEW.alamat"),
+            ("kota", "NEW.kota"),
+            ("sync_id", "NEW.sync_id"),
+            ("created_at", "NEW.created_at"),
+            ("updated_at", "NEW.updated_at"),
+            ("deleted_at", "NEW.deleted_at"),
+            ("created_by_user_id", "COALESCE(NEW.created_by_user_id, mkt_audit_user_id())"),
+            ("created_by_username", "COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())"),
+            ("created_by_name", "COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())"),
+            ("updated_by_user_id", "COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())"),
+            ("updated_by_username", "COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())"),
+            ("updated_by_name", "COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())"),
+        ],
+        "truk": [
+            ("kode_cabang", "NEW.kode_cabang"),
+            ("jenis_truk", "NEW.jenis_truk"),
+            ("no_polisi", "NEW.no_polisi"),
+            ("nama_sopir", "NEW.nama_sopir"),
+            ("hp_sopir", "NEW.hp_sopir"),
+            ("ket_truk", "NEW.ket_truk"),
+            ("foto_truk", "NEW.foto_truk"),
+            ("sync_id", "NEW.sync_id"),
+            ("created_at", "NEW.created_at"),
+            ("updated_at", "NEW.updated_at"),
+            ("deleted_at", "NEW.deleted_at"),
+            ("created_by_user_id", "COALESCE(NEW.created_by_user_id, mkt_audit_user_id())"),
+            ("created_by_username", "COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())"),
+            ("created_by_name", "COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())"),
+            ("updated_by_user_id", "COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())"),
+            ("updated_by_username", "COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())"),
+            ("updated_by_name", "COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())"),
+        ],
+        "kapal": [
+            ("nama_kapal", "NEW.nama_kapal"),
+            ("tujuan", "NEW.tujuan"),
+            ("ket_kapal", "NEW.ket_kapal"),
+            ("foto_kapal", "NEW.foto_kapal"),
+            ("sync_id", "NEW.sync_id"),
+            ("created_at", "NEW.created_at"),
+            ("updated_at", "NEW.updated_at"),
+            ("deleted_at", "NEW.deleted_at"),
+            ("created_by_user_id", "COALESCE(NEW.created_by_user_id, mkt_audit_user_id())"),
+            ("created_by_username", "COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())"),
+            ("created_by_name", "COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())"),
+            ("updated_by_user_id", "COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())"),
+            ("updated_by_username", "COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())"),
+            ("updated_by_name", "COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())"),
+        ],
+    }
+
+    for table, cols in required.items():
+        existing = {
+            str(row[1]).strip()
+            for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        missing = [c for c in cols if c not in existing]
+        if missing:
+            raise RuntimeError(
+                f"Migration v16: schema {table} belum lengkap; kolom hilang: {', '.join(missing)}"
+            )
+
+        # Row yang dibuat sebelum trigger v16 bisa belum memiliki sync_id.
+        # Beri identitas lintas perangkat sekarang agar dapat diantrikan oleh
+        # sync_service tanpa perlu menghapus atau menginput ulang data.
+        rows_without_sync_id = cursor.execute(
+            f"SELECT rowid FROM {table} WHERE sync_id IS NULL OR TRIM(sync_id) = ''"
+        ).fetchall()
+        for (rowid,) in rows_without_sync_id:
+            cursor.execute(
+                f"UPDATE {table} SET sync_id = ? WHERE rowid = ?",
+                (str(uuid.uuid4()), rowid),
+            )
+
+        items = payloads[table]
+        insert_expr = "json_object(" + ", ".join(
+            f"'{k}', {expr}" for k, expr in items
+        ) + ")"
+        old_items = [(k, expr.replace("NEW.", "OLD.")) for k, expr in items]
+        # For deleted rows, actor fallback must not suddenly use the sync actor.
+        delete_items = []
+        for k, expr in old_items:
+            if k in {"created_by_user_id", "created_by_username", "created_by_name",
+                     "updated_by_user_id", "updated_by_username", "updated_by_name"}:
+                # use OLD values exactly
+                raw = {
+                    "created_by_user_id": "OLD.created_by_user_id",
+                    "created_by_username": "OLD.created_by_username",
+                    "created_by_name": "OLD.created_by_name",
+                    "updated_by_user_id": "OLD.updated_by_user_id",
+                    "updated_by_username": "OLD.updated_by_username",
+                    "updated_by_name": "OLD.updated_by_name",
+                }[k]
+                delete_items.append((k, raw))
+            else:
+                delete_items.append((k, expr))
+        delete_expr = "json_object(" + ", ".join(
+            f"'{k}', {expr}" for k, expr in delete_items
+        ) + ")"
+
+        key_expr = "NEW.sync_id"
+        old_key_expr = "OLD.sync_id"
+        names = (
+            f"trg_local_{table}_outbox_insert",
+            f"trg_local_{table}_outbox_update",
+            f"trg_local_{table}_outbox_delete",
+        )
+        for name in names:
+            cursor.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+        cursor.execute(f"""
+            CREATE TRIGGER {names[0]}
+            AFTER INSERT ON {table}
+            WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+            BEGIN
+                INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+                VALUES ('{table}', {key_expr}, 'INSERT', {insert_expr});
+            END
+        """)
+        cursor.execute(f"""
+            CREATE TRIGGER {names[1]}
+            AFTER UPDATE ON {table}
+            WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+            BEGIN
+                INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+                VALUES ('{table}', {key_expr}, 'UPDATE', {insert_expr});
+            END
+        """)
+        cursor.execute(f"""
+            CREATE TRIGGER {names[2]}
+            AFTER DELETE ON {table}
+            WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+            BEGIN
+                INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+                VALUES ('{table}', {old_key_expr}, 'DELETE', {delete_expr});
+            END
+        """)
+
+
+
+def _migration_v17(cursor) -> None:
+    """Fondasi sinkronisasi dua arah untuk header Manifest.
+
+    note_manifest adalah catatan satu Manifest; ket_manifest tetap berada di
+    data_resi dan tidak disentuh oleh migrasi ini. Row Manifest lama diberi
+    sync_id dan antrean INSERT agar bisa dimigrasikan dengan upsert idempoten
+    setelah tabel public.manifest disiapkan di Supabase.
+    """
+    table = "manifest"
+    columns = {
+        str(row[1]).strip()
+        for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+    additions = {
+        "sync_id": "TEXT",
+        "deleted_at": "TEXT",
+        "created_by_user_id": "TEXT",
+        "created_by_username": "TEXT",
+        "created_by_name": "TEXT",
+        "updated_by_user_id": "TEXT",
+        "updated_by_username": "TEXT",
+        "updated_by_name": "TEXT",
+    }
+    for column, sql_type in additions.items():
+        if column not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+
+    # Beri identitas lintas perangkat pada header Manifest yang dibuat sebelum v17.
+    rows_without_sync_id = cursor.execute(
+        "SELECT rowid FROM manifest WHERE sync_id IS NULL OR TRIM(sync_id) = ''"
+    ).fetchall()
+    for (rowid,) in rows_without_sync_id:
+        cursor.execute(
+            "UPDATE manifest SET sync_id = ? WHERE rowid = ?",
+            (str(uuid.uuid4()), rowid),
+        )
+
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_manifest_sync_id ON manifest(sync_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_manifest_cabang_updated "
+        "ON manifest(kode_cabang, updated_at)"
+    )
+
+    fields = (
+        "id_manifest", "kode_cabang", "tanggal", "no_polisi", "nama_sopir",
+        "nama_kapal", "note_manifest", "status_manifest", "sync_id",
+        "created_at", "updated_at", "deleted_at",
+        "created_by_user_id", "created_by_username", "created_by_name",
+        "updated_by_user_id", "updated_by_username", "updated_by_name",
+    )
+    new_actor_expr = {
+        "created_by_user_id": "COALESCE(NEW.created_by_user_id, mkt_audit_user_id())",
+        "created_by_username": "COALESCE(NULLIF(NEW.created_by_username, ''), mkt_audit_username())",
+        "created_by_name": "COALESCE(NULLIF(NEW.created_by_name, ''), mkt_audit_name())",
+        "updated_by_user_id": "COALESCE(NEW.updated_by_user_id, mkt_audit_user_id())",
+        "updated_by_username": "COALESCE(NULLIF(NEW.updated_by_username, ''), mkt_audit_username())",
+        "updated_by_name": "COALESCE(NULLIF(NEW.updated_by_name, ''), mkt_audit_name())",
+    }
+    old_actor_expr = {
+        "created_by_user_id": "OLD.created_by_user_id",
+        "created_by_username": "OLD.created_by_username",
+        "created_by_name": "OLD.created_by_name",
+        "updated_by_user_id": "OLD.updated_by_user_id",
+        "updated_by_username": "OLD.updated_by_username",
+        "updated_by_name": "OLD.updated_by_name",
+    }
+    new_expr = "json_object(" + ", ".join(
+        f"'{field}', {new_actor_expr.get(field, f'NEW.{field}')}"
+        for field in fields
+    ) + ")"
+    old_expr = "json_object(" + ", ".join(
+        f"'{field}', {old_actor_expr.get(field, f'OLD.{field}')}"
+        for field in fields
+    ) + ")"
+
+    names = (
+        "trg_local_manifest_outbox_insert",
+        "trg_local_manifest_outbox_update",
+        "trg_local_manifest_outbox_delete",
+    )
+    for name in names:
+        cursor.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+    cursor.execute(f"""
+        CREATE TRIGGER {names[0]}
+        AFTER INSERT ON manifest
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('manifest', NEW.sync_id, 'INSERT', {new_expr});
+        END
+    """)
+
+    changed_columns = (
+        "id_manifest", "kode_cabang", "tanggal", "no_polisi", "nama_sopir",
+        "nama_kapal", "note_manifest", "status_manifest", "sync_id",
+        "created_at", "updated_at", "deleted_at",
+    )
+    changed_expr = " OR ".join(
+        f"NEW.{column} IS NOT OLD.{column}" for column in changed_columns
+    )
+    cursor.execute(f"""
+        CREATE TRIGGER {names[1]}
+        AFTER UPDATE ON manifest
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+         AND ({changed_expr})
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('manifest', NEW.sync_id, 'UPDATE', {new_expr});
+        END
+    """)
+
+    cursor.execute(f"""
+        CREATE TRIGGER {names[2]}
+        AFTER DELETE ON manifest
+        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id = 1), 0) = 0
+        BEGIN
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('manifest', OLD.sync_id, 'DELETE', {old_expr});
+        END
+    """)
+
+    # Manifest lama belum pernah memiliki trigger outbox. Antrekan sebagai INSERT
+    # satu kali; handler push mencocokkan id_manifest agar data server yang sudah
+    # ada tidak dibuat duplikat.
+    select_fields = ", ".join(f'"{field}"' for field in fields)
+    legacy_rows = cursor.execute(
+        f"SELECT {select_fields} FROM manifest ORDER BY id_manifest"
+    ).fetchall()
+    for raw in legacy_rows:
+        payload = dict(zip(fields, raw))
+        sync_id = str(payload.get("sync_id") or "").strip()
+        if not sync_id:
+            continue
+        pending = cursor.execute(
+            """
+            SELECT 1 FROM sync_outbox
+            WHERE table_name = 'manifest' AND record_key = ?
+              AND status IN ('PENDING', 'CONFLICT')
+            LIMIT 1
+            """,
+            (sync_id,),
+        ).fetchone()
+        if pending:
+            continue
+        cursor.execute(
+            """
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+            VALUES ('manifest', ?, 'INSERT', ?)
+            """,
+            (sync_id, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+        )
 
 
 def _jalankan_migrasi_schema(cursor) -> None:
@@ -1266,21 +2571,13 @@ def _jalankan_migrasi_schema(cursor) -> None:
 
 
 def _pastikan_bootstrap_cabang_minimal(cursor) -> None:
-    """
-    Menjamin foreign key cabang selalu valid walau aplikasi dijalankan tanpa seed.
+    """Menjamin cabang internal developer tanpa membuat cabang PUSAT dummy.
 
-    PUSAT adalah cabang default white-label yang dipakai CURRENT_SESSION, sedangkan
-    DEV_SYS adalah cabang internal untuk sesi developer. INSERT OR IGNORE sengaja
-    digunakan agar konfigurasi cabang yang sudah ada tidak pernah ditimpa.
+    Mahkota production hanya menggunakan SBY dan JKT sebagai cabang bisnis.
+    PUSAT lama tidak lagi dibuat otomatis. DEV_SYS dipertahankan sebagai
+    cabang internal developer dan tidak dipakai sebagai cabang bisnis.
     """
     cabang_minimal = (
-        (
-            "PUSAT",
-            "KANTOR PUSAT",
-            "INV",
-            json.dumps({"DEFAULT": 1000}, ensure_ascii=False),
-            json.dumps({"DEFAULT": "INV"}, ensure_ascii=False),
-        ),
         (
             "DEV_SYS",
             "DEVELOPER SYSTEM",
@@ -1301,6 +2598,27 @@ def _pastikan_bootstrap_cabang_minimal(cursor) -> None:
     )
 
 
+_SCHEMA_MIGRATIONS = {
+    1: _migration_v1,
+    2: _migration_v2,
+    3: _migration_v3,
+    4: _migration_v4,
+    5: _migration_v5,
+    6: _migration_v6,
+    7: _migration_v7,
+    8: _migration_v8,
+    9: _migration_v9,
+    10: _migration_v10,
+    11: _migration_v11,
+    12: _migration_v12,
+    13: _migration_v13,
+    14: _migration_v14,
+    15: _migration_v15,
+    16: _migration_v16,
+    17: _migration_v17,
+}
+
+
 def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
     """
     Membuat, memigrasikan, dan memeriksa struktur database aplikasi.
@@ -1313,6 +2631,7 @@ def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
     try:
         with sqlite3.connect(db_path, timeout=30.0) as conn:
             conn.execute("PRAGMA foreign_keys = ON")
+            install_sqlite_audit_functions(conn)
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.cursor()
 
@@ -1324,7 +2643,7 @@ def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
             conn.commit()
 
         print(
-            f"✅ Database berhasil dibuat/diperiksa: {db_path} "
+            f"Database berhasil dibuat/diperiksa: {db_path} "
             f"(schema v{DB_SCHEMA_VERSION})"
         )
         return db_path

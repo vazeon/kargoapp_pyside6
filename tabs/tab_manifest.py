@@ -31,6 +31,7 @@ from delegates.status_delegate import (
 )
 
 import services.database_service as db_service
+import services.numbering_service as numbering_service
 from utils.input_style_helper import (
     atur_tinggi_input,
     paksa_kapital_lineedit,
@@ -205,7 +206,6 @@ class TabManifest(QWidget):
         self.refresh_tahun_filter()
         self.load_data_resi_gudang()
         self.generate_no_manifest()
-        self.sesuaikan_tema_lokal()
         self.setup_autocomplete_truk()
 
     def _buat_panel_kiri(self):
@@ -860,31 +860,18 @@ class TabManifest(QWidget):
             self.txt_no_manifest.setText(self.edit_manifest_id)
             return
 
-        aturan_prefix = CURRENT_SESSION.get("aturan_prefix", {}) or {}
-        wilayah = self.cb_filter_wilayah.currentText()
-        prefix = f"M-{aturan_prefix.get(wilayah, 'MF')}"
-        seq = 1
-
+        wilayah = self.cb_filter_wilayah.currentText().strip().upper()
         try:
-            rows = db_service.ambil_no_manifest_list_by_prefix(
-                prefix,
+            result = numbering_service.peek_next_number(
+                "MANIFEST",
                 self._kode_cabang_aktif(),
-            ) or []
-
-            nomor_urut = []
-            for row in rows:
-                no_manifest = str(row[0] if row else "").strip()
-                match = re.search(r"-(\d+)$", no_manifest)
-                if match:
-                    nomor_urut.append(int(match.group(1)))
-
-            if nomor_urut:
-                seq = max(nomor_urut) + 1
-
+                wilayah=wilayah,
+                tanggal=QDate.currentDate().toString("yyyy-MM-dd"),
+            )
+            self.txt_no_manifest.setText(result.nomor)
         except Exception as exc:
-            print(f"[Manifest] Gagal menghasilkan nomor manifest: {exc}")
-
-        self.txt_no_manifest.setText(f"{prefix}-{seq:04d}")
+            print(f"[Manifest] Gagal menghasilkan nomor manifest fixed: {exc}")
+            self.txt_no_manifest.clear()
 
     def refresh_tahun_filter(self):
         pilihan_sebelumnya = self.cb_tahun_filter.currentText().strip()
@@ -1353,6 +1340,7 @@ class TabManifest(QWidget):
         dict_update = self._buat_data_armada_manifest()
         if dict_update is None:
             return None
+        dict_update["wilayah"] = self.cb_filter_wilayah.currentText().strip().upper()
         return manifest_id, resi, dict_update
 
     def _simpan_proses_manifest(self, manifest_id, resi, dict_update):
@@ -1365,7 +1353,7 @@ class TabManifest(QWidget):
             return False
 
         dict_update["nama_kapal"] = nama_kapal_resmi
-        sukses, pesan = db_service.simpan_atau_update_manifest_data(
+        sukses, hasil = db_service.simpan_atau_update_manifest_data(
             manifest_id,
             self._kode_cabang_aktif(),
             dict_update,
@@ -1377,9 +1365,11 @@ class TabManifest(QWidget):
             QMessageBox.warning(
                 self,
                 "Manifest Tidak Disimpan",
-                f"Manifest belum tersimpan:\n{pesan}",
+                f"Manifest belum tersimpan:\n{hasil}",
             )
             return False
+        if not self.is_edit_mode and hasil:
+            self.txt_no_manifest.setText(str(hasil).strip().upper())
         return True
 
     def _selesaikan_proses_manifest(self):
