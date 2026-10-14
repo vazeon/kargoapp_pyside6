@@ -143,6 +143,7 @@ class MainWindow(QMainWindow):
         self.dialog_setting = None
         self._sedang_sinkron_cabang = False
         self._logout_sedang_berjalan = False
+        self._logout_was_developer = False
         self._logout_login_window = None
         self._logout_signout_thread = None
         self._logout_signout_error = None
@@ -685,6 +686,45 @@ class MainWindow(QMainWindow):
         for widget in self._iter_tab_utama():
             self._terapkan_mode_akses_widget(widget)
 
+    def _terapkan_titlebar_native_windows(self):
+        """Sinkronkan warna title bar Windows dengan tema aplikasi Qt."""
+        if os.name != "nt":
+            return
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = wintypes.HWND(int(self.winId()))
+            dark_mode = ctypes.c_int(
+                1 if self.current_theme == self.THEME_DARK else 0
+            )
+
+            dwmapi = ctypes.WinDLL("dwmapi")
+            set_window_attribute = dwmapi.DwmSetWindowAttribute
+            set_window_attribute.argtypes = (
+                wintypes.HWND,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+            )
+            set_window_attribute.restype = ctypes.c_long
+
+            # Attribute 20 digunakan pada Windows modern. Attribute 19 adalah
+            # fallback untuk beberapa build Windows 10 yang lebih lama.
+            for attribute in (20, 19):
+                result = set_window_attribute(
+                    hwnd,
+                    attribute,
+                    ctypes.byref(dark_mode),
+                    ctypes.sizeof(dark_mode),
+                )
+                if result == 0:  # S_OK
+                    return
+        except (AttributeError, OSError, TypeError, ValueError):
+            # Pengaturan title bar hanya kosmetik; jangan sampai mengganggu UI.
+            return
+
     def toggle_theme(self):
         if self._sedang_ganti_tema:
             return
@@ -744,6 +784,10 @@ class MainWindow(QMainWindow):
         )
 
         self.btn_theme.setText("Mode Terang" if is_dark else "Mode Gelap")
+
+        # Title bar adalah area native Windows, terpisah dari stylesheet Qt.
+        # Terapkan setelah window handle siap; fungsi membaca tema terbaru.
+        QTimer.singleShot(0, self._terapkan_titlebar_native_windows)
 
     def buka_dasbor_pengaturan(self):
         if self._aktifkan_dialog_setting_lama():
@@ -855,6 +899,7 @@ class MainWindow(QMainWindow):
             return
 
         self._logout_sedang_berjalan = True
+        self._logout_was_developer = bool(CURRENT_SESSION.get("is_developer"))
         self._logout_signout_thread = None
         self._logout_signout_error = None
         self._logout_login_window = None
@@ -920,9 +965,10 @@ class MainWindow(QMainWindow):
         if auto_sync is not None and auto_sync.is_running():
             return
 
-        # Hanya setelah worker sync benar-benar selesai kita boleh memutus Auth.
+        # DEV_SUPER tidak memiliki sesi Supabase. Jalur logout developer hanya
+        # membersihkan state lokal dan tidak menjalankan worker sign-out online.
         thread = getattr(self, "_logout_signout_thread", None)
-        if thread is None:
+        if thread is None and not bool(getattr(self, "_logout_was_developer", False)):
             thread = threading.Thread(
                 target=self._logout_signout_worker,
                 name="KargoLogoutWorker",
@@ -932,7 +978,7 @@ class MainWindow(QMainWindow):
             thread.start()
             return
 
-        if thread.is_alive():
+        if thread is not None and thread.is_alive():
             return
 
         timer = getattr(self, "_logout_poll_timer", None)
@@ -949,10 +995,8 @@ class MainWindow(QMainWindow):
                 flush=True,
             )
 
-        # Offline: sign-out server boleh gagal karena jaringan. Logout lokal
-        # tetap dianggap sukses setelah credential/session lokal dibersihkan.
-
-        # Auth sudah diputus. Baru sekarang state aplikasi dikosongkan.
+        # Logout online tetap menyelesaikan sign-out dahulu. Untuk DEV_SUPER,
+        # tidak ada Auth Supabase yang disentuh; hanya state lokal dibersihkan.
         try:
             from config import reset_current_session
             reset_current_session()
@@ -991,11 +1035,16 @@ class MainWindow(QMainWindow):
         self._logout_login_window = None
         self._logout_signout_thread = None
         self._logout_signout_error = None
+        self._logout_was_developer = False
         self._logout_sedang_berjalan = False
         self.deleteLater()
 
     def _logout_signout_worker(self):
         """Lakukan sign-out Supabase di thread background."""
+        if bool(getattr(self, "_logout_was_developer", False)) or bool(
+            CURRENT_SESSION.get("is_developer")
+        ):
+            return
         try:
             from supabase_client import supabase
             supabase.auth.sign_out()

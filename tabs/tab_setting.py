@@ -1,9 +1,10 @@
 # tabs/tab_setting.py
 import json
 import re
+import threading
 import uuid
 from datetime import datetime
-from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QFontDatabase, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,6 +47,8 @@ import services.numbering_service as numbering_service
 from themes.modules.setting import get_setting_styles
 from utils.input_style_helper import atur_tinggi_input, terapkan_style_input_global
 
+
+
 from utils.typography import (
     get_master_font,
     get_fixed_font_sizes,
@@ -79,6 +82,29 @@ from utils.modules.setting_metrics import (
 )
 
 
+
+
+class _UserAccessLoadSignals(QObject):
+    """Mengirim hasil pemuatan akses user dari thread latar ke UI."""
+
+    finished = Signal(int, object)
+
+
+# Thread daemon dipakai agar request jaringan tidak menahan thread UI.
+def _ambil_data_akses_user_di_latar(signals, request_id):
+    try:
+        payload = db_service.ambil_data_akses_cabang_user() or {}
+    except Exception as exc:
+        print(f"[TabSetting] Gagal memuat akses user: {exc}")
+        payload = {"branches": [], "users": [], "_error": str(exc)}
+
+    try:
+        signals.finished.emit(request_id, payload)
+    except RuntimeError:
+        # Aplikasi sedang ditutup; tidak ada UI yang perlu diperbarui.
+        pass
+
+
 class TabSettingSistem(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,6 +113,8 @@ class TabSettingSistem(QWidget):
         self._setting_theme_timer = QTimer(self)
         self._setting_theme_timer.setSingleShot(True)
         self._setting_theme_timer.timeout.connect(self.sesuaikan_tema_lokal)
+        self._user_access_request_id = 0
+        self._user_access_signal_refs = {}
         self.init_ui()
         self.load_current_settings()
         app = QApplication.instance()
@@ -556,14 +584,54 @@ class TabSettingSistem(QWidget):
         )
 
     def load_user_branch_access(self):
-        try:
-            payload = db_service.ambil_data_akses_cabang_user() or {}
-            branches = list(payload.get("branches") or [])
-            users = list(payload.get("users") or [])
-        except Exception as exc:
-            print(f"[TabSetting] Gagal memuat akses user: {exc}")
-            branches, users = [], []
+        """Muat data akses user di thread latar agar dialog cepat terbuka.
 
+        Daftar user online dapat memerlukan request jaringan. Pemuatan tersebut
+        tidak boleh memblokir event loop Qt saat jendela Pengaturan dibuka.
+        """
+        self._user_access_request_id += 1
+        request_id = self._user_access_request_id
+
+        table = self.table_user_access
+        if table.columnCount() == 0:
+            table.setColumnCount(1)
+            table.setHorizontalHeaderLabels(["Status"])
+        if table.rowCount() == 0:
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem("Memuat data pengguna…"))
+
+        signals = _UserAccessLoadSignals(QApplication.instance())
+        signals.finished.connect(self._on_user_access_loaded)
+        self._user_access_signal_refs[request_id] = signals
+
+        worker = threading.Thread(
+            target=_ambil_data_akses_user_di_latar,
+            args=(signals, request_id),
+            name="KargoUserAccessLoader",
+            daemon=True,
+        )
+        worker.start()
+
+    def _on_user_access_loaded(self, request_id, payload):
+        signals = self._user_access_signal_refs.pop(request_id, None)
+        if signals is not None:
+            signals.deleteLater()
+
+        # Abaikan hasil lama jika ada refresh yang lebih baru.
+        if request_id != self._user_access_request_id:
+            return
+
+        if not isinstance(payload, dict):
+            payload = {}
+        if payload.get("_error"):
+            print(f"[TabSetting] Gagal memuat akses user: {payload['_error']}")
+
+        branches = list(payload.get("branches") or [])
+        users = list(payload.get("users") or [])
+        self._render_user_branch_access(branches, users)
+
+    def _render_user_branch_access(self, branches, users):
+        """Render hasil fetch pada thread UI Qt."""
         self._user_access_branches = branches
         self._user_access_users = users
         base_headers = [
@@ -1876,8 +1944,7 @@ class TabSettingSistem(QWidget):
             self.load_current_settings()
             QMessageBox.information(
                 self, "Pengaturan Tersimpan",
-                "Pengaturan berhasil disimpan dan langsung diterapkan.\n\n"
-                "Path database dan akun developer tetap aman di app_env.json."
+                "Pengaturan berhasil disimpan dan langsung diterapkan."
             )
 
         except Exception as exc:

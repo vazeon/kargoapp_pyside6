@@ -15,7 +15,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import DATA_CLIENT, CURRENT_SESSION, reset_current_session
+from config import (
+    DATA_CLIENT,
+    CURRENT_SESSION,
+    DEVELOPER_USERNAME,
+    reset_current_session,
+)
 from session_store import (
     save_last_login,
     load_last_login,
@@ -310,11 +315,19 @@ class LoginWindow(QWidget):
 
     def _cleanup_failed_auth(self):
         """Kembalikan aplikasi ke keadaan unauthenticated yang konsisten."""
-        try:
-            from supabase_client import supabase
-            supabase.auth.sign_out()
-        except Exception:
-            pass
+        # Kegagalan saat menyiapkan sesi developer harus tetap lokal. Jangan
+        # mengirim request sign-out ke Supabase dari jalur DEV_SUPER.
+        is_developer_attempt = (
+            bool(CURRENT_SESSION.get("is_developer"))
+            or str(self._auth_identifier or "").strip().upper()
+            == DEVELOPER_USERNAME
+        )
+        if not is_developer_attempt:
+            try:
+                from supabase_client import supabase
+                supabase.auth.sign_out()
+            except Exception:
+                pass
         try:
             reset_current_session()
         except Exception:

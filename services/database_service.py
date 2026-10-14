@@ -16,10 +16,6 @@ import services.numbering_service as numbering_service
 
 logger = logging.getLogger(__name__)
 
-# Performance cache (in-memory)
-# Autocomplete harus mengikuti perubahan master yang masuk dari Supabase -> SQLite.
-# Cache lama bersifat permanen per sesi sehingga bisa menahan daftar kosong/lama
-# sampai aplikasi direstart. Sekarang cache memakai TTL + fingerprint DB lokal.
 _AUTOCOMPLETE_CACHE = {}
 _AUTOCOMPLETE_CACHE_TTL = 5.0
 

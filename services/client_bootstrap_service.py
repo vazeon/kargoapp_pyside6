@@ -184,7 +184,6 @@ def _clear_client_seed_area(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM cabang_wilayah")
     conn.execute("DELETE FROM numbering_settings")
     conn.execute("DELETE FROM data_cabang")
-    conn.execute("DELETE FROM master_option")
     conn.execute("DELETE FROM pengaturan_sistem")
 
 

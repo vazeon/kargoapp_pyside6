@@ -253,6 +253,7 @@ class ResponsiveUIScaler(QObject):
             on_scale_changed: Optional[Callable[[float], None]] = None,
     ) -> None:
         super().__init__(root)
+        self._initialized = False
         self._root = root
         self._on_scale_changed = on_scale_changed
         self._scale: Optional[float] = None
@@ -260,6 +261,7 @@ class ResponsiveUIScaler(QObject):
         self._applying = False
         self._spacer_bases = {}
         self._install_filters()
+        self._initialized = True
 
     @property
     def scale(self) -> float:
@@ -309,7 +311,9 @@ class ResponsiveUIScaler(QObject):
         self.schedule_apply()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if self._applying:
+        if not getattr(self, "_initialized", False):
+            return False
+        if getattr(self, "_applying", True):
             return False
 
         event_type = event.type()

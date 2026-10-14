@@ -10,7 +10,7 @@ from audit_context import install_sqlite_audit_functions
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_NAME = "database_cargo.db"
-DB_SCHEMA_VERSION = 17
+DB_SCHEMA_VERSION = 18
 
 _SCHEMA_STATEMENTS = (
     """
@@ -1026,7 +1026,6 @@ def _migration_v6(cursor) -> None:
 
 
 def _migration_v7(cursor) -> None:
-    """Fondasi konfigurasi generic: penomoran dokumen + master opsi operasional."""
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS numbering_settings (
@@ -1058,33 +1057,6 @@ def _migration_v7(cursor) -> None:
         """
     )
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS master_option (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            option_group TEXT NOT NULL,
-            option_code TEXT NOT NULL,
-            option_label TEXT NOT NULL,
-            kode_cabang TEXT NOT NULL DEFAULT '*',
-            urutan INTEGER NOT NULL DEFAULT 0,
-            aktif INTEGER NOT NULL DEFAULT 1,
-            sync_id TEXT NOT NULL UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            deleted_at TIMESTAMP,
-            UNIQUE (kode_cabang, option_group, option_code)
-        )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_master_option_group
-        ON master_option (option_group, kode_cabang, aktif, urutan)
-        """
-    )
-
-    # Seed default client options sebelum trigger outbox dibuat. Ini hanya
-    # bootstrap konfigurasi; perubahan berikutnya dilakukan dari Settings.
     numbering_defaults = {
         "RESI": ("{CABANG}-{WILAYAH}-{SEQ}", 1000, 0, 5, "NONE"),
         "BUKU_GUDANG": ("BG-{CABANG}-{TAHUN}-{SEQ}", 1, 0, 5, "YEARLY"),
@@ -1106,47 +1078,6 @@ def _migration_v7(cursor) -> None:
                 (branch, doc_type, *values, str(uuid.uuid4())),
             )
 
-    option_defaults = [
-        ("BUKU_STATUS_GUDANG", "DI GUDANG", "DI GUDANG", 10),
-        ("BUKU_STATUS_GUDANG", "PERJALANAN", "PERJALANAN", 20),
-        ("BUKU_STATUS_GUDANG", "SELESAI", "SELESAI", 30),
-        ("BUKU_STATUS_TAGIHAN", "BELUM INVOICE", "BELUM INVOICE", 10),
-        ("BUKU_STATUS_TAGIHAN", "BELUM LUNAS", "BELUM LUNAS", 20),
-        ("BUKU_STATUS_TAGIHAN", "LUNAS", "LUNAS", 30),
-        ("BUKU_STATUS_TAGIHAN", "MACET", "MACET", 40),
-        ("BUKU_METODE_PEMBAYARAN", "TF / INVOICE", "TF / INVOICE", 10),
-        ("BUKU_METODE_PEMBAYARAN", "CASH", "CASH", 20),
-        ("ARMADA_JENIS_TRUK", "TB", "TB", 10),
-        ("ARMADA_JENIS_TRUK", "TRONTON", "Tronton", 20),
-        ("ARMADA_JENIS_TRUK", "CDD", "CDD", 30),
-        ("ARMADA_JENIS_TRUK", "PICK-UP", "Pick-up", 40),
-        ("ARMADA_JENIS_TRUK", "LAINNYA", "Lainnya...", 50),
-    ]
-    for group, code, label, order in option_defaults:
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO master_option(
-                option_group, option_code, option_label, kode_cabang,
-                urutan, aktif, sync_id
-            ) VALUES (?, ?, ?, '*', ?, 1, ?)
-            """,
-            (group, code, label, order, str(uuid.uuid4())),
-        )
-    destinations = cursor.execute(
-        "SELECT DISTINCT TRIM(tujuan) FROM kapal WHERE TRIM(COALESCE(tujuan,'')) <> ''"
-    ).fetchall()
-    for idx, (destination,) in enumerate(destinations, start=100):
-        label = str(destination).strip().upper()
-        code = ' '.join(label.split())
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO master_option(
-                option_group, option_code, option_label, kode_cabang,
-                urutan, aktif, sync_id
-            ) VALUES ('ARMADA_TUJUAN_KAPAL', ?, ?, '*', ?, 1, ?)
-            """,
-            (code, label, idx, str(uuid.uuid4())),
-        )
 
     # Local outbox triggers. Saat initial/incremental pull berjalan,
     # sync_control.suppress_outbox mencegah loop balik ke server.
@@ -1204,60 +1135,6 @@ def _migration_v7(cursor) -> None:
           VALUES('numbering_settings',OLD.sync_id,'DELETE',{num_payload_old});
         END
     """)
-
-    opt_payload_new = "json_object(" + ", ".join([
-        "'option_group', NEW.option_group",
-        "'option_code', NEW.option_code",
-        "'option_label', NEW.option_label",
-        "'kode_cabang', NEW.kode_cabang",
-        "'urutan', NEW.urutan",
-        "'aktif', NEW.aktif",
-        "'sync_id', NEW.sync_id",
-        "'created_at', NEW.created_at",
-        "'updated_at', NEW.updated_at",
-        "'deleted_at', NEW.deleted_at",
-        "'created_by_user_id', NEW.created_by_user_id",
-        "'created_by_username', NEW.created_by_username",
-        "'created_by_name', NEW.created_by_name",
-        "'updated_by_user_id', NEW.updated_by_user_id",
-        "'updated_by_username', NEW.updated_by_username",
-        "'updated_by_name', NEW.updated_by_name",
-    ]) + ")"
-    opt_payload_old = opt_payload_new.replace('NEW.', 'OLD.')
-    for name in (
-        'trg_local_master_option_insert',
-        'trg_local_master_option_update',
-        'trg_local_master_option_delete',
-    ):
-        cursor.execute(f'DROP TRIGGER IF EXISTS {name}')
-    cursor.execute(f"""
-        CREATE TRIGGER trg_local_master_option_insert
-        AFTER INSERT ON master_option
-        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
-        BEGIN
-          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
-          VALUES('master_option',NEW.sync_id,'INSERT',{opt_payload_new});
-        END
-    """)
-    cursor.execute(f"""
-        CREATE TRIGGER trg_local_master_option_update
-        AFTER UPDATE ON master_option
-        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
-        BEGIN
-          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
-          VALUES('master_option',NEW.sync_id,'UPDATE',{opt_payload_new});
-        END
-    """)
-    cursor.execute(f"""
-        CREATE TRIGGER trg_local_master_option_delete
-        AFTER DELETE ON master_option
-        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
-        BEGIN
-          INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
-          VALUES('master_option',OLD.sync_id,'DELETE',{opt_payload_old});
-        END
-    """)
-
 
 
 def _migration_v8(cursor) -> None:
@@ -1432,12 +1309,6 @@ def _migration_v8(cursor) -> None:
 
 
 def _migration_v9(cursor) -> None:
-    """Kunci wilayah Mahkota menjadi 3 wilayah tetap.
-
-    master_wilayah tetap merupakan tabel lokal SQLite karena dipakai sebagai
-    referensi UI/validasi dan parent untuk cabang_wilayah. Tabel ini tidak lagi
-    disinkronkan ke Supabase dan tidak boleh berkembang dari Settings.
-    """
     fixed_regions = (
         ("KALTIM", "KALIMANTAN TIMUR", 10),
         ("KALSEL", "KALIMANTAN SELATAN", 20),
@@ -1446,8 +1317,6 @@ def _migration_v9(cursor) -> None:
     allowed = tuple(row[0] for row in fixed_regions)
     placeholders = ", ".join("?" for _ in allowed)
 
-    # Hapus relasi wilayah lama terlebih dahulu karena cabang_wilayah
-    # mempunyai foreign key ke master_wilayah pada SQLite lokal.
     cursor.execute(
         f"DELETE FROM cabang_wilayah WHERE kode_wilayah NOT IN ({placeholders})",
         allowed,
@@ -1481,8 +1350,6 @@ def _migration_v9(cursor) -> None:
             (kode, nama, urutan, sync_id),
         )
 
-    # Pengaturan tujuan juga dikunci ke tiga wilayah yang sama agar dropdown
-    # Resi/Buku Gudang/Kontak tidak dapat kembali menampilkan wilayah tambahan.
     cursor.execute(
         "INSERT OR REPLACE INTO pengaturan_sistem(kunci, nilai) VALUES (?, ?)",
         (
@@ -1499,14 +1366,7 @@ def _migration_v9(cursor) -> None:
     )
 
 
-
 def _migration_v10(cursor) -> None:
-    """Bersihkan cabang dummy lama TEST/PUSAT pada database Mahkota.
-
-    Hanya dijalankan bila database sudah mengenal SBY dan JKT, sehingga
-    migration ini tidak mengubah database white-label/non-Mahkota yang belum
-    memiliki struktur cabang Mahkota.
-    """
     def table_exists(name: str) -> bool:
         return cursor.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
@@ -1578,7 +1438,6 @@ def _migration_v10(cursor) -> None:
     )
 
 
-
 def _migration_v11(cursor) -> None:
     """Audit identitas pembuat/perubahan untuk seluruh tabel data aplikasi."""
     audit_tables = {
@@ -1600,7 +1459,6 @@ def _migration_v11(cursor) -> None:
         "cabang_wilayah": ["id"],
         "numbering_settings": ["id"],
         "numbering_counters": ["id"],
-        "master_option": ["id"],
         "resi_audit": ["id_audit"],
     }
 
@@ -1689,13 +1547,6 @@ def _migration_v11(cursor) -> None:
 
 
 def _migration_v12(cursor) -> None:
-    """Perbaiki snapshot actor pada sync_outbox untuk Resi dan detail.
-
-    Outbox dibuat di trigger SQLite. Trigger harus membawa identitas pembuat
-    dari ROW lokal saat perubahan terjadi, bukan mengandalkan user yang sedang
-    login ketika antrean akhirnya dikirim ke Supabase.
-    """
-    # --- data_resi ---------------------------------------------------------
     payload_insert = "json_object(" + ", ".join([
         "'no_resi', NEW.no_resi",
         "'kode_cabang', NEW.kode_cabang",
@@ -1934,7 +1785,6 @@ def _migration_v12(cursor) -> None:
     """)
 
 
-
 def _migration_v13(cursor) -> None:
     """Fondasi sync Buku Gudang: sync_id, soft-delete, actor snapshot, dan outbox."""
     table = "buku_gudang"
@@ -2068,13 +1918,6 @@ def _migration_v13(cursor) -> None:
     """)
 
 def _migration_v14(cursor) -> None:
-    """Lengkapi metadata sync untuk master operasional lama.
-
-    Tabel master_pengirim/master_penerima/truk/kapal dibuat pada schema awal
-    sebelum fondasi offline-first diperluas. Schema lama itu belum memiliki
-    sync_id/deleted_at, padahal services.sync_service sudah mensyaratkan kedua
-    kolom tersebut. Migration ini dibuat idempotent dan aman untuk DB existing.
-    """
     tables = (
         "master_pengirim",
         "master_penerima",
@@ -2111,17 +1954,7 @@ def _migration_v14(cursor) -> None:
         )
 
 
-
 def _migration_v15(cursor) -> None:
-    """Pastikan Buku Gudang lama/baru benar-benar masuk antrean push.
-
-    Buku Gudang adalah projection dari transaksi Resi. Versi sebelumnya sudah
-    memasang trigger/outbox, tetapi database yang pernah dibuat sebelum trigger
-    terpasang dapat memiliki row buku_gudang tanpa outbox. Migration ini:
-    - memastikan schema/trigger Buku Gudang tetap terpasang;
-    - membuat ulang antrean INSERT untuk row lokal yang belum tersinkron;
-    - tidak membuat antrean baru untuk row yang sudah ditandai synced.
-    """
     _migration_v13(cursor)
 
     rows = cursor.execute(
@@ -2185,18 +2018,6 @@ def _migration_v15(cursor) -> None:
         )
 
 def _migration_v16(cursor) -> None:
-    """Tambahkan outbox trigger two-way untuk master pengirim/penerima, truk, dan kapal.
-
-    Versi sebelumnya memiliki kolom sync_id/deleted_at pada empat master, tetapi
-    belum memiliki trigger lokal yang memasukkan INSERT/UPDATE/DELETE ke sync_outbox.
-    Akibatnya data master baru/hasil edit dapat tersimpan di SQLite namun tidak
-    pernah masuk antrean push ke Supabase.
-
-    Migration ini hanya memasang trigger. Rekonsiliasi row legacy yang belum
-    tersinkron ditangani oleh sync_service setelah pull server memberi tanda
-    is_synced=1 pada row yang memang berasal dari server.
-    """
-    # Pastikan kolom inti tersedia sebelum trigger dibuat.
     required = {
         "master_penerima": (
             "id_penerima", "kode_cabang", "nama", "no_hp", "alamat", "kota",
@@ -2315,9 +2136,6 @@ def _migration_v16(cursor) -> None:
                 f"Migration v16: schema {table} belum lengkap; kolom hilang: {', '.join(missing)}"
             )
 
-        # Row yang dibuat sebelum trigger v16 bisa belum memiliki sync_id.
-        # Beri identitas lintas perangkat sekarang agar dapat diantrikan oleh
-        # sync_service tanpa perlu menghapus atau menginput ulang data.
         rows_without_sync_id = cursor.execute(
             f"SELECT rowid FROM {table} WHERE sync_id IS NULL OR TRIM(sync_id) = ''"
         ).fetchall()
@@ -2390,7 +2208,6 @@ def _migration_v16(cursor) -> None:
                 VALUES ('{table}', {old_key_expr}, 'DELETE', {delete_expr});
             END
         """)
-
 
 
 def _migration_v17(cursor) -> None:
@@ -2598,6 +2415,12 @@ def _pastikan_bootstrap_cabang_minimal(cursor) -> None:
     )
 
 
+def _migration_v18(cursor) -> None:
+    cursor.execute("DELETE FROM sync_outbox WHERE table_name = 'master_option'")
+    cursor.execute("DELETE FROM sync_conflicts WHERE table_name = 'master_option'")
+    cursor.execute("DROP TABLE IF EXISTS master_option")
+
+
 _SCHEMA_MIGRATIONS = {
     1: _migration_v1,
     2: _migration_v2,
@@ -2616,6 +2439,7 @@ _SCHEMA_MIGRATIONS = {
     15: _migration_v15,
     16: _migration_v16,
     17: _migration_v17,
+    18: _migration_v18,
 }
 
 

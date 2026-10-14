@@ -21,28 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_ENV_PATH = BASE_DIR / "app_env.json"
 DEFAULT_DATABASE_NAME = "database_cargo.db"
-# Database khusus sandbox akun developer/offline tester.
-# File ini sengaja dipisahkan dari database online agar perubahan tester
-# tidak pernah ikut masuk ke sync_outbox milik database online.
+# sandbox db file
 DEVELOPER_DATABASE_NAME = "database_cargo_dev.db"
-
-
-def _muat_app_environment() -> Dict[str, Any]:
-    """Membaca app_env.json; konfigurasi rusak tetap jatuh ke default."""
-    if not APP_ENV_PATH.exists():
-        return {}
-    try:
-        with APP_ENV_PATH.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        print(f"INFO: app_env.json tidak dapat dibaca: {exc}")
-        return {}
-
-
-APP_ENV_DATA = _muat_app_environment()
 
 
 def _normalisasi_path_database(path_value: Any) -> str:
@@ -54,8 +35,10 @@ def _normalisasi_path_database(path_value: Any) -> str:
     return str(database_path.resolve())
 
 
+# Database utama dapat dioverride melalui environment bila diperlukan.
+# Tanpa override, aplikasi selalu memakai database_cargo.db di folder aplikasi.
 db_aktif = _normalisasi_path_database(
-    APP_ENV_DATA.get("active_db", DEFAULT_DATABASE_NAME)
+    os.getenv("KARGO_DATABASE_PATH", DEFAULT_DATABASE_NAME)
 )
 
 # Hak akses cabang operasional Mahkota:
@@ -97,14 +80,11 @@ def reset_current_session() -> None:
     CURRENT_SESSION.update(_session_default(db_aktif))
 
 
+# Akun developer opsional; username dapat dioverride melalui environment.
 DEVELOPER_USERNAME = str(
-    os.getenv(
-        "KARGO_DEV_USERNAME",
-        APP_ENV_DATA.get("developer_username", "DEV_SUPER"),
-    )
-    or "DEV_SUPER"
+    os.getenv("KARGO_DEV_USERNAME", "DEV_SUPER") or "DEV_SUPER"
 ).strip().upper()
-# Jangan pernah menyimpan password developer di app_env.json/source.
+# Password developer hanya dibaca dari environment, bukan dari file konfigurasi.
 # .env lokal tetap dibaca oleh supabase_client.py melalui load_dotenv().
 DEVELOPER_PASSWORD = str(os.getenv("KARGO_DEV_PASSWORD", "") or "")
 
@@ -290,14 +270,18 @@ def _verifikasi_login_developer(
     ):
         return None
 
-    # Putuskan session Supabase bila ada agar DEV_SUPER benar-benar offline.
-    try:
-        supabase.auth.sign_out()
-    except Exception:
-        pass
+    # Bersihkan state aplikasi secara lokal saja. Jangan memanggil sign_out()
+    # karena DEV_SUPER harus bisa berjalan tanpa request Supabase apa pun.
+    reset_current_session()
 
     # Pastikan sesi developer selalu diarahkan ke DB sandbox, bukan DB online.
-    CURRENT_SESSION["db_name"] = _normalisasi_path_database(DEVELOPER_DATABASE_NAME)
+    # Inisialisasi schema lokal sebelum memuat branch scope agar login pertama
+    # (saat file database sandbox belum ada) tetap bersih tanpa query yang gagal.
+    from database_manager import init_db
+
+    CURRENT_SESSION["db_name"] = init_db(
+        _normalisasi_path_database(DEVELOPER_DATABASE_NAME)
+    )
     CURRENT_SESSION.update({
         "auth_email": "",
         "id_user": DEVELOPER_USERNAME,
@@ -806,6 +790,12 @@ def verifikasi_login_sistem(
             login_identifier,
             password,
         )
+
+    # DEV_SUPER adalah username lokal yang dicadangkan. Kredensial yang salah
+    # tidak boleh jatuh ke jalur login lokal lain sebagai fallback.
+    if username == DEVELOPER_USERNAME:
+        hasil_developer = _verifikasi_login_developer(username, password)
+        return hasil_developer or (False, None, None)
 
     hasil_developer = _verifikasi_login_developer(username, password)
     if hasil_developer is not None:

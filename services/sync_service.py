@@ -17,8 +17,8 @@ from supabase_client import supabase
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 50
-TABLES = {"data_resi", "data_resi_detail", "cabang_wilayah", "numbering_settings", "numbering_counters", "master_option", "master_penerima", "master_pengirim", "truk", "kapal", "buku_gudang", "manifest"}
-MASTER_TABLES = {"cabang_wilayah", "numbering_settings", "numbering_counters", "master_option", "master_penerima", "master_pengirim", "truk", "kapal", "buku_gudang", "manifest"}
+TABLES = {"data_resi", "data_resi_detail", "cabang_wilayah", "numbering_settings", "numbering_counters", "master_penerima", "master_pengirim", "truk", "kapal", "buku_gudang", "manifest"}
+MASTER_TABLES = {"cabang_wilayah", "numbering_settings", "numbering_counters", "master_penerima", "master_pengirim", "truk", "kapal", "buku_gudang", "manifest"}
 
 
 class SyncConflictError(RuntimeError):
@@ -70,13 +70,6 @@ SYNC_COLUMNS = {
         "kode_cabang", "document_type", "series_code",
         "starting_count", "current_count", "padding", "aktif",
         "sync_id", "created_at", "updated_at", "deleted_at",
-        "created_by_user_id", "created_by_username", "created_by_name",
-        "updated_by_user_id", "updated_by_username", "updated_by_name",
-    },
-    "master_option": {
-        "option_group", "option_code", "option_label", "kode_cabang",
-        "urutan", "aktif", "sync_id", "created_at",
-        "updated_at", "deleted_at",
         "created_by_user_id", "created_by_username", "created_by_name",
         "updated_by_user_id", "updated_by_username", "updated_by_name",
     },
@@ -146,7 +139,6 @@ SYNC_REQUIRED = {
     "cabang_wilayah": {"kode_cabang", "kode_wilayah", "sync_id"},
     "numbering_settings": {"kode_cabang", "document_type", "sync_id"},
     "numbering_counters": {"kode_cabang", "document_type", "series_code", "sync_id"},
-    "master_option": {"option_group", "option_code", "sync_id"},
     "master_penerima": {"id_penerima", "kode_cabang", "sync_id"},
     "master_pengirim": {"id_pengirim", "kode_cabang", "sync_id"},
     "truk": {"kode_cabang", "no_polisi", "sync_id"},
@@ -388,11 +380,6 @@ def _json_payload(table_name: str, value: Any) -> Dict[str, Any]:
         for key in ("starting_count", "current_count", "padding"):
             if key in payload:
                 payload[key] = _to_int(payload.get(key), 0)
-        payload["aktif"] = 1 if payload.get("aktif", True) else 0
-
-    elif table == "master_option":
-        if "urutan" in payload:
-            payload["urutan"] = _to_int(payload.get("urutan"), 0)
         payload["aktif"] = 1 if payload.get("aktif", True) else 0
 
     if isinstance(payload.get("rincian_json"), str):
@@ -739,14 +726,6 @@ def _server_upsert(table_name: str, operation: str, payload: Dict[str, Any]) -> 
                 .insert(clean)
                 .execute()
             )
-    elif table_name == "master_option":
-        clean.pop("id", None)
-        response = (
-            supabase
-            .table("master_option")
-            .upsert(clean, on_conflict="sync_id")
-            .execute()
-        )
     elif table_name == "master_penerima":
         clean.pop("is_synced", None)
         response = (
@@ -1271,7 +1250,7 @@ def push_pending(limit: int = BATCH_SIZE) -> int:
               AND table_name IN (
                   'cabang_wilayah',
                   'numbering_settings', 'numbering_counters',
-                  'master_option', 'master_penerima', 'master_pengirim', 'truk', 'kapal',
+                  'master_penerima', 'master_pengirim', 'truk', 'kapal',
                   'buku_gudang', 'manifest',
                   'data_resi', 'data_resi_detail'
               )
@@ -1280,7 +1259,6 @@ def push_pending(limit: int = BATCH_SIZE) -> int:
                     WHEN 'cabang_wilayah' THEN 1
                     WHEN 'numbering_settings' THEN 2
                     WHEN 'numbering_counters' THEN 3
-                    WHEN 'master_option' THEN 4
                     WHEN 'master_penerima' THEN 5
                     WHEN 'master_pengirim' THEN 6
                     WHEN 'truk' THEN 7
@@ -1708,30 +1686,6 @@ def _apply_remote_numbering_counter(conn, payload: Dict[str, Any], *, force: boo
     return True
 
 
-def _apply_remote_option(conn, payload: Dict[str, Any], *, force: bool = False) -> bool:
-    sid = str(payload.get("sync_id") or "").strip()
-    group = str(payload.get("option_group") or "").strip().upper()
-    code = str(payload.get("option_code") or "").strip().upper()
-    scope = str(payload.get("kode_cabang") or "*").strip().upper() or "*"
-    if not sid or not group or not code:
-        return False
-    local = conn.execute("SELECT updated_at FROM master_option WHERE sync_id=? LIMIT 1", (sid,)).fetchone()
-    if not force and local and _parse_dt(local[0]) and _parse_dt(payload.get("updated_at")) and _parse_dt(payload.get("updated_at")) <= _parse_dt(local[0]):
-        return False
-    conn.execute("""
-        INSERT INTO master_option(option_group,option_code,option_label,kode_cabang,urutan,aktif,sync_id,created_at,updated_at,deleted_at,
-                                  created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(kode_cabang,option_group,option_code) DO UPDATE SET
-          option_label=excluded.option_label, urutan=excluded.urutan, aktif=excluded.aktif, sync_id=excluded.sync_id,
-          created_at=excluded.created_at, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at,
-          created_by_user_id=excluded.created_by_user_id, created_by_username=excluded.created_by_username, created_by_name=excluded.created_by_name,
-          updated_by_user_id=excluded.updated_by_user_id, updated_by_username=excluded.updated_by_username, updated_by_name=excluded.updated_by_name
-    """, (group,code,str(payload.get("option_label") or code),scope,_to_int(payload.get("urutan"),0),1 if payload.get("aktif",True) else 0,sid,payload.get("created_at"),payload.get("updated_at"),payload.get("deleted_at"),
-           payload.get("created_by_user_id"),payload.get("created_by_username"),payload.get("created_by_name"),payload.get("updated_by_user_id"),payload.get("updated_by_username"),payload.get("updated_by_name")))
-    return True
-
-
 def _master_remote_is_newer(local_updated_at, remote_updated_at, force: bool) -> bool:
     if force:
         return True
@@ -2151,7 +2105,7 @@ def _validate_local_master_sync_schema(conn):
 def sync_generic_masters() -> Dict[str, int]:
     if not _session_ready():
         return {
-            "numbering": 0, "numbering_counters": 0, "options": 0,
+            "numbering": 0, "numbering_counters": 0,
             "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "manifest": 0,
         }
 
@@ -2164,11 +2118,6 @@ def sync_generic_masters() -> Dict[str, int]:
         "numbering_counters",
         columns="kode_cabang,document_type,series_code,starting_count,current_count,padding,aktif,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name",
         page_size=1000,
-    )
-    options = _fetch_all(
-        "master_option",
-        columns="option_group,option_code,option_label,kode_cabang,urutan,aktif,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name",
-        page_size=500,
     )
     penerima = _fetch_all(
         "master_penerima",
@@ -2203,7 +2152,7 @@ def sync_generic_masters() -> Dict[str, int]:
 
     conn = _connect()
     _ensure_buku_gudang_local_schema(conn)
-    counts = {"numbering": 0, "numbering_counters": 0, "options": 0, "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "buku_gudang": 0, "manifest": 0}
+    counts = {"numbering": 0, "numbering_counters": 0, "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "buku_gudang": 0, "manifest": 0}
     try:
         _set_suppress(conn, True)
         repaired = _repair_unqueued_local_sync_rows(conn, {
@@ -2223,8 +2172,6 @@ def sync_generic_masters() -> Dict[str, int]:
             if _apply_remote_numbering(conn, row, force=False): counts["numbering"] += 1
         for row in counters:
             if _apply_remote_numbering_counter(conn, row, force=False): counts["numbering_counters"] += 1
-        for row in options:
-            if _apply_remote_option(conn, row, force=False): counts["options"] += 1
         for row in penerima:
             key = str(row.get("sync_id") or "").strip()
             if key and _local_has_pending_or_conflict(conn, "master_penerima", key):
@@ -2266,7 +2213,6 @@ def sync_generic_masters() -> Dict[str, int]:
         for table_name, rows in (
             ("numbering_settings", numbering),
             ("numbering_counters", counters),
-            ("master_option", options),
             ("master_penerima", penerima),
             ("master_pengirim", pengirim),
             ("truk", truk),
@@ -2515,7 +2461,7 @@ def pull_server_changes(limit: int = BATCH_SIZE) -> int:
             .gt("id", cursor)
             .in_("table_name", [
                 "data_resi", "data_resi_detail", "numbering_settings", "numbering_counters",
-                "master_option", "cabang_wilayah", "master_penerima", "master_pengirim", "truk", "kapal", "buku_gudang", "manifest"
+                "cabang_wilayah", "master_penerima", "master_pengirim", "truk", "kapal", "buku_gudang", "manifest"
             ])
             .order("id", desc=False)
             .limit(int(limit))
@@ -2583,8 +2529,6 @@ def pull_server_changes(limit: int = BATCH_SIZE) -> int:
                     _apply_remote_numbering(conn, payload, force=True)
                 elif table_name == "numbering_counters":
                     _apply_remote_numbering_counter(conn, payload, force=True)
-                elif table_name == "master_option":
-                    _apply_remote_option(conn, payload, force=True)
                 elif table_name == "cabang_wilayah":
                     applied_wilayah = _apply_remote_cabang_wilayah(conn, payload, force=True)
                     if not applied_wilayah:
@@ -2735,7 +2679,6 @@ def _local_is_safe_for_initial_sync(conn) -> bool:
     database_manager dan seed client memang boleh membuat baris default seperti:
     - cabang_wilayah
     - numbering_settings / numbering_counters
-    - master_option
     - cabang internal DEV_SYS
 
     Baris-baris tersebut bukan bukti bahwa perangkat sudah memiliki data
@@ -3465,7 +3408,6 @@ def _delete_local_by_server_absence(conn, table_name: str, record_key: str) -> N
         "cabang_wilayah": "sync_id",
         "numbering_settings": "sync_id",
         "numbering_counters": "sync_id",
-        "master_option": "sync_id",
         "master_penerima": "sync_id",
         "master_pengirim": "sync_id",
         "truk": "sync_id",
@@ -3493,8 +3435,6 @@ def _row_in_authoritative_scope(conn, table_name: str, row: tuple, columns: list
     if table_name == "kapal":
         return True
     branch = str(data.get("kode_cabang") or "").strip().upper()
-    if table_name == "master_option" and branch == "*":
-        return True
     return branch in allowed_branches
 
 
@@ -3786,12 +3726,12 @@ def _reconcile_existing_db_snapshot(conn) -> Dict[str, int]:
 def initial_sync() -> Dict[str, int]:
     """Isi SQLite baru dari snapshot Supabase sebelum incremental sync dimulai."""
     if not _session_ready():
-        return {"branches": 0, "wilayah": 0, "cabang_wilayah": 0, "numbering": 0, "options": 0, "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "buku_gudang": 0, "manifest": 0, "resi": 0, "details": 0}
+        return {"branches": 0, "wilayah": 0, "cabang_wilayah": 0, "numbering": 0, "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "buku_gudang": 0, "manifest": 0, "resi": 0, "details": 0}
 
     conn = _connect()
     try:
         if _bootstrap_state(conn) == "1":
-            return {"branches": 0, "wilayah": 0, "cabang_wilayah": 0, "numbering": 0, "options": 0, "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "buku_gudang": 0, "manifest": 0, "resi": 0, "details": 0}
+            return {"branches": 0, "wilayah": 0, "cabang_wilayah": 0, "numbering": 0, "master_penerima": 0, "master_pengirim": 0, "truk": 0, "kapal": 0, "buku_gudang": 0, "manifest": 0, "resi": 0, "details": 0}
 
         if not _local_is_safe_for_initial_sync(conn):
             # DB lama/non-kosong kini disamakan dengan snapshot server terkini.
@@ -3824,7 +3764,6 @@ def initial_sync() -> Dict[str, int]:
                 "wilayah": 0,
                 "cabang_wilayah": 0,
                 "numbering": 0,
-                "options": 0,
                 "resi": int(recovery.get("resi", 0)),
                 "details": int(recovery.get("details", 0)),
             }
@@ -3856,7 +3795,6 @@ def initial_sync() -> Dict[str, int]:
         page_size=500,
     )
     numbering_rows = _fetch_all("numbering_settings", columns="kode_cabang,document_type,format_template,starting_count,current_count,padding,reset_rule,aktif,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name", page_size=500)
-    option_rows = _fetch_all("master_option", columns="option_group,option_code,option_label,kode_cabang,urutan,aktif,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name", page_size=500)
     penerima_rows = _fetch_all("master_penerima", columns="id_penerima,kode_cabang,nama,no_hp,alamat,kota,provinsi,total_transaksi,pembayaran,status_tagihan,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name", page_size=500)
     pengirim_rows = _fetch_all("master_pengirim", columns="id_pengirim,kode_cabang,nama,no_hp,alamat,kota,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name", page_size=500)
     truk_rows = _fetch_all("truk", columns="kode_cabang,jenis_truk,no_polisi,nama_sopir,hp_sopir,ket_truk,foto_truk,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name", page_size=500)
@@ -3869,7 +3807,7 @@ def initial_sync() -> Dict[str, int]:
     conn = _connect()
     _ensure_buku_gudang_local_schema(conn)
     applied_branches = applied_cabang_wilayah = 0
-    applied_numbering = applied_options = 0
+    applied_numbering = 0
     applied_master_penerima = applied_master_pengirim = 0
     applied_truk = applied_kapal = applied_buku_gudang = applied_manifest = 0
     applied_resi = applied_details = 0
@@ -3888,10 +3826,6 @@ def initial_sync() -> Dict[str, int]:
         for payload in numbering_rows:
             if _apply_remote_numbering(conn, payload, force=True):
                 applied_numbering += 1
-
-        for payload in option_rows:
-            if _apply_remote_option(conn, payload, force=True):
-                applied_options += 1
 
         for payload in penerima_rows:
             if _apply_remote_master_penerima(conn, payload, force=True):
@@ -3940,7 +3874,6 @@ def initial_sync() -> Dict[str, int]:
             "branches": applied_branches,
             "cabang_wilayah": applied_cabang_wilayah,
             "numbering": applied_numbering,
-            "options": applied_options,
             "master_penerima": applied_master_penerima,
             "master_pengirim": applied_master_pengirim,
             "truk": applied_truk,
@@ -4105,7 +4038,6 @@ def sync_once() -> Dict[str, int]:
         "cabang_wilayah": int(wilayah.get("cabang_wilayah", 0)),
         "numbering": int(generic.get("numbering", 0)),
         "numbering_counters": int(generic.get("numbering_counters", 0)),
-        "options": int(generic.get("options", 0)),
         "master_penerima": int(generic.get("master_penerima", 0)),
         "master_pengirim": int(generic.get("master_pengirim", 0)),
         "truk": int(generic.get("truk", 0)),
