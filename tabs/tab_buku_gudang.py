@@ -18,8 +18,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QPalette
 
-import qdarktheme
-
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -51,31 +49,6 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-_BUKU_GUDANG_TABBAR_QSS_CACHE = {}
-
-def _stylesheet_tabbar_buku_gudang(is_dark: bool) -> str:
-    """QDarkTheme scoped only to the small region tab bar, not the whole page."""
-    tema = "dark" if is_dark else "light"
-    qss = _BUKU_GUDANG_TABBAR_QSS_CACHE.get(tema)
-    if qss is None:
-        # Keep QDarkTheme colors/hover/selected states, but explicitly restore
-        # comfortable vertical padding for the nested region tabs. Applying the
-        # stylesheet only to this tab bar otherwise makes its tabs much shorter
-        # than the app's other navigation tabs.
-        qss = qdarktheme.load_stylesheet(tema) + "\n" + r'''
-QTabBar::tab {
-    padding: 5px 12px;
-}
-QTabBar::tab:selected {
-    padding: 5px 12px;
-}
-QTabBar::tab:hover {
-    padding: 5px 12px;
-}
-'''
-        _BUKU_GUDANG_TABBAR_QSS_CACHE[tema] = qss
-    return qss
-
 
 from config import CURRENT_SESSION, DATA_CLIENT
 
@@ -83,29 +56,6 @@ import services.database_service as db_service
 
 from utils.frozen_table_helper import FrozenTableWidget
 from utils import zoom as zoom_helper
-from utils.modules.buku_gudang_metrics import (
-    BUKU_GUDANG_AUTOCOMPLETE_MAX_VISIBLE_ITEMS,
-    BUKU_GUDANG_BILLING_STATUS_BUTTON_SIZE,
-    BUKU_GUDANG_COLUMN_WIDTH_MAX,
-    BUKU_GUDANG_COLUMN_WIDTH_MIN,
-    BUKU_GUDANG_DEFAULT_COLUMN_WIDTHS,
-    BUKU_GUDANG_DIALOG_ACTION_GAP,
-    BUKU_GUDANG_DIALOG_PENAGIH_MIN_WIDTH,
-    BUKU_GUDANG_FALLBACK_COLUMN_WIDTH,
-    BUKU_GUDANG_HEADER_CONTROL_HEIGHT,
-    BUKU_GUDANG_HEADER_MARGINS,
-    BUKU_GUDANG_HEADER_SPACING,
-    BUKU_GUDANG_MAIN_MARGINS,
-    BUKU_GUDANG_MAIN_SPACING,
-    BUKU_GUDANG_MONTH_BUTTON_SIZE,
-    BUKU_GUDANG_MONTH_CHECKBOX_MIN_WIDTH,
-    BUKU_GUDANG_PRIMARY_ROW_SPACING,
-    BUKU_GUDANG_RESET_FILTER_BUTTON_SIZE,
-    BUKU_GUDANG_SEARCH_WIDTH,
-    BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT,
-    BUKU_GUDANG_TABLE_TAB_MARGINS,
-    BUKU_GUDANG_YEAR_BUTTON_SIZE,
-)
 from utils.typography import (
     APPLICATION_NAME,
     ORGANIZATION_NAME,
@@ -130,6 +80,7 @@ from delegates.status_delegate import (
 
 from themes.modules.buku_gudang import (
     get_buku_gudang_action_styles,
+    get_buku_gudang_tabbar_styles,
     get_buku_gudang_menu_style,
     get_buku_gudang_status_colors,
     get_buku_gudang_styles,
@@ -138,6 +89,46 @@ from themes.modules.buku_gudang import (
 )
 from utils.input_style_helper import paksa_kapital_lineedit, terapkan_style_input_global
 
+
+BUKU_GUDANG_DIALOG_PENAGIH_MIN_WIDTH = 350
+BUKU_GUDANG_DIALOG_ACTION_GAP = 10
+BUKU_GUDANG_HEADER_MARGINS = (8, 0, 8, 0)
+BUKU_GUDANG_HEADER_SPACING = 6
+BUKU_GUDANG_PRIMARY_ROW_SPACING = 8
+BUKU_GUDANG_SEARCH_WIDTH = 340
+BUKU_GUDANG_HEADER_CONTROL_HEIGHT = 32
+BUKU_GUDANG_YEAR_BUTTON_SIZE = (90, 30)
+BUKU_GUDANG_MONTH_BUTTON_SIZE = (115, 30)
+BUKU_GUDANG_BILLING_STATUS_BUTTON_SIZE = (140, 30)
+BUKU_GUDANG_RESET_FILTER_BUTTON_SIZE = (82, 30)
+BUKU_GUDANG_MONTH_CHECKBOX_MIN_WIDTH = 170
+BUKU_GUDANG_MAIN_MARGINS = (0, 6, 0, 0)
+BUKU_GUDANG_MAIN_SPACING = 6
+BUKU_GUDANG_TABLE_TAB_MARGINS = (6, 6, 6, 6)
+BUKU_GUDANG_DEFAULT_COLUMN_WIDTHS = (
+    115,  # RESI
+    95,   # MASUK
+    95,   # KELUAR
+    115,  # STATUS RESI
+    230,  # STATUS PENAGIHAN
+    165,  # TRUK
+    180,  # PENGIRIM
+    130,  # KOTA ASAL
+    180,  # PENERIMA
+    135,  # KOTA TUJUAN
+    180,  # NAMA BARANG
+    70,   # KOLI
+    90,   # BERAT
+    90,   # CBM
+    125,  # ONGKIR
+    120,  # PAYMENT
+    220,  # KETERANGAN
+)
+BUKU_GUDANG_COLUMN_WIDTH_MIN = 20
+BUKU_GUDANG_COLUMN_WIDTH_MAX = 1500
+BUKU_GUDANG_FALLBACK_COLUMN_WIDTH = 110
+BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT = 28
+BUKU_GUDANG_AUTOCOMPLETE_MAX_VISIBLE_ITEMS = 12
 
 class BukuGudangItemDelegate(StatusColorDelegate):
     """Jarak antar-detail khusus Buku Gudang, mengikuti ukuran font tabel."""
@@ -1137,7 +1128,7 @@ class TabBukuGudang(QWidget):
             tab_bar = self.tabs_wilayah.tabBar()
             tema_key = "dark" if is_dark else "light"
             if tab_bar.property("_buku_gudang_tabbar_theme") != tema_key:
-                tab_bar.setStyleSheet(_stylesheet_tabbar_buku_gudang(is_dark))
+                tab_bar.setStyleSheet(get_buku_gudang_tabbar_styles(is_dark))
                 tab_bar.setProperty("_buku_gudang_tabbar_theme", tema_key)
         except (AttributeError, RuntimeError):
             pass
