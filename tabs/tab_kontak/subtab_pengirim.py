@@ -1,4 +1,5 @@
-from PySide6.QtCore import QSettings, Qt, QTimer  # Tambahkan QTimer
+# tabs/tab_kontak/subtab_pengirim.py
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -257,6 +258,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             )
             tabel.setRowHidden(row, not match)
 
+    @db_service.profile_performance("KontakPengirim.search_filter", threshold=0.025)
     def filter_pencarian_tabel(self):
         self._filter_tabel(
             self.tabel_pengirim,
@@ -264,6 +266,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             self.KOLOM_PENCARIAN,
         )
 
+    @db_service.profile_performance("KontakPengirim.search_history", threshold=0.025)
     def filter_pencarian_histori(self):
         self._filter_tabel(
             self.tabel_histori,
@@ -370,6 +373,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         dialog.adjustSize()
         dialog.exec()
 
+    @db_service.profile_performance("KontakPengirim.load_data", threshold=0.05)
     def load_data_pengirim(self):
         self.tabel_pengirim.setUpdatesEnabled(False)
         self.tabel_pengirim.blockSignals(True)

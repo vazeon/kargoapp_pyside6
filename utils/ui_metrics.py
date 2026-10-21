@@ -34,6 +34,10 @@ TAB_MIN_WIDTH = 88
 TAB_PADDING_V = 10
 TAB_PADDING_H = 16
 
+# Baseline padding for nested tabs inside module pages.
+NESTED_TAB_PADDING_V = 5
+NESTED_TAB_PADDING_H = 12
+
 # Tinggi baseline kontrol pada corner-widget kanan MainTabs.
 # Nilai final tetap mengikuti ResponsiveUIScaler.
 # Tinggi kontrol kanan dibuat sedikit lebih lega agar QComboBox tidak ter-clip

@@ -156,6 +156,7 @@ class ResiReadWorker(QThread):
             app.aboutToQuit.connect(self._wait_for_workers)
             app._resi_read_shutdown_hook = True
 
+    @db_service.profile_performance("Resi.database_worker", threshold=0.05)
     def run(self):
         try:
             result = getattr(db_service, self.operation)(*self.args)
@@ -310,7 +311,10 @@ class TabResi(QWidget):
         self._timer_autocomplete_sync.setInterval(10_000)
         self._timer_autocomplete_sync.timeout.connect(self._refresh_autocomplete_sync)
 
-        self.init_ui()
+        with db_service.performance_timer(
+            "Resi.init_ui", threshold=0.02
+        ):
+            self.init_ui()
         self._timer_autocomplete_sync.start()
 
     @staticmethod
@@ -318,52 +322,116 @@ class TabResi(QWidget):
         return CURRENT_SESSION.get("kode_cabang", "PUSAT")
 
     def init_ui(self):
-        layout_utama = QHBoxLayout(self)
-        layout_utama.setContentsMargins(0, 0, 0, 0)
-        styles_awal = konversi_style_font_ke_point(
-            get_resi_static_styles(self.current_theme == "dark")
-        )
+        with db_service.performance_timer(
+            "Resi.init_ui.base_layout", threshold=0.02
+        ):
+            layout_utama = QHBoxLayout(self)
+            layout_utama.setContentsMargins(0, 0, 0, 0)
+            styles_awal = konversi_style_font_ke_point(
+                get_resi_static_styles(self.current_theme == "dark")
+            )
 
-        self.scroll_kiri = QScrollArea()
-        self.scroll_kiri.setMinimumWidth(min(RESI_SCROLL_LEFT_MIN_WIDTH, skalakan_px(360)))
-        self.scroll_kiri.setWidgetResizable(True)
-        self.scroll_kiri.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_kiri.setStyleSheet(styles_awal["scroll_kiri"])
+            self.scroll_kiri = QScrollArea()
+            self.scroll_kiri.setMinimumWidth(min(RESI_SCROLL_LEFT_MIN_WIDTH, skalakan_px(360)))
+            self.scroll_kiri.setWidgetResizable(True)
+            self.scroll_kiri.setFrameShape(QFrame.Shape.NoFrame)
+            self.scroll_kiri.setStyleSheet(styles_awal["scroll_kiri"])
 
-        self.widget_kiri = QWidget()
-        layout_kiri = QVBoxLayout(self.widget_kiri)
-        layout_kiri.setContentsMargins(*RESI_PAGE_MARGINS)
-        layout_kiri.setSpacing(RESI_SPACING)
+            self.widget_kiri = QWidget()
+            layout_kiri = QVBoxLayout(self.widget_kiri)
+            layout_kiri.setContentsMargins(*RESI_PAGE_MARGINS)
+            layout_kiri.setSpacing(RESI_SPACING)
 
-        self._bangun_top_bar(layout_kiri)
-        self._bangun_form_pihak(layout_kiri)
-        self._bangun_detail_barang(layout_kiri)
-        self._bangun_area_pembayaran(layout_kiri)
-        self._bangun_action_bar(layout_kiri)
-        self._bangun_histori()
+        with db_service.performance_timer(
+            "Resi.init_ui.top_bar", threshold=0.02
+        ):
+            self._bangun_top_bar(layout_kiri)
+        with db_service.performance_timer(
+            "Resi.init_ui.form_pihak", threshold=0.02
+        ):
+            self._bangun_form_pihak(layout_kiri)
+        with db_service.performance_timer(
+            "Resi.init_ui.detail_barang", threshold=0.02
+        ):
+            self._bangun_detail_barang(layout_kiri)
+        with db_service.performance_timer(
+            "Resi.init_ui.pembayaran", threshold=0.02
+        ):
+            self._bangun_area_pembayaran(layout_kiri)
+        with db_service.performance_timer(
+            "Resi.init_ui.action_bar", threshold=0.02
+        ):
+            self._bangun_action_bar(layout_kiri)
+        with db_service.performance_timer(
+            "Resi.init_ui.histori", threshold=0.02
+        ):
+            self._bangun_histori()
 
-        self.scroll_kiri.setWidget(self.widget_kiri)
+        with db_service.performance_timer(
+            "Resi.init_ui.splitter", threshold=0.02
+        ):
+            with db_service.performance_timer(
+                "Resi.splitter.attach_left_content", threshold=0.005
+            ):
+                self.scroll_kiri.setWidget(self.widget_kiri)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self.splitter.addWidget(self.scroll_kiri)
-        self.splitter.addWidget(self.widget_kanan)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setSizes(RESI_SPLITTER_INITIAL_SIZES)
-        self.splitter.setHandleWidth(1)
-        self.splitter.setOpaqueResize(True)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 1)
-        self.splitter.splitterMoved.connect(self._jadwalkan_simpan_splitter)
-        self._pulihkan_splitter()
+            with db_service.performance_timer(
+                "Resi.splitter.create", threshold=0.005
+            ):
+                self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
-        layout_utama.addWidget(self.splitter)
+            with db_service.performance_timer(
+                "Resi.splitter.add_left_widget", threshold=0.005
+            ):
+                self.splitter.addWidget(self.scroll_kiri)
 
-        self.setup_uppercase_hooks()
-        self.setup_autocomplete()
-        self.tambah_baris_barang()
-        self.otomatisasi_nomor_resi()
-        self.sesuaikan_tema_lokal()
-        self.load_data_resi()
+            with db_service.performance_timer(
+                "Resi.splitter.add_right_widget", threshold=0.005
+            ):
+                self.splitter.addWidget(self.widget_kanan)
+
+            with db_service.performance_timer(
+                "Resi.splitter.configure", threshold=0.005
+            ):
+                self.splitter.setChildrenCollapsible(False)
+                self.splitter.setSizes(RESI_SPLITTER_INITIAL_SIZES)
+                self.splitter.setHandleWidth(1)
+                self.splitter.setOpaqueResize(True)
+                self.splitter.setStretchFactor(0, 3)
+                self.splitter.setStretchFactor(1, 1)
+                self.splitter.splitterMoved.connect(self._jadwalkan_simpan_splitter)
+
+            self._pulihkan_splitter()
+
+            with db_service.performance_timer(
+                "Resi.splitter.add_to_layout", threshold=0.005
+            ):
+                layout_utama.addWidget(self.splitter)
+
+        with db_service.performance_timer(
+            "Resi.init_ui.uppercase_hooks", threshold=0.02
+        ):
+            self.setup_uppercase_hooks()
+        with db_service.performance_timer(
+            "Resi.init_ui.autocomplete", threshold=0.02
+        ):
+            self.setup_autocomplete()
+        with db_service.performance_timer(
+            "Resi.init_ui.first_item_row", threshold=0.02
+        ):
+            self.tambah_baris_barang()
+        with db_service.performance_timer(
+            "Resi.init_ui.resi_number", threshold=0.02
+        ):
+            self.otomatisasi_nomor_resi()
+        with db_service.performance_timer(
+            "Resi.init_ui.theme", threshold=0.02
+        ):
+            self.sesuaikan_tema_lokal()
+        with db_service.performance_timer(
+            "Resi.init_ui.initial_data_load", threshold=0.02
+        ):
+            self.load_data_resi()
 
     @staticmethod
     def _lineedit(placeholder, pakai_tinggi_lokal=True):
@@ -1356,6 +1424,8 @@ class TabResi(QWidget):
         self.cb_periode_histori.blockSignals(True)
         self.cb_periode_histori.setCurrentIndex(0)
         self.cb_periode_histori.blockSignals(False)
+        self.cb_periode_histori.setEnabled(True)
+        self.cb_periode_histori.setToolTip("Pilih cakupan periode histori")
         self.load_data_resi()
 
     def _ukuran_point_histori_aktif(self):
@@ -1446,6 +1516,7 @@ class TabResi(QWidget):
         )
 
     @Slot(str, int, str, object)
+    @db_service.profile_performance("Resi.apply_read_result", threshold=0.025)
     def _hasil_read(self, kind, generation, kode_cabang, result):
         if not self._read_masih_aktif(kind, generation, kode_cabang):
             return
@@ -1490,8 +1561,13 @@ class TabResi(QWidget):
         self._timer_render_histori.stop()
         self._history_render_state = None
         self.list_histori.clear()
-        self.list_histori.addTopLevelItem(QTreeWidgetItem(["Histori gagal dimuat. Coba lagi.", ""]))
-        self.list_histori.setToolTip("Ubah pencarian atau tekan RESET untuk memuat ulang.")
+        self.list_histori.addTopLevelItem(
+            QTreeWidgetItem(["Histori gagal dimuat. Coba lagi.", ""])
+        )
+        self.list_histori.setToolTip(
+            "Ubah pencarian atau tekan RESET untuk memuat ulang."
+        )
+        self.lbl_histori_title.setText("Histori Resi · Gagal")
         self._history_display_key = None
         self._history_loading = False
         self.list_histori.setEnabled(getattr(self, "_history_was_enabled", True))
@@ -1500,17 +1576,32 @@ class TabResi(QWidget):
         if not self._history_loading:
             self._history_was_enabled = self.list_histori.isEnabled()
         self._history_loading = True
+        self.lbl_histori_title.setText("Histori Resi · Memuat…")
         self.list_histori.setEnabled(False)
         self._timer_render_histori.stop()
         self._history_render_state = None
 
     def _jadwalkan_pencarian_histori(self, _text=None):
+        # Saat keyword aktif, pencarian otomatis mencakup seluruh tahun kalender
+        # berjalan; filter periode dinonaktifkan agar cakupannya tidak membingungkan.
+        keyword_aktif = bool(self.txt_search.text().strip())
+        self.cb_periode_histori.setEnabled(not keyword_aktif)
+        if keyword_aktif:
+            tahun = QDate.currentDate().year()
+            self.cb_periode_histori.setToolTip(
+                f"Pencarian aktif mencakup 1 Januari–31 Desember {tahun}. "
+                "Filter periode diabaikan sementara."
+            )
+        else:
+            self.cb_periode_histori.setToolTip("Pilih cakupan periode histori")
+
         # Batalkan penerapan hasil lama segera, tanpa menunggu debounce selesai.
         self._read_generation["history"] += 1
         self._read_pending["history"] = None
         self._mulai_loading_histori()
         self._timer_histori.start()
 
+    @db_service.profile_performance("Resi.search_filter", threshold=0.025)
     def filter_data_resi(self):
         self.load_data_resi()
 
@@ -1574,6 +1665,7 @@ class TabResi(QWidget):
         child.setForeground(0, state["brush"])
         child.setData(0, Qt.ItemDataRole.UserRole, no_resi)
 
+    @db_service.profile_performance("Resi.render_history_batch", threshold=0.025)
     def _render_histori_batch(self):
         state = self._history_render_state
         if state is None or state["generation"] != self._read_generation["history"]:
@@ -1600,7 +1692,27 @@ class TabResi(QWidget):
         tree.setUpdatesEnabled(False)
         try:
             tree.clear()
-            tree.addTopLevelItems(list(state["parents"].values()))
+            parents = list(state["parents"].values())
+            tree.addTopLevelItems(parents)
+            total_resi = sum(parent.childCount() for parent in parents)
+            if total_resi == 0:
+                keyword_aktif = bool(self.txt_search.text().strip())
+                if keyword_aktif:
+                    pesan_kosong = "Tidak ada resi cocok di tahun ini."
+                    tooltip_kosong = (
+                        "Pencarian mencakup seluruh tahun kalender berjalan. "
+                        "Periksa kembali kata kunci yang dimasukkan."
+                    )
+                else:
+                    pesan_kosong = "Tidak ada resi sesuai periode."
+                    tooltip_kosong = (
+                        "Coba ubah kata kunci pencarian atau pilih periode yang lebih luas."
+                    )
+                tree.addTopLevelItem(QTreeWidgetItem([pesan_kosong, ""]))
+                tree.setToolTip(tooltip_kosong)
+            else:
+                tree.setToolTip("")
+            self.lbl_histori_title.setText(f"Histori Resi ({total_resi})")
             view = state["view"]
             for title, parent in state["parents"].items():
                 if view:
@@ -1617,7 +1729,6 @@ class TabResi(QWidget):
                     parent.setExpanded(state.get("collapsed_by_default", False) is False)
             tree.doItemsLayout()
             tree.verticalScrollBar().setValue(view["scroll"] if view else 0)
-            tree.setToolTip("")
             self._history_display_key = state["request_key"]
         finally:
             tree.blockSignals(blocked)
@@ -1914,17 +2025,29 @@ class TabResi(QWidget):
             self.settings.setValue(self.SPLITTER_SETTINGS_KEY, self.splitter.saveState())
 
     def _pulihkan_splitter(self):
-        saved = self.settings.value(self.SPLITTER_SETTINGS_KEY)
+        with db_service.performance_timer(
+            "Resi.splitter.read_saved_state", threshold=0.005
+        ):
+            saved = self.settings.value(self.SPLITTER_SETTINGS_KEY)
+
         if saved is not None:
             try:
-                if not self.splitter.restoreState(saved):
+                with db_service.performance_timer(
+                    "Resi.splitter.restore_saved_state", threshold=0.005
+                ):
+                    restored = self.splitter.restoreState(saved)
+                if not restored:
                     self.splitter.setSizes(RESI_SPLITTER_INITIAL_SIZES)
             except (TypeError, ValueError):
                 logger.warning("State splitter resi tidak valid; gunakan ukuran awal")
+
         # State Qt juga menyimpan perilaku handle; tegaskan kebijakan modul.
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.setOpaqueResize(True)
-        self.splitter.setHandleWidth(1)
+        with db_service.performance_timer(
+            "Resi.splitter.apply_policy", threshold=0.005
+        ):
+            self.splitter.setChildrenCollapsible(False)
+            self.splitter.setOpaqueResize(True)
+            self.splitter.setHandleWidth(1)
 
     def hideEvent(self, event):
         if getattr(self, "_layout_pending", None):
@@ -2839,11 +2962,23 @@ class TabResi(QWidget):
         self.setup_autocomplete()
         self.load_data_resi()
 
+    @db_service.profile_performance("Resi.request_history_load", threshold=0.025)
     def load_data_resi(self):
         self._timer_histori.stop()
         keyword = self.txt_search.text().strip().lower()
         cabang = self._kode_cabang_aktif()
-        mulai, selesai = self._rentang_histori_aktif()
+
+        if keyword:
+            # Pencarian tidak mengikuti filter Hari ini/7 hari/Bulan ini.
+            # Batasi ke tahun kalender berjalan agar cakupan luas tetapi terukur.
+            tahun = QDate.currentDate().year()
+            mulai = QDate(tahun, 1, 1)
+            selesai = QDate(tahun, 12, 31)
+            mode_histori = "search_year"
+        else:
+            mulai, selesai = self._rentang_histori_aktif()
+            mode_histori = self.cb_periode_histori.currentData()
+
         if not mulai.isValid() or not selesai.isValid():
             return
         mulai_db = mulai.toString("yyyy-MM-dd")
@@ -2851,7 +2986,7 @@ class TabResi(QWidget):
         self._history_request_key = (
             cabang,
             "range",
-            self.cb_periode_histori.currentData(),
+            mode_histori,
             mulai_db,
             selesai_db,
             keyword,
@@ -2917,6 +3052,7 @@ class TabResi(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Error Preview", f"Gagal memuat preview: {exc}")
 
+    @db_service.profile_performance("Resi.refresh_data", threshold=0.025)
     def refresh_data(self):
         try:
             self.load_data_resi()
@@ -2947,6 +3083,7 @@ class TabResi(QWidget):
         except Exception:
             logger.exception("Gagal refresh autocomplete Pengirim/Penerima")
 
+    @db_service.profile_performance("Resi.auto_refresh_history", threshold=0.025)
     def auto_refresh_histori(self):
         try:
             self.load_data_resi()

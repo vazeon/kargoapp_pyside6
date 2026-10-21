@@ -1,7 +1,10 @@
 # login.py
 from PySide6.QtCore import Qt, QTimer, Signal
 
+import os
+import time
 import threading
+from contextlib import nullcontext
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -34,6 +37,7 @@ from utils.ui_scaler import ResponsiveUIScaler
 
 class LoginWindow(QWidget):
     restore_finished = Signal(bool)
+    auth_progress = Signal(str)
 
     def __init__(self, switch_to_main_callback):
         super().__init__()
@@ -52,6 +56,7 @@ class LoginWindow(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.init_ui()
+        self.auth_progress.connect(self._update_auth_progress_text)
         self._ui_scaler = ResponsiveUIScaler(self)
         self._ui_scaler.apply_now()
         self.center_window()
@@ -232,6 +237,14 @@ class LoginWindow(QWidget):
         else:
             self.btn_login.setText("MASUK")
 
+    def _update_auth_progress_text(self, message):
+        """Perbarui label tombol dari signal Qt, bukan langsung dari worker thread."""
+        if not self._sedang_login or self._external_busy:
+            return
+        text = str(message or "").strip()
+        if text:
+            self.btn_login.setText(text)
+
     def set_external_busy(self, busy):
         """Kunci form dari proses eksternal, misalnya logout asinkron."""
         self._external_busy = bool(busy)
@@ -294,6 +307,35 @@ class LoginWindow(QWidget):
             flush=True,
         )
         return info
+
+    def _simpan_sesi_worker(self, identifier, password, mode, phase_timer):
+        """Simpan cache sesi dari worker agar hash dan I/O tidak memblokir UI."""
+        if password and not bool(CURRENT_SESSION.get("is_developer")):
+            self.auth_progress.emit("MENYIMPAN SESI...")
+            snapshot = {
+                "id_user": CURRENT_SESSION.get("id_user", ""),
+                "username": CURRENT_SESSION.get("username", ""),
+                "nama_lengkap": CURRENT_SESSION.get("nama_lengkap", ""),
+                "auth_email": CURRENT_SESSION.get("auth_email", "") or identifier,
+                "role": CURRENT_SESSION.get("role", ""),
+                "kode_cabang": CURRENT_SESSION.get("kode_cabang", ""),
+                "nama_cabang": CURRENT_SESSION.get("nama_cabang", ""),
+                "home_kode_cabang": CURRENT_SESSION.get("home_kode_cabang", ""),
+                "home_nama_cabang": CURRENT_SESSION.get("home_nama_cabang", ""),
+                "resi_prefix": CURRENT_SESSION.get("resi_prefix", "INV"),
+                "aturan_prefix": dict(CURRENT_SESSION.get("aturan_prefix") or {}),
+                "allowed_branches": [
+                    dict(item)
+                    for item in (CURRENT_SESSION.get("allowed_branches") or [])
+                    if isinstance(item, dict)
+                ],
+            }
+            with phase_timer("Auth.persist_offline_cache"):
+                save_offline_login_cache(identifier, password, snapshot)
+
+        if mode == "login":
+            with phase_timer("Auth.persist_last_login"):
+                save_last_login(identifier, password)
 
     def _tampilkan_login_gagal(self):
         self.txt_pwd.clear()
@@ -415,12 +457,40 @@ class LoginWindow(QWidget):
             return False
 
     def _auth_worker(self, identifier, password, mode):
+        # Profiling opsional untuk memisahkan waktu autentikasi, persiapan sesi,
+        # dan bootstrap Supabase. Tidak mengubah jalur login saat fitur dimatikan.
+        perf_db = None
+        perf_enabled = os.environ.get("KARGO_PERF_LOG", "").strip() == "1"
+        worker_started = time.perf_counter()
+        if perf_enabled:
+            try:
+                from services import database_service as perf_db
+            except Exception:
+                # Kegagalan import alat ukur tidak boleh mengganggu autentikasi.
+                perf_enabled = False
+                perf_db = None
+
+        def _phase_timer(label):
+            if perf_enabled and perf_db is not None:
+                return perf_db.performance_timer(label, threshold=0.02)
+            return nullcontext()
+
         try:
             from config import verifikasi_login_sistem
 
-            hasil = self._validasi_hasil_login(
-                verifikasi_login_sistem(identifier, password)
-            )
+            if mode == "restore":
+                self.auth_progress.emit("MEMULIHKAN SESI...")
+            else:
+                self.auth_progress.emit("MEMVERIFIKASI AKUN...")
+
+            with _phase_timer("Auth.verify_login"):
+                hasil = self._validasi_hasil_login(
+                    verifikasi_login_sistem(
+                        identifier,
+                        password,
+                        progress_callback=self.auth_progress.emit,
+                    )
+                )
             sukses, role_user, nama_lengkap = hasil
             if not sukses:
                 self._auth_result = {
@@ -432,19 +502,28 @@ class LoginWindow(QWidget):
 
             # Persiapan session + bootstrap dilakukan di worker agar GUI tidak
             # freeze ketika database/network lambat.
-            self._siapkan_session_login(role_user, nama_lengkap)
-            self._bootstrap_client_online()
+            self.auth_progress.emit("MENYIAPKAN DATABASE...")
+            with _phase_timer("Auth.prepare_session"):
+                self._siapkan_session_login(role_user, nama_lengkap)
+            self.auth_progress.emit("MENYIAPKAN PROFIL CLIENT...")
+            with _phase_timer("Auth.client_bootstrap"):
+                self._bootstrap_client_online()
+            self.auth_progress.emit("MEMBUKA DASHBOARD...")
             self._auth_result = {
                 "success": True,
                 "role": role_user,
                 "name": nama_lengkap,
                 "offline": bool(CURRENT_SESSION.get("is_offline_session")),
             }
+            # Persist sesi setelah seluruh validasi dan bootstrap berhasil, tetapi
+            # tetap di worker agar PBKDF2/QSettings tidak memblokir thread UI.
+            self._simpan_sesi_worker(identifier, password, mode, _phase_timer)
         except Exception as exc:
             self._auth_error = exc
             offline_ok = False
             if mode == "restore":
-                offline_ok = self._try_offline_restore(identifier, exc)
+                with _phase_timer("Auth.offline_restore_cache"):
+                    offline_ok = self._try_offline_restore(identifier, exc)
             if offline_ok:
                 self._auth_error = None
                 self._auth_result = {
@@ -453,6 +532,16 @@ class LoginWindow(QWidget):
                     "name": CURRENT_SESSION.get("nama_lengkap"),
                     "offline": True,
                 }
+                try:
+                    self._simpan_sesi_worker(identifier, password, mode, _phase_timer)
+                except Exception as persist_exc:
+                    self._auth_error = persist_exc
+                    self._cleanup_failed_auth()
+                    self._auth_result = {
+                        "success": False,
+                        "role": None,
+                        "name": None,
+                    }
             else:
                 self._cleanup_failed_auth()
                 self._auth_result = {
@@ -462,6 +551,12 @@ class LoginWindow(QWidget):
                 }
         finally:
             self._auth_password = None
+            if perf_enabled and perf_db is not None:
+                perf_db.log_performance_duration(
+                    "Auth.worker_total",
+                    time.perf_counter() - worker_started,
+                    threshold=0.02,
+                )
 
     def _poll_auth_worker(self):
         thread = self._auth_thread
@@ -480,46 +575,13 @@ class LoginWindow(QWidget):
         self._auth_result = None
         self._auth_error = None
         self._auth_identifier = None
-        password_backup = self._auth_password_backup or ""
         self._auth_password_backup = None
 
         success = bool(result.get("success"))
         if success:
             try:
-                # Penyimpanan last-session dilakukan hanya setelah autentikasi
-                # + bootstrap selesai. Jadi credential tidak tersimpan untuk
-                # proses login yang gagal di tengah jalan.
-                if password_backup and not bool(CURRENT_SESSION.get("is_developer")):
-                    # Cache akun adalah daftar akun yang PERNAH berhasil login online
-                    # di komputer ini. Cache ini sengaja dipisahkan dari last_login:
-                    # Logout hanya menghapus auto-login akun terakhir, bukan cache
-                    # akun yang sudah terverifikasi. Dengan begitu Sinta, Marcella,
-                    # Anita, dst. semuanya dapat login kembali saat offline.
-                    snapshot = {
-                        "id_user": CURRENT_SESSION.get("id_user", ""),
-                        "username": CURRENT_SESSION.get("username", ""),
-                        "nama_lengkap": CURRENT_SESSION.get("nama_lengkap", ""),
-                        "auth_email": CURRENT_SESSION.get("auth_email", "") or identifier,
-                        "role": CURRENT_SESSION.get("role", ""),
-                        "kode_cabang": CURRENT_SESSION.get("kode_cabang", ""),
-                        "nama_cabang": CURRENT_SESSION.get("nama_cabang", ""),
-                        "home_kode_cabang": CURRENT_SESSION.get("home_kode_cabang", ""),
-                        "home_nama_cabang": CURRENT_SESSION.get("home_nama_cabang", ""),
-                        "resi_prefix": CURRENT_SESSION.get("resi_prefix", "INV"),
-                        "aturan_prefix": dict(CURRENT_SESSION.get("aturan_prefix") or {}),
-                        "allowed_branches": [
-                            dict(item)
-                            for item in (CURRENT_SESSION.get("allowed_branches") or [])
-                            if isinstance(item, dict)
-                        ],
-                    }
-                    save_offline_login_cache(identifier, password_backup, snapshot)
-
-                if mode == "login":
-                    # Hanya sesi terakhir yang disimpan untuk auto-restore.
-                    # Ini TIDAK menghapus cache akun lain.
-                    save_last_login(identifier, password_backup)
-
+                # Penyimpanan cache sudah dilakukan oleh worker autentikasi.
+                # Di sini hanya dilakukan perpindahan UI setelah worker selesai.
                 self.switch_to_main()
                 self._set_login_busy(False)
                 self.txt_pwd.clear()

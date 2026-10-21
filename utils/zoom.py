@@ -440,6 +440,9 @@ def terapkan_zoom_tabel(
         table: QAbstractItemView,
         is_dark: bool = False,
         z: int = 0,
+        update_geometry: bool = True,
+        *,
+        extra_stylesheet: str = "",
 ) -> None:
     if table is None or not isinstance(table, _TABLE_VIEW_TYPES):
         return
@@ -468,11 +471,26 @@ def terapkan_zoom_tabel(
 
         ui_colors = get_theme_colors(is_dark).get("ui", {})
 
-        # Terapkan styling terpusat
+        # Terapkan styling terpusat. Modul pemilik tabel dapat menambahkan
+        # QSS khusus (misalnya tooltip) agar seluruh stylesheet dipasang sekali.
         style_tabel = get_table_styles(is_dark, metrics=t_metrics, ui_colors=ui_colors)
+        qss_tambahan = str(extra_stylesheet or "").strip()
+        if qss_tambahan:
+            style_tabel = f"{style_tabel.rstrip()}\n{qss_tambahan}"
+
         table.setStyleSheet(style_tabel)
-        if frozen is not None:
+        if frozen is not None and frozen.styleSheet() != style_tabel:
+            # FrozenTableWidget menyinkronkan stylesheet melalui override
+            # setStyleSheet(). Hindari memasang QSS identik untuk kedua kalinya.
+            # Untuk widget biasa dengan frozen_table terpisah, tetap sinkronkan.
             frozen.setStyleSheet(style_tabel)
+
+        # Pada pergantian tema, font dan geometri tidak berubah; pemanggil dapat
+        # meminta pembaruan warna/QSS saja untuk menghindari pemrosesan setiap
+        # tinggi baris dan sinkronisasi frozen table secara berulang. Pemanggilan
+        # zoom biasa tetap memakai update_geometry=True.
+        if not update_geometry:
+            return
 
         _terapkan_font_item_view(table, metrics_font)
 
@@ -534,7 +552,7 @@ def terapkan_zoom_tabel(
         if updates_main:
             table.setUpdatesEnabled(True)
 
-        if isinstance(table, QTableView):
+        if update_geometry and isinstance(table, QTableView):
             sinkronkan_frozen_table(table, tertunda=True)
 
 

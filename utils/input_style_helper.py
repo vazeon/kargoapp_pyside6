@@ -98,6 +98,14 @@ class _FormInputStyles(QObject):
         super().__init__(root)
         self._applying = False
         self._dark = False
+        # Widget tree pada tab tersembunyi tidak perlu di-scan setiap tema
+        # aplikasi berubah. Refresh ditunda sampai tab itu ditampilkan lagi.
+        self._pending_theme_refresh = False
+        # Cache input widgets yang benar-benar dimiliki root ini. Pemindaian
+        # seluruh subtree mahal pada tab berisi banyak cell/widget tabel, jadi
+        # setelah scan awal pembaruan tema cukup mengunjungi input yang relevan.
+        self._input_widgets = {}
+        self._input_cache_initialized = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.refresh)
@@ -119,6 +127,26 @@ class _FormInputStyles(QObject):
 
         return False
 
+    def _remember_input(self, widget):
+        """Cache input widget wrappers without retaining deleted Qt objects."""
+        if not isinstance(widget, QWidget):
+            return
+        key = id(widget)
+        existing = self._input_widgets.get(key)
+        if existing is widget:
+            return
+        if existing is not None:
+            # Python wrapper bisa tersisa setelah objek C++ Qt dihapus.
+            try:
+                existing.parentWidget()
+            except RuntimeError:
+                self._input_widgets.pop(key, None)
+            else:
+                # Jangan menimpa widget yang masih hidup (id collision sangat
+                # jarang, tetapi aman untuk diabaikan jika terjadi).
+                return
+        self._input_widgets[key] = widget
+
     def _apply(self, widget):
         """Apply global input styling only to actual QWidget instances."""
         if not isinstance(widget, QWidget):
@@ -126,6 +154,7 @@ class _FormInputStyles(QObject):
 
         if not self._owns(widget) or not is_input_form(widget):
             return
+        self._remember_input(widget)
         if not widget.property("globalFormInput"):
             widget.setProperty("globalFormInput", True)
         readonly = bool(getattr(widget, "isReadOnly", lambda: False)())
@@ -155,12 +184,30 @@ class _FormInputStyles(QObject):
         if self._applying:
             return
         self._timer.stop()
+        self._pending_theme_refresh = False
         self._applying = True
         try:
             root = self.parent()
             self._dark = _tema_gelap(root) if is_dark is None else bool(is_dark)
-            for widget in (root, *root.findChildren(QWidget)):
-                self._apply(widget)
+
+            if not self._input_cache_initialized:
+                # Satu kali scan awal menemukan input yang sudah ada. Widget
+                # yang dibuat kemudian ditambahkan dari event Show di bawah.
+                for widget in (root, *root.findChildren(QWidget)):
+                    try:
+                        self._apply(widget)
+                    except RuntimeError:
+                        # Widget Qt bisa terhapus di tengah pembaruan.
+                        continue
+                self._input_cache_initialized = True
+            else:
+                # Theme switch berikutnya hanya memproses input form yang
+                # relevan, bukan ribuan widget internal/sel tabel lainnya.
+                for key, widget in tuple(self._input_widgets.items()):
+                    try:
+                        self._apply(widget)
+                    except RuntimeError:
+                        self._input_widgets.pop(key, None)
         finally:
             self._applying = False
 
@@ -171,7 +218,18 @@ class _FormInputStyles(QObject):
         if watched is QApplication.instance() and kind in (
             QEvent.Type.ApplicationPaletteChange, QEvent.Type.StyleChange,
         ):
-            self._timer.start(0)
+            root = self.parent()
+            # Tab yang tersembunyi akan menerapkan temanya sendiri ketika
+            # diaktifkan. Hindari walk ke seluruh input pada tiap pergantian
+            # tema; ini mencegah biaya naik seiring jumlah tab yang dimuat.
+            if isinstance(root, QWidget) and not root.isVisible():
+                self._pending_theme_refresh = True
+            else:
+                self._timer.start(0)
+        elif watched is self.parent() and kind == QEvent.Type.Show:
+            # Terapkan perubahan tema yang ditunda ketika subtree kembali tampil.
+            if self._pending_theme_refresh:
+                self._timer.start(0)
         elif isinstance(watched, INPUT_TYPES) and kind in (
             QEvent.Type.Show, QEvent.Type.ReadOnlyChange,
         ):

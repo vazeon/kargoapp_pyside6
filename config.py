@@ -4,6 +4,8 @@ import hmac
 import json
 import os
 import sqlite3
+import time
+from contextlib import nullcontext
 from supabase_client import supabase
 
 def _is_network_error(exc: BaseException) -> bool:
@@ -80,6 +82,33 @@ def reset_current_session() -> None:
     CURRENT_SESSION.update(_session_default(db_aktif))
 
 
+def _performance_phase(label: str):
+    """Timer opsional yang memakai reporter performa yang sudah tersedia.
+
+    Saat profiling nonaktif, fungsi langsung mengembalikan nullcontext sehingga
+    perilaku normal tetap sama dan tidak menambah import service saat startup.
+    """
+    if os.environ.get("KARGO_PERF_LOG", "").strip() != "1":
+        return nullcontext()
+    try:
+        from services.database_service import performance_timer
+        return performance_timer(label, threshold=0.02)
+    except Exception:
+        # Alat ukur tidak boleh mengubah hasil autentikasi atau branch access.
+        return nullcontext()
+
+
+def _emit_login_progress(callback: Any, message: str) -> None:
+    """Kirim status login secara best-effort tanpa memengaruhi autentikasi."""
+    if not callable(callback):
+        return
+    try:
+        callback(str(message or "").strip())
+    except Exception:
+        # Callback UI hanya peningkatan UX; kegagalannya tidak boleh menggagalkan login.
+        pass
+
+
 # Akun developer opsional; username dapat dioverride melalui environment.
 DEVELOPER_USERNAME = str(
     os.getenv("KARGO_DEV_USERNAME", "DEV_SUPER") or "DEV_SUPER"
@@ -119,6 +148,7 @@ def _password_sama(password_input: Any, password_tersimpan: Any) -> bool:
 def _verifikasi_login_supabase(
     email: str,
     password: str,
+    progress_callback=None,
 ) -> Optional[Tuple[bool, str, str]]:
     """
     Login melalui Supabase Auth.
@@ -131,10 +161,12 @@ def _verifikasi_login_supabase(
     authenticated = False
     login_complete = False
     try:
-        response = supabase.auth.sign_in_with_password({
-            "email": str(email).strip(),
-            "password": str(password),
-        })
+        _emit_login_progress(progress_callback, "MENGHUBUNGI SERVER...")
+        with _performance_phase("Auth.supabase_sign_in"):
+            response = supabase.auth.sign_in_with_password({
+                "email": str(email).strip(),
+                "password": str(password),
+            })
 
         user = getattr(response, "user", None)
         if user is None:
@@ -145,16 +177,63 @@ def _verifikasi_login_supabase(
             return False, None, None
         authenticated = True
 
-        profile_response = (
-            supabase
-            .table("user_profiles")
-            .select(
-                "id, username, role, nama_lengkap, kode_cabang, "
-                "status_user, auth_email"
-            )
-            .eq("id", user_id)
-            .single()
-            .execute()
+        # Query baca dijalankan berurutan secara konservatif. Ini menghindari
+        # permintaan paralel tepat setelah token baru diterbitkan, yang pada
+        # sebagian project Supabase dapat bertepatan dengan PGRST303.
+        # Hanya error JWT-issued-at-future yang mendapat satu retry terbatas;
+        # validasi login tetap wajib berhasil sebelum sesi diterima.
+        _emit_login_progress(progress_callback, "MEMUAT PROFIL...")
+
+        def _is_jwt_issued_at_future(exc: BaseException) -> bool:
+            code = str(getattr(exc, "code", "") or "").upper()
+            message = str(getattr(exc, "message", "") or "").lower()
+            detail = f"{exc} {code} {message}".lower()
+            return "pgrst303" in detail or "jwt issued at future" in detail
+
+        def _execute_read_with_one_retry(query_factory, perf_label: str):
+            for attempt in range(2):
+                try:
+                    with _performance_phase(perf_label):
+                        return query_factory().execute()
+                except Exception as exc:
+                    if attempt == 0 and _is_jwt_issued_at_future(exc):
+                        _emit_login_progress(
+                            progress_callback,
+                            "MENYESUAIKAN KONEKSI SERVER...",
+                        )
+                        # Retry terbatas untuk error timestamp yang sporadis.
+                        # Tidak mengubah token maupun melemahkan validasi JWT.
+                        time.sleep(1.0)
+                        continue
+                    raise
+            raise RuntimeError("Permintaan baca Supabase gagal setelah retry.")
+
+        profile_response = _execute_read_with_one_retry(
+            lambda: (
+                supabase
+                .table("user_profiles")
+                .select(
+                    "id, username, role, nama_lengkap, kode_cabang, "
+                    "status_user, auth_email"
+                )
+                .eq("id", user_id)
+                .single()
+            ),
+            "Auth.supabase_profile_query",
+        )
+
+        _emit_login_progress(progress_callback, "MEMUAT DAFTAR CABANG...")
+        cabang_response = _execute_read_with_one_retry(
+            lambda: (
+                supabase
+                .table("data_cabang")
+                .select(
+                    "kode_cabang, nama_cabang, resi_prefix, aturan_prefix"
+                )
+                .neq("kode_cabang", "DEV_SYS")
+                .order("nama_cabang", desc=False)
+            ),
+            "Auth.supabase_branch_list_query",
         )
 
         profile = profile_response.data
@@ -186,17 +265,26 @@ def _verifikasi_login_supabase(
             profile.get("auth_email") or email
         ).strip()
 
-        cabang_response = (
-            supabase
-            .table("data_cabang")
-            .select(
-                "kode_cabang, nama_cabang, resi_prefix, aturan_prefix"
-            )
-            .eq("kode_cabang", kode_cabang)
-            .single()
-            .execute()
+        # Daftar cabang yang sudah dimuat bersamaan dengan profil juga dipakai
+        # untuk menemukan cabang utama dan menyiapkan branch scope; tidak perlu
+        # melakukan request data_cabang kedua pada alur login.
+        server_branch_rows = [
+            row for row in (cabang_response.data or [])
+            if isinstance(row, dict)
+        ]
+        cabang = next(
+            (
+                row for row in server_branch_rows
+                if str(row.get("kode_cabang") or "").strip().upper() == kode_cabang
+            ),
+            None,
         )
-        cabang = cabang_response.data or {}
+        if cabang is None:
+            # Setara dengan query .single() sebelumnya: login online tidak
+            # boleh diteruskan bila cabang utama user tidak ada di server.
+            raise RuntimeError(
+                f"Cabang utama '{kode_cabang}' tidak ditemukan di data_cabang."
+            )
 
         nama_cabang = str(
             cabang.get("nama_cabang") or kode_cabang
@@ -224,7 +312,8 @@ def _verifikasi_login_supabase(
             "is_developer": False,
             "is_offline_session": False,
         })
-        refresh_akses_cabang_session()
+        _emit_login_progress(progress_callback, "MEMERIKSA AKSES CABANG...")
+        refresh_akses_cabang_session(supabase_branch_rows=server_branch_rows)
         login_complete = True
         return True, role, nama_lengkap
 
@@ -451,42 +540,65 @@ def _ambil_cabang_diizinkan(
     return hasil
 
 
-def _ambil_cabang_diizinkan_supabase(*, home: str, role: str) -> List[Dict[str, Any]]:
+def _ambil_cabang_diizinkan_supabase(
+    *,
+    home: str,
+    role: str,
+    branch_rows: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     """Ambil branch scope online dari Supabase, lalu normalisasi ke format UI."""
     user_id = str(CURRENT_SESSION.get("id_user") or "").strip()
     if not user_id or not str(CURRENT_SESSION.get("auth_email") or "").strip():
         return []
 
-    branch_response = (
-        supabase
-        .table("data_cabang")
-        .select("kode_cabang, nama_cabang, resi_prefix, aturan_prefix")
-        .neq("kode_cabang", "DEV_SYS")
-        .order("nama_cabang", desc=False)
-        .execute()
+    # Untuk role SUPER dan home pusat/SBY, kebijakan di bawah memberi akses
+    # ke seluruh cabang bisnis tanpa membaca user_cabang_access. Hindari request
+    # yang hasilnya memang tidak dipakai; aturan akses tetap identik.
+    role_super = role in CENTRAL_BRANCH_ROLES
+    all_branches_allowed = (
+        role_super
+        or home == "PUSAT"
+        or home in CENTRAL_FULL_ACCESS_HOME_BRANCHES
     )
-    branch_rows = branch_response.data or []
-    access_response = (
-        supabase
-        .table("user_cabang_access")
-        .select("kode_cabang")
-        .eq("id_user", user_id)
-        .execute()
-    )
-    allowed_codes = {
-        str(row.get("kode_cabang") or "").strip().upper()
-        for row in (access_response.data or [])
-        if str(row.get("kode_cabang") or "").strip()
-    }
+
+    if branch_rows is None:
+        with _performance_phase("BranchScope.supabase_data_cabang_query"):
+            branch_response = (
+                supabase
+                .table("data_cabang")
+                .select("kode_cabang, nama_cabang, resi_prefix, aturan_prefix")
+                .neq("kode_cabang", "DEV_SYS")
+                .order("nama_cabang", desc=False)
+                .execute()
+            )
+        branch_rows = branch_response.data or []
+    else:
+        # Salinan defensif: jangan mengubah daftar yang diterima dari caller.
+        branch_rows = [row for row in branch_rows if isinstance(row, dict)]
+
+    allowed_codes = set()
+    if not all_branches_allowed:
+        with _performance_phase("BranchScope.supabase_user_access_query"):
+            access_response = (
+                supabase
+                .table("user_cabang_access")
+                .select("kode_cabang")
+                .eq("id_user", user_id)
+                .execute()
+            )
+        allowed_codes = {
+            str(row.get("kode_cabang") or "").strip().upper()
+            for row in (access_response.data or [])
+            if str(row.get("kode_cabang") or "").strip()
+        }
 
     # SUPER tetap full access walaupun tabel access sedang kosong.
-    role_super = role in CENTRAL_BRANCH_ROLES
     hasil = []
     for row in branch_rows:
         kode = str(row.get("kode_cabang") or "").strip().upper()
         if not kode:
             continue
-        if role_super or home == "PUSAT" or home in CENTRAL_FULL_ACCESS_HOME_BRANCHES:
+        if all_branches_allowed:
             # SUPER, akun pusat/fallback, dan user home SBY boleh membuka
             # seluruh cabang bisnis (SBY + JKT) tanpa harus bergantung
             # pada baris user_cabang_access satu per satu.
@@ -514,7 +626,10 @@ def _ambil_cabang_diizinkan_supabase(*, home: str, role: str) -> List[Dict[str, 
     return hasil
 
 
-def refresh_akses_cabang_session() -> List[Dict[str, Any]]:
+def refresh_akses_cabang_session(
+    *,
+    supabase_branch_rows: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     """Segarkan branch scope; Supabase menjadi sumber utama untuk akun online."""
     database_path = str(CURRENT_SESSION.get("db_name") or db_aktif)
     home = str(
@@ -528,20 +643,26 @@ def refresh_akses_cabang_session() -> List[Dict[str, Any]]:
     branches = []
     if not is_developer and str(CURRENT_SESSION.get("auth_email") or "").strip():
         try:
-            branches = _ambil_cabang_diizinkan_supabase(home=home, role=role)
+            with _performance_phase("BranchScope.supabase_total"):
+                branches = _ambil_cabang_diizinkan_supabase(
+                    home=home,
+                    role=role,
+                    branch_rows=supabase_branch_rows,
+                )
         except Exception as exc:
             # Offline-first: cache lokal tetap dipakai saat Supabase sementara tidak tersedia.
             print(f"INFO: Branch scope Supabase tidak tersedia, memakai cache lokal: {exc}")
 
     if not branches:
         try:
-            branches = _ambil_cabang_diizinkan(
-                database_path,
-                id_user=str(CURRENT_SESSION.get("id_user") or ""),
-                role=role,
-                home_kode_cabang=home,
-                is_developer=is_developer,
-            )
+            with _performance_phase("BranchScope.sqlite_fallback"):
+                branches = _ambil_cabang_diizinkan(
+                    database_path,
+                    id_user=str(CURRENT_SESSION.get("id_user") or ""),
+                    role=role,
+                    home_kode_cabang=home,
+                    is_developer=is_developer,
+                )
         except sqlite3.Error as exc:
             print(f"WARNING: Gagal memuat cache branch: {exc}")
             branches = []
@@ -770,6 +891,7 @@ def _verifikasi_login_offline_cache(
 def verifikasi_login_sistem(
     username_input: Any,
     password_input: Any,
+    progress_callback=None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """Memverifikasi login dan memilih database sesuai mode akun.
 
@@ -789,6 +911,7 @@ def verifikasi_login_sistem(
         return _verifikasi_login_supabase(
             login_identifier,
             password,
+            progress_callback=progress_callback,
         )
 
     # DEV_SUPER adalah username lokal yang dicadangkan. Kredensial yang salah

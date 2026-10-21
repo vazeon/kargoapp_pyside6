@@ -24,7 +24,6 @@ class TabArmada(QWidget):
         self.tabs_internal.currentChanged.connect(self._subtab_aktif_berubah)
 
         layout.addWidget(self.tabs_internal)
-        self.sesuaikan_tema_lokal()
 
     def _refresh_subtab(self, subtab):
         """Refresh hanya subtab yang sedang dipakai."""
@@ -88,6 +87,7 @@ class TabArmada(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
 
-        # Saat Tab Armada ditampilkan kembali, sinkronkan hanya subtab aktif.
+        # Data tetap disegarkan saat halaman dibuka kembali. Penerapan tema
+        # dikelola MainWindow ketika tema/skala berubah, agar tidak diulang
+        # pada setiap showEvent.
         self._refresh_subtab(self.tabs_internal.currentWidget())
-        self.sesuaikan_tema_lokal()

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from time import perf_counter
 from typing import Dict
 
 import qdarktheme
@@ -14,6 +16,18 @@ from themes.components.inputs import get_global_focus_qss
 
 
 _COMMENT_RE = re.compile(r"/\*.*?\*/", flags=re.DOTALL)
+
+
+def _catat_waktu_performa(label: str, mulai: float) -> None:
+    """Log timing diagnostik tanpa mengubah perilaku styling."""
+    if os.environ.get("KARGO_PERF_LOG", "").strip().lower() not in {
+        "1", "true", "yes", "on"
+    }:
+        return
+
+    durasi = perf_counter() - mulai
+    if durasi >= 0.01:
+        print(f"[PERF] {label} | {durasi:.4f} s", flush=True)
 
 
 def _ringkas_qss(qss: str) -> str:
@@ -36,6 +50,7 @@ class ThemeManager:
     _cache_widget_qss: Dict[str, str] = {}
     _cache_shell_qss: Dict[str, str] = {}
     _cache_shell_container_qss: Dict[str, str] = {}
+    _cache_tabs_container_qss: Dict[str, str] = {}
 
     _SCOPED_MODE_PROPERTY = "_theme_manager_scoped_mode"
     _WIDGET_KEY_PROPERTY = "_theme_manager_widget_key"
@@ -52,7 +67,15 @@ class ThemeManager:
 
     @classmethod
     def _widget_stylesheet(cls, tema: str, is_dark: bool) -> str:
-        """Bangun QSS baseline; responsive geometry bukan tugas ThemeManager."""
+        """Bangun stylesheet per halaman dengan warna sesuai tema aktif.
+
+        QDarkTheme perlu tetap diterapkan pada root setiap halaman. Beberapa
+        halaman memiliki container dan QTabWidget bertingkat yang tidak
+        sepenuhnya mengikuti QPalette; melepas QDarkTheme dari root menyebabkan
+        warna latar campur antara tema terang dan gelap. Cache per tema menjaga
+        persiapan stylesheet tetap murah, sementara penerapan ulang hanya terjadi
+        ketika mode tema benar-benar berubah.
+        """
         _ = is_dark
         cached = cls._cache_widget_qss.get(tema)
         if cached is not None:
@@ -128,7 +151,12 @@ class ThemeManager:
             return False
 
         try:
+            mulai_set_qss = perf_counter()
             widget.setStyleSheet(qss)
+            _catat_waktu_performa(
+                f"UI.theme.stylesheet_set.{type(widget).__name__}",
+                mulai_set_qss,
+            )
             widget.setProperty(property_name, target_key)
             return True
         except RuntimeError:
@@ -163,14 +191,21 @@ class ThemeManager:
         is_dark: bool,
         scale: float = 1.0,
     ) -> bool:
-        """Terapkan pyqtdarktheme hanya ke satu subtree widget yang aktif."""
+        """Terapkan baseline halaman sekali; perubahan warna memakai palette/tab callback."""
         if widget is None:
             return False
 
         tema = "dark" if is_dark else "light"
         _ = scale  # kompatibilitas API; tidak menjadi bagian cache QSS
+        # Ganti QSS halaman hanya saat tema berganti. Ini menjaga background
+        # dan nested QTabWidget konsisten pada mode terang maupun gelap.
         target_key = tema
+        mulai_bangun_qss = perf_counter()
         qss = cls._widget_stylesheet(tema, is_dark)
+        _catat_waktu_performa(
+            f"UI.theme.widget_qss_prepare.{type(widget).__name__}",
+            mulai_bangun_qss,
+        )
 
         return cls._pasang_stylesheet_jika_berubah(
             widget,
@@ -178,6 +213,45 @@ class ThemeManager:
             property_name=cls._WIDGET_KEY_PROPERTY,
             target_key=target_key,
         )
+
+    @classmethod
+    def _tabs_container_stylesheet(cls) -> str:
+        """QSS netral yang tidak mengunci warna latar tab pada tema lama.
+
+        QTabWidget berisi semua halaman aplikasi. Nilai ``palette(window)`` di
+        QSS yang dipasang sekali dapat tertinggal setelah perubahan palette pada
+        sebagian subtree Qt. Gunakan latar transparan agar warna aktual berasal
+        dari palette aplikasi dan stylesheet halaman aktif, tanpa memasang ulang
+        stylesheet pada seluruh pohon tab setiap kali tema berubah.
+        """
+        cached = cls._cache_tabs_container_qss.get("stable")
+        if cached is not None:
+            return cached
+
+        qss = _ringkas_qss(
+            """
+            QTabWidget#MainTabs {
+                background-color: transparent;
+            }
+            QTabWidget#MainTabs::pane {
+                background-color: transparent;
+                border: 1px solid rgba(128, 128, 128, 0.25);
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                top: -1px;
+            }
+            QTabWidget#MainTabs > QWidget#qt_tabwidget_stackedwidget {
+                background-color: transparent;
+            }
+            QTabWidget#MainTabs > QWidget#qt_tabwidget_stackedwidget > QWidget {
+                background-color: transparent;
+            }
+            """
+        )
+        cls._cache_tabs_container_qss["stable"] = qss
+        return qss
 
     @classmethod
     def apply_shell_theme(
@@ -188,11 +262,22 @@ class ThemeManager:
         is_dark: bool,
         scale: float = 1.0,
     ) -> None:
-        """Refresh hanya widget shell utama, bukan seluruh isi tab tersembunyi."""
+        """Refresh shell tanpa mengganti QSS pada subtree seluruh tab."""
         tema = "dark" if is_dark else "light"
         _ = scale  # kompatibilitas API; geometry ditangani ResponsiveUIScaler
 
-        # Visual tab qdarktheme + geometry baseline disusun oleh themes.base.
+        # QTabWidget adalah parent dari seluruh halaman, termasuk tab yang sudah
+        # dimuat secara lazy. Pakai QSS stabil berbasis palette agar pergantian
+        # tema tidak memaksa Qt memoles ulang seluruh subtree tab.
+        cls._pasang_stylesheet_jika_berubah(
+            tabs,
+            cls._tabs_container_stylesheet(),
+            property_name=cls._SHELL_KEY_PROPERTY,
+            target_key="tabs-container:palette-v1",
+        )
+
+        # Detail visual QTabBar tetap menggunakan QSS sesuai tema, tetapi scope
+        # pembaruannya hanya tab bar kecil, bukan seluruh QTabWidget.
         tabs_qss = _ringkas_qss(
             get_main_tabs_base_style(
                 is_dark,
@@ -200,29 +285,18 @@ class ThemeManager:
             )
         )
         cls._pasang_stylesheet_jika_berubah(
-            tabs,
-            tabs_qss,
-            property_name=cls._SHELL_KEY_PROPERTY,
-            target_key=f"tabs:{tema}",
-        )
-
-        cls._pasang_stylesheet_jika_berubah(
             tab_bar,
             tabs_qss,
             property_name=cls._SHELL_KEY_PROPERTY,
             target_key=f"tabbar:{tema}",
         )
 
-        container_key = tema
-        container_qss = cls._shell_container_stylesheet(
-            tema,
-            is_dark,
-        )
+        container_qss = cls._shell_container_stylesheet(tema, is_dark)
         cls._pasang_stylesheet_jika_berubah(
             top_right,
             container_qss,
             property_name=cls._SHELL_CONTAINER_KEY_PROPERTY,
-            target_key=container_key,
+            target_key=tema,
         )
 
     @classmethod
@@ -231,3 +305,4 @@ class ThemeManager:
         cls._cache_widget_qss.clear()
         cls._cache_shell_qss.clear()
         cls._cache_shell_container_qss.clear()
+        cls._cache_tabs_container_qss.clear()

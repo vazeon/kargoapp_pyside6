@@ -544,6 +544,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
                 return self._isi_form_dari_baris(row, ubah_mode=False)
         return False
 
+    @db_service.profile_performance("ArmadaTruk.refresh_table", threshold=0.05)
     def refresh_tabel(self):
         tabel = self.tabel_truk
         tabel.setUpdatesEnabled(False)
@@ -590,6 +591,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
                 kwargs["alignment"] = alignment
             self.tabel_truk.setItem(baris, column, buat_tabel_item(value, **kwargs))
 
+    @db_service.profile_performance("ArmadaTruk.search_filter", threshold=0.025)
     def filter_tabel_truk(self, text):
         kata_kunci = text.lower().strip()
         nomor_baru = 1

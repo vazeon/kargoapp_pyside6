@@ -1,5 +1,6 @@
+# tabs/tab_kontak/subtab_penerima.py
 import json
-from PySide6.QtCore import QSettings, Qt, QTimer  # Tambahkan QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -385,6 +386,7 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
             )
             tabel.setRowHidden(row, not match)
 
+    @db_service.profile_performance("KontakPenerima.search_filter", threshold=0.025)
     def filter_pencarian_tabel(self):
         self._filter_tabel(
             self.tabel_penerima,
@@ -392,6 +394,7 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
             self.KOLOM_PENCARIAN,
         )
 
+    @db_service.profile_performance("KontakPenerima.search_history", threshold=0.025)
     def filter_pencarian_histori(self):
         self._filter_tabel(
             self.tabel_histori,
@@ -585,6 +588,7 @@ class SubTabPenerima(QWidget, ZoomTableMixin):
         dialog.adjustSize()
         dialog.exec()
 
+    @db_service.profile_performance("KontakPenerima.load_data", threshold=0.05)
     def load_data(self):
         self.tabel_penerima.setUpdatesEnabled(False)
         self.tabel_penerima.blockSignals(True)

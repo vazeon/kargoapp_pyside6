@@ -18,6 +18,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QPalette
 
+import qdarktheme
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -48,6 +50,32 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
 )
+
+_BUKU_GUDANG_TABBAR_QSS_CACHE = {}
+
+def _stylesheet_tabbar_buku_gudang(is_dark: bool) -> str:
+    """QDarkTheme scoped only to the small region tab bar, not the whole page."""
+    tema = "dark" if is_dark else "light"
+    qss = _BUKU_GUDANG_TABBAR_QSS_CACHE.get(tema)
+    if qss is None:
+        # Keep QDarkTheme colors/hover/selected states, but explicitly restore
+        # comfortable vertical padding for the nested region tabs. Applying the
+        # stylesheet only to this tab bar otherwise makes its tabs much shorter
+        # than the app's other navigation tabs.
+        qss = qdarktheme.load_stylesheet(tema) + "\n" + r'''
+QTabBar::tab {
+    padding: 5px 12px;
+}
+QTabBar::tab:selected {
+    padding: 5px 12px;
+}
+QTabBar::tab:hover {
+    padding: 5px 12px;
+}
+'''
+        _BUKU_GUDANG_TABBAR_QSS_CACHE[tema] = qss
+    return qss
+
 
 from config import CURRENT_SESSION, DATA_CLIENT
 
@@ -239,6 +267,7 @@ class DatabaseWorkerBukuGudang(QThread):
             worker.requestInterruption()
             worker.wait()
 
+    @db_service.profile_performance("BukuGudang.database_worker", threshold=0.05)
     def run(self):
         try:
             rows = db_service.ambil_data_buku_gudang(
@@ -469,6 +498,10 @@ class TabBukuGudang(QWidget):
 
         self.lbl_judul = QLabel("Buku Gudang")
         baris_utama.addWidget(self.lbl_judul)
+        self.lbl_status_data = QLabel("")
+        self.lbl_status_data.setObjectName("lblStatusBukuGudang")
+        self.lbl_status_data.setMinimumWidth(0)
+        baris_utama.addWidget(self.lbl_status_data)
         baris_utama.addStretch()
 
         tahun_sekarang = datetime.now().year
@@ -544,9 +577,10 @@ class TabBukuGudang(QWidget):
             self.tabs_list.append(widget_tabel)
             self.tabs_wilayah.addTab(widget_tabel, wilayah.title())
 
-        self.tabs_wilayah.currentChanged.connect(
-            lambda _index: self.refresh_session_ui()
-        )
+        # Tunda penerapan tema tabel untuk wilayah yang tersembunyi sampai
+        # wilayah tersebut dipilih. Ini menghindari re-style tiga FrozenTableWidget
+        # sekaligus setiap kali tema aplikasi berganti.
+        self.tabs_wilayah.currentChanged.connect(self._on_wilayah_changed)
         return self.tabs_wilayah
 
     def init_ui(self):
@@ -602,6 +636,7 @@ class TabBukuGudang(QWidget):
             widget = widget.parentWidget()
         return None
 
+    @db_service.profile_performance("BukuGudang.apply_search_to_table", threshold=0.025)
     def _terapkan_pencarian_ke_tabel(self, tabel):
         keyword = self.txt_cari.text().strip().casefold()
         if getattr(tabel, "_render_state", None) is not None:
@@ -960,6 +995,11 @@ class TabBukuGudang(QWidget):
         widget._load_pending = None
         widget._load_worker = None
         widget._loading = False
+        # Mode cakupan query terakhir yang diminta. Ketika keyword aktif,
+        # query memakai seluruh tahun berjalan; saat keyword kosong, cakupan
+        # kembali mengikuti filter tahun/bulan yang dipilih pengguna.
+        widget._buku_gudang_search_mode = False
+        widget._buku_gudang_query_year = str(datetime.now().year)
         timer = QTimer(widget)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda: self._render_batch(widget))
@@ -1044,15 +1084,21 @@ class TabBukuGudang(QWidget):
                 tabel,
                 is_dark=is_dark,
                 z=zoom_helper.dapatkan_zoom_level(self.__class__.__name__),
+                # Pergantian tema hanya perlu memperbarui warna/QSS. Jangan
+                # hitung ulang tinggi semua baris dan layout frozen table.
+                update_geometry=False,
+                extra_stylesheet=self._tooltip_qss(is_dark),
             )
-
-            current_style = tabel.styleSheet()
-            tabel.setStyleSheet(current_style + "\n" + self._tooltip_qss(is_dark))
+            # Cache tema tabel supaya perubahan tema berikutnya hanya perlu
+            # memproses tabel wilayah aktif. Tabel tersembunyi akan diperbarui
+            # sebelum ditampilkan melalui _on_wilayah_changed.
+            tabel._buku_gudang_theme_dark = bool(is_dark)
         finally:
             if frozen is not None:
                 frozen.setUpdatesEnabled(True)
             tabel.setUpdatesEnabled(True)
-            zoom_helper.sinkronkan_frozen_table(tabel, tertunda=True)
+            # Pergantian tema tidak mengubah geometri tabel; tidak perlu
+            # menjadwalkan sinkronisasi ulang frozen view pada setiap toggle.
 
     def _ubah_zoom_ctrl_scroll(self, tabel, arah):
         level = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
@@ -1066,8 +1112,36 @@ class TabBukuGudang(QWidget):
             z=level,
         )
 
+    def _on_wilayah_changed(self, _index):
+        """Perbarui tema hanya untuk tabel wilayah yang akan ditampilkan."""
+        active_widget = self.tabs_wilayah.currentWidget()
+        tabel = getattr(active_widget, "tabel", None)
+        if tabel is not None:
+            is_dark = self._tema_gelap_aktif()
+            if getattr(tabel, "_buku_gudang_theme_dark", None) != bool(is_dark):
+                styles_statis = self._buat_style_buku_gudang(is_dark)
+                self.inline_editor_style = styles_statis["inline_editor"]
+                self._terapkan_tema_ke_tabel(tabel, is_dark, styles_statis)
+
+        # Pertahankan perilaku refresh data dan status akses saat tab wilayah
+        # berganti; hanya pekerjaan styling tabel yang ditunda secara lazy.
+        self.refresh_session_ui()
+
     def sesuaikan_tema_lokal(self):
         is_dark = self._tema_gelap_aktif()
+
+        # The stable ThemeManager baseline does not install QDarkTheme on every
+        # full page (avoids expensive whole-table repolish). Refresh only this
+        # nested region tab bar, whose palette/QSS otherwise can remain stale.
+        try:
+            tab_bar = self.tabs_wilayah.tabBar()
+            tema_key = "dark" if is_dark else "light"
+            if tab_bar.property("_buku_gudang_tabbar_theme") != tema_key:
+                tab_bar.setStyleSheet(_stylesheet_tabbar_buku_gudang(is_dark))
+                tab_bar.setProperty("_buku_gudang_tabbar_theme", tema_key)
+        except (AttributeError, RuntimeError):
+            pass
+
         styles_statis = self._buat_style_buku_gudang(is_dark)
         self.inline_editor_style = styles_statis["inline_editor"]
 
@@ -1082,14 +1156,13 @@ class TabBukuGudang(QWidget):
         self.btn_reset_filter.setStyleSheet(styles_statis["btn_reset_filter"])
         terapkan_style_input_global(self, is_dark)
 
-        for widget in self.tabs_list:
-            tabel = getattr(widget, "tabel", None)
-            if tabel is not None:
-                self._terapkan_tema_ke_tabel(
-                    tabel,
-                    is_dark,
-                    styles_statis,
-                )
+        # Tema diterapkan langsung hanya pada tabel yang terlihat. Tabel
+        # wilayah lain akan menerima tema terbaru sebelum menjadi aktif.
+        active_widget = getattr(self, "tabs_wilayah", None)
+        active_widget = active_widget.currentWidget() if active_widget is not None else None
+        tabel = getattr(active_widget, "tabel", None)
+        if tabel is not None:
+            self._terapkan_tema_ke_tabel(tabel, is_dark, styles_statis)
 
     def setup_menu_tahun(self, tahun_sekarang):
         self.menu_tahun.clear()
@@ -1303,11 +1376,23 @@ class TabBukuGudang(QWidget):
             return "payment"
         return "text"
 
+    @db_service.profile_performance("BukuGudang.search_filter", threshold=0.025)
     def filter_pencarian_tabel(self):
         current_tab = self.tabs_wilayah.currentWidget()
         if not current_tab or not hasattr(current_tab, "tabel"):
             return
+
+        # Perubahan antara pencarian dan tampilan periode biasa mengubah
+        # cakupan query, bukan hanya baris yang disembunyikan di tabel.
+        # Debounce 300 ms yang sudah ada mencegah query berjalan per ketikan.
+        search_all_year = bool(self.txt_cari.text().strip())
+        if search_all_year != getattr(current_tab, "_buku_gudang_search_mode", False):
+            self.load_data(current_tab)
+            return
+
         self._terapkan_pencarian_ke_tabel(current_tab.tabel)
+        if not getattr(current_tab, "_loading", False):
+            self._perbarui_status_data(current_tab)
 
     def _buat_editor_filter(self, editor_type):
         if editor_type == "date":
@@ -1818,6 +1903,7 @@ class TabBukuGudang(QWidget):
         finally:
             tabel._syncing_row_heights = False
 
+    @db_service.profile_performance("BukuGudang.populate_row", threshold=0.025)
     def _isi_baris_tabel(self, tabel, wilayah, detail_rows, target_row=None):
         row = detail_rows[0]
         if target_row is None:
@@ -1900,6 +1986,7 @@ class TabBukuGudang(QWidget):
         item_resi.setData(self.ROLE_DETAIL_COUNT, len(detail_rows))
         item_resi.setData(self.ROLE_SEARCH_TEXT, " ".join(display_values).casefold())
 
+    @db_service.profile_performance("BukuGudang.save_table_state", threshold=0.025)
     def _simpan_state_tabel(self, tabel):
         if tabel is None:
             return
@@ -1912,6 +1999,7 @@ class TabBukuGudang(QWidget):
             "current_column": max(0, tabel.currentColumn()),
         }
 
+    @db_service.profile_performance("BukuGudang.restore_table_state", threshold=0.025)
     def _pulihkan_state_tabel(self, tabel):
         state = self._table_state.get(id(tabel)) if tabel is not None else None
         if not state:
@@ -1937,13 +2025,68 @@ class TabBukuGudang(QWidget):
         tabel.verticalScrollBar().setValue(state.get("vertical", 0))
         tabel.horizontalScrollBar().setValue(state.get("horizontal", 0))
 
+    def _perbarui_status_data(self, tab_widget=None, status=None):
+        """Tampilkan status pemuatan dan jumlah hasil tanpa mengubah data tabel."""
+        label = getattr(self, "lbl_status_data", None)
+        if label is None:
+            return
+
+        if tab_widget is None:
+            tab_widget = self.tabs_wilayah.currentWidget()
+        if tab_widget is None or self.tabs_wilayah.currentWidget() is not tab_widget:
+            return
+
+        if status == "loading":
+            label.setText("Memuat data...")
+            return
+        if status == "error":
+            label.setText("Gagal memuat data")
+            return
+
+        tabel = getattr(tab_widget, "tabel", None)
+        if tabel is None:
+            label.clear()
+            return
+
+        total = tabel.rowCount()
+        visible = sum(1 for row in range(total) if not tabel.isRowHidden(row))
+        keyword = self.txt_cari.text().strip()
+        if keyword:
+            tahun_cakupan = getattr(
+                tab_widget, "_buku_gudang_query_year", str(datetime.now().year)
+            )
+            if visible == 0:
+                label.setText(f"Pencarian {tahun_cakupan} · Tidak ada hasil")
+            else:
+                label.setText(
+                    f"Pencarian {tahun_cakupan} · {visible} dari {total} resi"
+                )
+        else:
+            label.setText(f"{total} resi")
+
+    @db_service.profile_performance("BukuGudang.request_table_load", threshold=0.025)
     def load_data(self, tab_widget):
         tabel = tab_widget.tabel
         filters = dict(getattr(tab_widget, "filter_data", {}) or {})
-        if self._bulan_terpilih and len(self._bulan_terpilih) < 12:
-            filters["_bulan"] = tuple(sorted(self._bulan_terpilih))
-        else:
+        search_all_year = bool(self.txt_cari.text().strip())
+
+        if search_all_year:
+            # Keyword mencari seluruh tahun kalender berjalan. Filter bulan
+            # dan pilihan tahun di header tidak membatasi query pencarian.
+            tahun_query = str(datetime.now().year)
             filters.pop("_bulan", None)
+        else:
+            tahun_query = self.btn_tahun.text()
+            if self._bulan_terpilih and len(self._bulan_terpilih) < 12:
+                filters["_bulan"] = tuple(sorted(self._bulan_terpilih))
+            else:
+                filters.pop("_bulan", None)
+
+        # Simpan cakupan yang diminta agar perubahan keyword berikutnya dapat
+        # dibedakan dari filter lokal tanpa menjalankan query untuk setiap ketikan.
+        tab_widget._buku_gudang_search_mode = search_all_year
+        tab_widget._buku_gudang_query_year = tahun_query
+
         if self._status_penagihan_terpilih != "SEMUA":
             filters["_status_penagihan"] = self._status_penagihan_terpilih
         else:
@@ -1954,6 +2097,7 @@ class TabBukuGudang(QWidget):
             tab_widget._table_was_enabled = tabel.isEnabled()
         tab_widget._load_generation += 1
         tab_widget._loading = True
+        self._perbarui_status_data(tab_widget, "loading")
         tab_widget._render_timer.stop()
         if getattr(tabel, "_render_state", None) is not None:
             tabel._render_state = None
@@ -1961,7 +2105,7 @@ class TabBukuGudang(QWidget):
         tabel.setEnabled(False)
         tab_widget._load_pending = (
             tab_widget._load_generation, self._kode_cabang_aktif(),
-            tab_widget.wilayah, self.btn_tahun.text(), filters,
+            tab_widget.wilayah, tahun_query, filters,
         )
         if tab_widget._load_worker is None:
             self._mulai_request_data(tab_widget)
@@ -2003,6 +2147,7 @@ class TabBukuGudang(QWidget):
             tab_widget._load_worker = None
             self._mulai_request_data(tab_widget)
 
+    @db_service.profile_performance("BukuGudang.prepare_table_render", threshold=0.025)
     def _proses_hasil_data(self, rows, tab_widget):
         tabel = tab_widget.tabel
         try:
@@ -2036,6 +2181,7 @@ class TabBukuGudang(QWidget):
         except Exception as error:
             self._gagal_render(error, tab_widget)
 
+    @db_service.profile_performance("BukuGudang.render_table_batch", threshold=0.025)
     def _render_batch(self, tab_widget):
         tabel = tab_widget.tabel
         state = getattr(tabel, "_render_state", None)
@@ -2057,6 +2203,7 @@ class TabBukuGudang(QWidget):
         except Exception as error:
             self._gagal_render(error, tab_widget)
 
+    @db_service.profile_performance("BukuGudang.finish_table_render", threshold=0.025)
     def _selesaikan_render(self, tab_widget):
         tabel = tab_widget.tabel
         self._pulihkan_tabel_setelah_loading(tabel)
@@ -2065,6 +2212,7 @@ class TabBukuGudang(QWidget):
         self._terapkan_pencarian_ke_tabel(tabel)
         tab_widget._loading = False
         tabel.setEnabled(getattr(tab_widget, "_table_was_enabled", True))
+        self._perbarui_status_data(tab_widget)
         generation = tab_widget._load_generation
         QTimer.singleShot(0, lambda: self._pulihkan_posisi_loading(tab_widget, generation))
 
@@ -2086,12 +2234,14 @@ class TabBukuGudang(QWidget):
         self._pulihkan_tabel_setelah_loading(tabel)
         tab_widget._loading = False
         tabel.setEnabled(getattr(tab_widget, "_table_was_enabled", True))
+        self._perbarui_status_data(tab_widget, "error")
         QMessageBox.critical(self, "Error Rendering", f"Gagal memproses data masuk:\n{error}")
 
     def _tampilkan_error_db(self, error_msg, tab_widget):
         tab_widget.tabel.setRowCount(0)
         tab_widget._loading = False
         tab_widget.tabel.setEnabled(getattr(tab_widget, "_table_was_enabled", True))
+        self._perbarui_status_data(tab_widget, "error")
         QMessageBox.critical(
             self, "Error Database", f"Gagal memuat data buku gudang:\n{error_msg}"
         )
@@ -2333,6 +2483,7 @@ class TabBukuGudang(QWidget):
         except Exception as error:
             QMessageBox.critical(self, "Error", f"Gagal: {error}")
 
+    @db_service.profile_performance("BukuGudang.refresh_session_ui", threshold=0.025)
     def refresh_session_ui(self):
         self.row_sedang_diedit = -1
         if self.tabs_wilayah.currentWidget():

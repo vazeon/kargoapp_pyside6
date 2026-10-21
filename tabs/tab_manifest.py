@@ -160,6 +160,10 @@ class TabManifest(QWidget):
         self._sedang_menerapkan_zoom = False
         self._sedang_memuat_tabel = False
         self._sedang_memproses_manifest = False
+        # Tinggi input adalah geometri, bukan tema. Set sekali ketika tema
+        # pertama diterapkan; perubahan tema berikutnya tidak perlu memaksa
+        # layout menghitung ulang fixed height pada seluruh input.
+        self._tinggi_input_manifest_sudah_diterapkan = False
 
         # Cache master Kapal untuk autocomplete, autofill, dan pencegahan duplikat.
         self._kapal_master_by_key = {}
@@ -1018,6 +1022,7 @@ class TabManifest(QWidget):
             self._buat_editor_keterangan_manifest(keterangan),
         )
 
+    @db_service.profile_performance("Manifest.load_available_resi", threshold=0.05)
     def load_data_resi_gudang(self):
         if self._sedang_memuat_tabel:
             return
@@ -1121,6 +1126,7 @@ class TabManifest(QWidget):
                 value,
             )
 
+    @db_service.profile_performance("Manifest.load_history", threshold=0.05)
     def load_histori(self):
         self.list_histori.setUpdatesEnabled(False)
         self.list_histori.clear()
@@ -1555,12 +1561,17 @@ class TabManifest(QWidget):
         self.lbl_title.setStyleSheet(styles_statis["lbl_title"])
         self.btn_proses.setStyleSheet(styles_statis["btn_proses"])
 
-        atur_tinggi_input((
-            self.cb_filter_wilayah, self.txt_nama_kapal, self.txt_note_manifest,
-            self.cb_jenis_truk, self.txt_jenis_truk_lain, self.txt_no_pol,
-            self.txt_sopir, self.txt_keterangan, self.cb_tahun_filter,
-            self.txt_cari_histori,
-        ))
+        if not self._tinggi_input_manifest_sudah_diterapkan:
+            with db_service.performance_timer(
+                "UI.theme.Manifest.input_geometry_init", threshold=0.001
+            ):
+                atur_tinggi_input((
+                    self.cb_filter_wilayah, self.txt_nama_kapal, self.txt_note_manifest,
+                    self.cb_jenis_truk, self.txt_jenis_truk_lain, self.txt_no_pol,
+                    self.txt_sopir, self.txt_keterangan, self.cb_tahun_filter,
+                    self.txt_cari_histori,
+                ))
+            self._tinggi_input_manifest_sudah_diterapkan = True
 
         for card in (self.card_rute_manifest, self.card_armada_manifest):
             card.setStyleSheet(styles_statis["card_manifest"])
@@ -1576,8 +1587,14 @@ class TabManifest(QWidget):
         self.txt_tanggal_manifest.setStyleSheet(styles_statis["txt_tanggal_manifest"])
         self.txt_no_manifest.setStyleSheet(styles_statis["txt_no_manifest"])
 
-    def _terapkan_zoom_tabel_manifest(self, is_dark, z):
-        """Zoom/font/geometri dari helper pusat; tab hanya mengatur status modul."""
+    def _terapkan_zoom_tabel_manifest(
+        self,
+        is_dark,
+        z,
+        *,
+        update_geometry=True,
+    ):
+        """Terapkan tema tabel; hitung ulang geometri hanya saat zoom berubah."""
         tabel = self.tabel_manifest
         zoom_sebelumnya = self._sedang_menerapkan_zoom
         self._sedang_menerapkan_zoom = True
@@ -1585,7 +1602,12 @@ class TabManifest(QWidget):
             for target in (tabel, getattr(tabel, "frozen_table", None)):
                 if target is not None:
                     update_status_delegate_theme(target, is_dark)
-            zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=z)
+            zoom_helper.terapkan_zoom_tabel(
+                tabel,
+                is_dark=is_dark,
+                z=z,
+                update_geometry=update_geometry,
+            )
         finally:
             self._sedang_menerapkan_zoom = zoom_sebelumnya
 
@@ -1595,25 +1617,56 @@ class TabManifest(QWidget):
         self._terapkan_zoom_tabel_manifest(self._tema_gelap_aktif(), z)
 
     def _terapkan_style_histori_manifest(self, styles_statis, is_dark):
-        self.list_histori.setStyleSheet(styles_statis["list_histori"])
-        font_histori = self.list_histori.font()
-        font_histori.setPointSizeF(
-            ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
-        )
-        self.list_histori.setFont(font_histori)
-        self._sinkronkan_font_item_histori(is_dark)
+        with db_service.performance_timer(
+            "UI.theme.Manifest.history_stylesheet", threshold=0.001
+        ):
+            self.list_histori.setStyleSheet(styles_statis["list_histori"])
+            font_histori = self.list_histori.font()
+            font_histori.setPointSizeF(
+                ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
+            )
+            self.list_histori.setFont(font_histori)
+
+        with db_service.performance_timer(
+            "UI.theme.Manifest.history_items_sync", threshold=0.001
+        ):
+            self._sinkronkan_font_item_histori(is_dark)
 
     def sesuaikan_tema_lokal(self):
-        is_dark = self._tema_gelap_aktif()
-        z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
-        styles_statis = konversi_style_font_ke_point(
-            get_manifest_styles(is_dark, self.is_edit_mode)
-        )
+        with db_service.performance_timer(
+            "UI.theme.Manifest.prepare_styles", threshold=0.001
+        ):
+            is_dark = self._tema_gelap_aktif()
+            z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
+            styles_statis = konversi_style_font_ke_point(
+                get_manifest_styles(is_dark, self.is_edit_mode)
+            )
 
-        self._terapkan_style_form_manifest(styles_statis)
-        self._terapkan_zoom_tabel_manifest(is_dark, z)
-        self._terapkan_style_histori_manifest(styles_statis, is_dark)
-        terapkan_style_input_global(self, is_dark)
+        with db_service.performance_timer(
+            "UI.theme.Manifest.form_styles", threshold=0.001
+        ):
+            self._terapkan_style_form_manifest(styles_statis)
+
+        # Tema hanya mengubah warna/QSS. Level zoom, font, tinggi baris, dan
+        # lebar kolom tidak berubah; hindari mengulang geometri seluruh tabel.
+        with db_service.performance_timer(
+            "UI.theme.Manifest.table_theme", threshold=0.001
+        ):
+            self._terapkan_zoom_tabel_manifest(
+                is_dark,
+                z,
+                update_geometry=False,
+            )
+
+        with db_service.performance_timer(
+            "UI.theme.Manifest.history_theme", threshold=0.001
+        ):
+            self._terapkan_style_histori_manifest(styles_statis, is_dark)
+
+        with db_service.performance_timer(
+            "UI.theme.Manifest.global_input_styles", threshold=0.001
+        ):
+            terapkan_style_input_global(self, is_dark)
 
     def _settings_kolom(self):
         return QSettings(
@@ -1711,6 +1764,7 @@ class TabManifest(QWidget):
         self.generate_no_manifest()
         self.load_data_resi_gudang()
 
+    @db_service.profile_performance("Manifest.search_history", threshold=0.025)
     def filter_histori(self, text):
         keyword = str(text or "").strip().lower()
 

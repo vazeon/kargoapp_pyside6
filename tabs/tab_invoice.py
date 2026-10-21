@@ -1119,6 +1119,7 @@ class BillingQueueDialog(QDialog):
             return None, True
         return str(data or CURRENT_SESSION.get("kode_cabang", "PUSAT")).strip().upper(), False
 
+    @db_service.profile_performance("Invoice.load_unbilled_resi", threshold=0.05)
     def muat_data(self, *_):
         kode_cabang, semua_cabang = self._scope_cabang()
         gunakan_periode = self.chk_periode.isChecked()
@@ -2385,6 +2386,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             )
             tabel.setItem(row, column, item)
 
+    @db_service.profile_performance("Invoice.load_history", threshold=0.05)
     def load_histori_invoice(self):
         tabel = self.tabel_histori_invoice
         tabel.setUpdatesEnabled(False)
@@ -2407,6 +2409,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
             tabel.setUpdatesEnabled(True)
             self.filter_histori_invoice()
 
+    @db_service.profile_performance("Invoice.search_history", threshold=0.025)
     def filter_histori_invoice(self, *_):
         keyword = self.txt_cari_invoice.text().strip().lower()
         for row in range(self.tabel_histori_invoice.rowCount()):
@@ -3124,18 +3127,33 @@ class TabInvoice(ZoomTableMixin, QWidget):
             ) if tabel is not None
         ]
 
-    def _terapkan_zoom_satu_tabel_invoice(self, tabel, metrics, is_dark):
+    def _terapkan_zoom_satu_tabel_invoice(
+        self,
+        tabel,
+        metrics,
+        is_dark,
+        *,
+        update_geometry=True,
+    ):
         updates_sebelumnya = tabel.updatesEnabled()
         if updates_sebelumnya:
             tabel.setUpdatesEnabled(False)
         try:
             with blokir_signal_sementara(tabel):
-                zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=metrics.level)
-                self._sinkronkan_font_item_tabel(tabel)
+                zoom_helper.terapkan_zoom_tabel(
+                    tabel,
+                    is_dark=is_dark,
+                    z=metrics.level,
+                    update_geometry=update_geometry,
+                )
+                # Font item tidak berubah pada pergantian tema saja.
+                if update_geometry:
+                    self._sinkronkan_font_item_tabel(tabel)
         finally:
             if updates_sebelumnya:
                 tabel.setUpdatesEnabled(True)
-            tabel.updateGeometries()
+            if update_geometry:
+                tabel.updateGeometries()
             tabel.viewport().update()
 
     def _ubah_zoom_ctrl_scroll(self, arah):
@@ -3153,6 +3171,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         is_dark,
         z,
         tabel_sasaran=None,
+        update_geometry=True,
     ):
         metrics = zoom_helper.dapatkan_metrik_zoom(z)
         target_ids = (
@@ -3167,7 +3186,10 @@ class TabInvoice(ZoomTableMixin, QWidget):
             for tabel in self._konfigurasi_zoom_tabel_invoice():
                 if target_ids is None or id(tabel) in target_ids:
                     self._terapkan_zoom_satu_tabel_invoice(
-                        tabel, metrics, is_dark,
+                        tabel,
+                        metrics,
+                        is_dark,
+                        update_geometry=update_geometry,
                     )
         finally:
             self._sedang_menerapkan_zoom = zoom_sebelumnya
@@ -3184,4 +3206,6 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self._terapkan_zoom_tabel_invoice(
             is_dark=is_dark,
             z=z,
+            # Tema tidak mengubah zoom atau geometri tabel.
+            update_geometry=False,
         )

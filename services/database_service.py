@@ -3,12 +3,15 @@
 import sqlite3
 import json
 import logging
+import os
 import re
+import sys
 import uuid
 import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from functools import wraps
 from audit_context import install_sqlite_audit_functions
 from config import CURRENT_SESSION, DATA_CLIENT, CENTRAL_BRANCH_ROLES, BRANCH_ACCESS_VIEW, cabang_boleh_tulis, mode_akses_cabang
 from supabase_client import SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, supabase
@@ -4857,6 +4860,8 @@ def simpan_semua_pengaturan_dan_cabang(settings_to_save, branches_to_save):
 # ==============================================================================
 
 _PERFORMANCE_REPORT = False
+_PERFORMANCE_LOGGER = logging.getLogger("kargo.performance")
+_PERFORMANCE_LOGGER.propagate = False
 
 _PERFORMANCE_CACHE = {
     "invoice_status": {},
@@ -4865,21 +4870,71 @@ _PERFORMANCE_CACHE = {
 
 
 def set_performance_report(enabled=True):
-    """Enable/disable lightweight performance logging."""
+    """Aktifkan log pengukuran performa tanpa mengubah perilaku aplikasi."""
     global _PERFORMANCE_REPORT
     _PERFORMANCE_REPORT = bool(enabled)
+    if not _PERFORMANCE_REPORT:
+        return
+
+    # Satu handler khusus mencegah log database lain ikut menjadi ramai.
+    if not any(getattr(handler, "_kargo_performance_handler", False)
+               for handler in _PERFORMANCE_LOGGER.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler._kargo_performance_handler = True
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [PERF] %(message)s", "%H:%M:%S"
+        ))
+        _PERFORMANCE_LOGGER.addHandler(handler)
+    _PERFORMANCE_LOGGER.setLevel(logging.INFO)
+
+
+def log_performance_duration(label, elapsed, threshold=0.05):
+    """Tulis durasi jika profiling aktif dan ambang batas terlampaui."""
+    if _PERFORMANCE_REPORT and elapsed >= threshold:
+        _PERFORMANCE_LOGGER.info("%s | %.4f s", label, elapsed)
+
+
+def profile_performance(label, threshold=0.05):
+    """Decorator pengukuran untuk operasi UI/database sinkron.
+
+    Saat KARGO_PERF_LOG tidak diaktifkan, fungsi berjalan normal tanpa timer.
+    Label dapat berupa teks atau callable yang menerima argumen fungsi.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            if not _PERFORMANCE_REPORT:
+                return func(*args, **kwargs)
+
+            started = time.perf_counter()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                elapsed = time.perf_counter() - started
+                if callable(label):
+                    try:
+                        label_text = str(label(*args, **kwargs))
+                    except Exception:
+                        label_text = func.__qualname__
+                else:
+                    label_text = str(label or func.__qualname__)
+                log_performance_duration(label_text, elapsed, threshold)
+        return wrapped
+    return decorator
 
 
 @contextmanager
 def performance_timer(label, threshold=0.5):
-    """Monitoring ringan proses lambat."""
+    """Ukur satu blok proses dan catat hanya saat profiling diaktifkan."""
+    if not _PERFORMANCE_REPORT:
+        yield
+        return
+
     start = time.perf_counter()
     try:
         yield
     finally:
-        elapsed = time.perf_counter() - start
-        if _PERFORMANCE_REPORT and elapsed >= threshold:
-            logger.info("[PERF] %s : %.4fs", label, elapsed)
+        log_performance_duration(label, time.perf_counter() - start, threshold)
 
 
 def clear_performance_cache():

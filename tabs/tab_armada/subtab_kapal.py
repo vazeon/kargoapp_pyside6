@@ -507,6 +507,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
                 ubah_mode=True,
             )
 
+    @db_service.profile_performance("ArmadaKapal.refresh_table", threshold=0.05)
     def refresh_tabel(self):
         tabel = self.tabel_kapal
         tabel.setUpdatesEnabled(False)
@@ -562,6 +563,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
                 kwargs["alignment"] = alignment
             tabel.setItem(baris, column, buat_tabel_item(value, **kwargs))
 
+    @db_service.profile_performance("ArmadaKapal.search_filter", threshold=0.025)
     def filter_tabel_kapal(self, text):
         kata_kunci = text.lower().strip()
         nomor_baru = 1

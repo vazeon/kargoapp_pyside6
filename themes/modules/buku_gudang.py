@@ -5,8 +5,32 @@ from typing import Dict, Optional, Tuple
 
 from PySide6.QtGui import QColor
 
+import qdarktheme
+
 from themes.colors import get_theme_colors
 from utils.typography import get_master_font
+from utils.ui_metrics import NESTED_TAB_PADDING_H, NESTED_TAB_PADDING_V
+
+_BUKU_GUDANG_TABBAR_QSS_CACHE = {}
+
+def get_buku_gudang_tabbar_styles(is_dark: bool) -> str:
+    """Stylesheet QDarkTheme untuk tab wilayah, memakai padding global nested tab."""
+    tema = "dark" if is_dark else "light"
+    qss = _BUKU_GUDANG_TABBAR_QSS_CACHE.get(tema)
+    if qss is None:
+        qss = qdarktheme.load_stylesheet(tema) + "\n" + f'''
+QTabBar::tab {{
+    padding: {NESTED_TAB_PADDING_V}px {NESTED_TAB_PADDING_H}px;
+}}
+QTabBar::tab:selected {{
+    padding: {NESTED_TAB_PADDING_V}px {NESTED_TAB_PADDING_H}px;
+}}
+QTabBar::tab:hover {{
+    padding: {NESTED_TAB_PADDING_V}px {NESTED_TAB_PADDING_H}px;
+}}
+'''
+        _BUKU_GUDANG_TABBAR_QSS_CACHE[tema] = qss
+    return qss
 
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
