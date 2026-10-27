@@ -43,8 +43,10 @@ def _record_matches_identifier(record: dict, identifier: str) -> bool:
     target = _normalize_identifier(identifier)
     if not target or not isinstance(record, dict):
         return False
+    # Hanya cocokkan target terhadap identitas yang benar-benar tersimpan.
+    # Jangan memasukkan ``target`` sendiri ke candidates: itu akan membuat
+    # setiap identifier yang tidak dikenal cocok dengan record pertama.
     candidates = {
-        target,
         _normalize_identifier(record.get("identifier")),
     }
     profile = record.get("profile")
@@ -146,6 +148,39 @@ def save_offline_login_cache(
         record["profile"] = dict(metadata)
     accounts[ident] = record
     _save_offline_accounts(accounts)
+
+
+def update_offline_login_profile(identifier: str, metadata: dict | None) -> bool:
+    """Perbarui snapshot profil cache tanpa menghitung ulang verifier password.
+
+    Dipakai saat restore sesi setelah login online berhasil: kredensial tersimpan
+    yang sama sudah diverifikasi oleh Supabase, sehingga PBKDF2 310.000 iterasi
+    tidak perlu diulang hanya untuk menyegarkan metadata profil lokal.
+    False berarti record tidak ada/tidak valid dan caller boleh memakai jalur
+    penyimpanan lengkap sebagai fallback.
+    """
+    ident = _normalize_identifier(identifier)
+    if not ident or not isinstance(metadata, dict):
+        return False
+
+    accounts = _load_offline_accounts()
+    key, record = _find_offline_record(accounts, identifier)
+    if key is None or not isinstance(record, dict):
+        return False
+
+    # Pastikan verifier lama valid sebelum mempertahankan record tersebut.
+    if not record.get("salt") or not record.get("digest"):
+        return False
+
+    if record.get("profile") == metadata:
+        # Hindari tulis QSettings jika snapshot tidak berubah.
+        return True
+
+    updated_record = dict(record)
+    updated_record["profile"] = dict(metadata)
+    accounts[key] = updated_record
+    _save_offline_accounts(accounts)
+    return True
 
 
 def verify_offline_login_cache(identifier: str, password: str) -> bool:

@@ -9,7 +9,9 @@ Business data (resi, manifest, invoice, dll.) tetap tidak di-seed di sini.
 """
 
 import json
+import os
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -24,7 +26,11 @@ CONFIG_KEY = "default"
 
 
 def _db_path(db_name: str | None = None) -> str:
-    return str(db_name or CURRENT_SESSION.get("db_name") or "database_cargo.db")
+    """Kembalikan path database absolut tanpa membuka koneksi atau migrasi."""
+    path = Path(str(db_name or CURRENT_SESSION.get("db_name") or "database_cargo.db").strip())
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+    return str(path.resolve())
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -34,15 +40,72 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _log_bootstrap_duration(label: str, started_at: float) -> None:
+    """Catat subfase bootstrap hanya saat profiling aplikasi diaktifkan."""
+    if os.environ.get("KARGO_PERF_LOG", "").strip() == "1":
+        elapsed = time.perf_counter() - started_at
+        print(f"[PERF] Auth.client_bootstrap.{label} | {elapsed:.4f} s", flush=True)
+
+
+def _fetch_remote_config_metadata() -> Dict[str, Any]:
+    """Ambil metadata kecil terlebih dahulu untuk mendeteksi config yang berubah.
+
+    Pada login biasa, config_version hampir selalu sama. Query ringan ini
+    menghindari pengunduhan JSON konfigurasi lengkap dan pembukaan transaksi
+    SQLite tambahan pada jalur unchanged. Jika versi berbeda, bootstrap tetap
+    mengambil dan memvalidasi konfigurasi lengkap sebelum menerapkannya.
+    """
+    started = time.perf_counter()
+    try:
+        response = (
+            supabase.table("app_config")
+            .select("schema_version, config_version, client_code, is_active")
+            .eq("config_key", CONFIG_KEY)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+    finally:
+        _log_bootstrap_duration("metadata_query", started)
+
+    rows = response.data or []
+    if not rows:
+        raise RuntimeError(
+            "Konfigurasi client belum tersedia di Supabase "
+            "(public.app_config / config_key='default')."
+        )
+
+    row = rows[0]
+    schema_version = _as_int(row.get("schema_version"), 0)
+    if schema_version != EXPECTED_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"schema_version client config tidak didukung: {schema_version}. "
+            f"Aplikasi mengharapkan {EXPECTED_SCHEMA_VERSION}."
+        )
+    config_version = _as_int(row.get("config_version"), 0)
+    client_code = str(row.get("client_code") or "").strip().upper()
+    if not client_code:
+        raise RuntimeError("client_code pada app_config wajib diisi.")
+    return {
+        "schema_version": schema_version,
+        "config_version": config_version,
+        "client_code": client_code,
+    }
+
+
 def _fetch_remote_config() -> Dict[str, Any]:
-    response = (
-        supabase.table("app_config")
-        .select("config_key, schema_version, config_version, client_code, config, is_active")
-        .eq("config_key", CONFIG_KEY)
-        .eq("is_active", True)
-        .limit(1)
-        .execute()
-    )
+    started = time.perf_counter()
+    try:
+        response = (
+            supabase.table("app_config")
+            .select("config_key, schema_version, config_version, client_code, config, is_active")
+            .eq("config_key", CONFIG_KEY)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+    finally:
+        _log_bootstrap_duration("full_config_query", started)
     rows = response.data or []
     if not rows:
         raise RuntimeError(
@@ -502,8 +565,15 @@ def _apply_numbering(conn: sqlite3.Connection, numbering: list[Dict[str, Any]], 
             """, (code,"INVOICE","INV",str(uuid.uuid4())))
 
 
-def apply_client_config(db_name: str, config: Dict[str, Any]) -> bool:
-    db_path = init_db(db_name)
+def apply_client_config(
+    db_name: str,
+    config: Dict[str, Any],
+    *,
+    initialize_db: bool = True,
+) -> bool:
+    # Default mempertahankan perilaku aman untuk pemanggil langsung. Jalur
+    # login dapat melewati init_db karena database sudah disiapkan sebelumnya.
+    db_path = init_db(db_name) if initialize_db else _db_path(db_name)
     client_code = str(config.get("client_code") or "").strip().upper()
     config_version = _as_int(config.get("config_version"), 0)
     if not client_code or config_version < 1:
@@ -559,13 +629,60 @@ def apply_client_config(db_name: str, config: Dict[str, Any]) -> bool:
     return True
 
 
-def bootstrap_from_supabase(db_name: str | None = None) -> Dict[str, Any]:
+def bootstrap_from_supabase(
+    db_name: str | None = None,
+    *,
+    database_initialized: bool = False,
+) -> Dict[str, Any]:
+    """Ambil konfigurasi client dari Supabase dan terapkan ke SQLite lokal.
+
+    Bila database sudah siap (jalur login), cek metadata config terlebih dahulu.
+    Ketika versi/client sama dengan state lokal, JSON besar tidak perlu diunduh
+    dan apply_client_config tidak perlu membuka transaksi untuk sekadar no-op.
+    Jika metadata berbeda, tetap ambil konfigurasi lengkap dan terapkan seperti
+    biasa. Pemanggil lama yang tidak menjamin database siap mempertahankan alur
+    lama dan tetap menjalankan init_db melalui apply_client_config.
+    """
     if not str(CURRENT_SESSION.get("auth_email") or "").strip():
         raise RuntimeError("Bootstrap client hanya dijalankan setelah login Supabase.")
 
-    config = _fetch_remote_config()
+    if not database_initialized:
+        config = _fetch_remote_config()
+        database = _db_path(db_name)
+        changed = apply_client_config(database, config, initialize_db=True)
+        return {
+            "client_code": config["client_code"],
+            "config_version": _as_int(config.get("config_version"), 0),
+            "changed": changed,
+        }
+
+    total_started = time.perf_counter()
     database = _db_path(db_name)
-    changed = apply_client_config(database, config)
+    local_started = time.perf_counter()
+    with sqlite3.connect(database, timeout=10.0) as conn:
+        local_version = _local_config_version(conn)
+        local_client = _local_client_code(conn)
+    _log_bootstrap_duration("local_state_read", local_started)
+
+    metadata = _fetch_remote_config_metadata()
+    remote_version = metadata["config_version"]
+    remote_client = metadata["client_code"]
+
+    if local_version == remote_version and local_client == remote_client:
+        CURRENT_SESSION["client_code"] = remote_client
+        CURRENT_SESSION["client_config_version"] = remote_version
+        _log_bootstrap_duration("fast_path_total", total_started)
+        return {
+            "client_code": remote_client,
+            "config_version": remote_version,
+            "changed": False,
+        }
+
+    config = _fetch_remote_config()
+    apply_started = time.perf_counter()
+    changed = apply_client_config(database, config, initialize_db=False)
+    _log_bootstrap_duration("apply_local_config", apply_started)
+    _log_bootstrap_duration("full_path_total", total_started)
     return {
         "client_code": config["client_code"],
         "config_version": _as_int(config.get("config_version"), 0),

@@ -10,8 +10,8 @@ from typing import Dict
 import qdarktheme
 from PySide6.QtWidgets import QApplication, QWidget
 
-from themes.base import get_base_style, get_main_tabs_base_style
-from themes.shell import get_main_shell_styles
+from themes.base import get_base_style
+from themes.shell import get_main_shell_styles, get_main_tab_bar_style
 from themes.components.inputs import get_global_focus_qss
 
 
@@ -279,8 +279,7 @@ class ThemeManager:
         # Detail visual QTabBar tetap menggunakan QSS sesuai tema, tetapi scope
         # pembaruannya hanya tab bar kecil, bukan seluruh QTabWidget.
         tabs_qss = _ringkas_qss(
-            get_main_tabs_base_style(
-                is_dark,
+            get_main_tab_bar_style(
                 qdark_stylesheet=cls._qdark_stylesheet(tema),
             )
         )

@@ -2062,9 +2062,10 @@ class TabBukuGudang(QWidget):
         search_all_year = bool(self.txt_cari.text().strip())
 
         if search_all_year:
-            # Keyword mencari seluruh tahun kalender berjalan. Filter bulan
-            # dan pilihan tahun di header tidak membatasi query pencarian.
-            tahun_query = str(datetime.now().year)
+            # Keyword mencari semua bulan pada tahun yang dipilih. Filter
+            # bulan diabaikan, tetapi tahun pada header tetap menjadi batas
+            # agar pencarian lintas periode tidak diam-diam mengganti tahun.
+            tahun_query = str(self.btn_tahun.text() or datetime.now().year).strip()
             filters.pop("_bulan", None)
         else:
             tahun_query = self.btn_tahun.text()

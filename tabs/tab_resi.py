@@ -281,6 +281,9 @@ class TabResi(QWidget):
         self._resi_sedang_diedit = None
         self._revision_sedang_diedit = None
         self._butuh_update_tema = False
+        # Pekerjaan lokal yang mahal pada show pertama ditunda satu giliran
+        # event loop agar showMaximized() dapat menyelesaikan presentasi window.
+        self._first_show_event_seen = False
 
         self._mode_total_ongkir = None
         self._subtotal_manual_ongkir = 0
@@ -320,6 +323,11 @@ class TabResi(QWidget):
             "Resi.init_ui", threshold=0.02
         ):
             self.init_ui()
+
+        # Ukuran kolom adalah preferensi layout, bukan bagian dari tema.
+        # Pulihkan sekali setelah tabel dibuat agar pergantian tema tidak
+        # mengulang restoreState dan setColumnWidth pada seluruh kolom.
+        self._pulihkan_ukuran_tabel_resi()
         self._timer_autocomplete_sync.start()
 
     @staticmethod
@@ -333,7 +341,7 @@ class TabResi(QWidget):
             layout_utama = QHBoxLayout(self)
             layout_utama.setContentsMargins(0, 0, 0, 0)
             styles_awal = konversi_style_font_ke_point(
-                get_resi_static_styles(self.current_theme == "dark")
+                get_resi_static_styles()
             )
 
             self.scroll_kiri = QScrollArea()
@@ -346,6 +354,10 @@ class TabResi(QWidget):
             layout_kiri = QVBoxLayout(self.widget_kiri)
             layout_kiri.setContentsMargins(*RESI_PAGE_MARGINS)
             layout_kiri.setSpacing(RESI_SPACING)
+
+            # Kaitkan kontainer sebelum kontrol form dibuat agar QScrollArea
+            # tidak perlu memasang subtree yang besar setelah form selesai.
+            self.scroll_kiri.setWidget(self.widget_kiri)
 
         with db_service.performance_timer(
             "Resi.init_ui.top_bar", threshold=0.02
@@ -375,11 +387,6 @@ class TabResi(QWidget):
         with db_service.performance_timer(
             "Resi.init_ui.splitter", threshold=0.02
         ):
-            with db_service.performance_timer(
-                "Resi.splitter.attach_left_content", threshold=0.005
-            ):
-                self.scroll_kiri.setWidget(self.widget_kiri)
-
             with db_service.performance_timer(
                 "Resi.splitter.create", threshold=0.005
             ):
@@ -1005,21 +1012,53 @@ class TabResi(QWidget):
         self.kalkulator_finansial_otomatis()
         self.otomatisasi_nomor_resi()
 
+    @db_service.profile_performance("Resi.show_event", threshold=0.001)
     def showEvent(self, event):
         super().showEvent(event)
         self.kode_cabang = self._kode_cabang_aktif()
 
+        # init_ui() sudah mengajukan pembacaan histori pertama secara async.
+        # Pada show pertama, jangan membatalkan request itu dengan request identik;
+        # dan jangan lakukan styling lokal berat di dalam showMaximized().
+        if not self._first_show_event_seen:
+            self._first_show_event_seen = True
+            QTimer.singleShot(0, self._terapkan_tema_setelah_show_awal)
+            return
+
         is_dark = self._tema_gelap_aktif()
         tema_sekarang = "dark" if is_dark else "light"
-
-        # Terapkan update tema secara lazy bila tema berubah atau bertatus tertunda saat hidden
         if (
             getattr(self, "_tema_terakhir_terpasang", None) != tema_sekarang
             or getattr(self, "_butuh_update_tema", False)
         ):
-            self._eksekusi_penyesuaian_tema(tema_sekarang, is_dark)
+            with db_service.performance_timer(
+                "Resi.show_event.apply_theme", threshold=0.001
+            ):
+                self._eksekusi_penyesuaian_tema(tema_sekarang, is_dark)
 
-        self.load_data_resi()
+        with db_service.performance_timer(
+            "Resi.show_event.load_data", threshold=0.001
+        ):
+            self.load_data_resi()
+
+    def _terapkan_tema_setelah_show_awal(self):
+        """Terapkan tema lokal setelah event show pertama selesai diproses Qt."""
+        if not self.isVisible():
+            # Jika window/tab langsung disembunyikan, tandai agar diterapkan
+            # saat ditampilkan lagi, sesuai perilaku tema lazy sebelumnya.
+            self._butuh_update_tema = True
+            return
+
+        is_dark = self._tema_gelap_aktif()
+        tema_sekarang = "dark" if is_dark else "light"
+        if (
+            getattr(self, "_tema_terakhir_terpasang", None) != tema_sekarang
+            or getattr(self, "_butuh_update_tema", False)
+        ):
+            with db_service.performance_timer(
+                "Resi.first_show.apply_theme", threshold=0.001
+            ):
+                self._eksekusi_penyesuaian_tema(tema_sekarang, is_dark)
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.StyleChange or event.type() == QEvent.Type.PaletteChange:
@@ -1035,10 +1074,7 @@ class TabResi(QWidget):
         if table is None:
             return
 
-        theme = get_resi_detail_barang_theme(
-            is_dark=is_dark,
-            sz_base=sz_base,
-        )
+        theme = get_resi_detail_barang_theme(is_dark=is_dark)
 
         qss = get_table_input_styles(is_dark, theme=theme)
         table.setStyleSheet(konversi_font_qss_ke_point(qss))
@@ -1073,38 +1109,71 @@ class TabResi(QWidget):
 
         self.setUpdatesEnabled(False)
         try:
-            fs, styles = self._buat_resi_styles(is_dark)
+            with db_service.performance_timer(
+                "Resi.theme_step.build_styles", threshold=0.001
+            ):
+                fs, styles = self._buat_resi_styles(is_dark)
 
-            # Pastikan QSplitter bersih tanpa custom QSS lokal agar 100% menggunakan bawaan pyqtdarktheme
-            if hasattr(self, "splitter"):
-                self.splitter.setStyleSheet("")
+            # Jangan reset stylesheet splitter jika memang sudah kosong.
+            # setStyleSheet("") tetap memicu invalidasi style/layout Qt meski tidak ada QSS lokal.
+            splitter = getattr(self, "splitter", None)
+            if splitter is not None and splitter.styleSheet():
+                with db_service.performance_timer(
+                    "Resi.theme_step.splitter_stylesheet", threshold=0.001
+                ):
+                    splitter.setStyleSheet("")
 
-            self._pasang_stylesheet_nama(
-                (
-                    "lbl_main_title", "lbl_tgl_tag", "lbl_edit_mode", "lbl_resi_tag", "txt_resi_display",
-                    "date_input", "txt_search", "lbl_histori_title",
-                    "cb_periode_histori", "btn_reset_histori", "list_histori",
-                    "btn_generate_simpan", "lbl_reset_form", "scroll_kiri",
-                    "group_pengirim", "group_penerima", "group_tabel_container",
-                    "group_finance", "btn_tambah_baris", "btn_hapus_baris",
-                    "box_np", "box_p",
-                ),
-                styles,
-            )
-            self._terapkan_tema_histori_statis(fs)
-            self._terapkan_style_histori_seperti_manifest(is_dark)
-            self._terapkan_tema_input(styles)
-            self._terapkan_tema_detail_barang(
-                is_dark=is_dark,
-                sz_base=UKURAN_FONT_INPUT,
-            )
-            self._pulihkan_ukuran_tabel_resi()
-            self._terapkan_style_rekening(is_dark)
+            with db_service.performance_timer(
+                "Resi.theme_step.named_stylesheets", threshold=0.001
+            ):
+                self._pasang_stylesheet_nama(
+                    (
+                        "lbl_main_title", "lbl_tgl_tag", "lbl_edit_mode", "lbl_resi_tag", "txt_resi_display",
+                        "date_input", "txt_search", "lbl_histori_title",
+                        "cb_periode_histori",
+                        # Kedua widget ini memiliki stylesheet khusus yang dipasang
+                        # pada langkah tema tersendiri; hindari setStyleSheet ganda.
+                        "btn_generate_simpan", "lbl_reset_form", "scroll_kiri",
+                        "group_pengirim", "group_penerima", "group_tabel_container",
+                        "group_finance", "btn_tambah_baris", "btn_hapus_baris",
+                        "box_np", "box_p",
+                    ),
+                    styles,
+                )
+            with db_service.performance_timer(
+                "Resi.theme_step.history_static", threshold=0.001
+            ):
+                self._terapkan_tema_histori_statis(fs)
+            with db_service.performance_timer(
+                "Resi.theme_step.history_manifest", threshold=0.001
+            ):
+                self._terapkan_style_histori_seperti_manifest(is_dark)
+            with db_service.performance_timer(
+                "Resi.theme_step.input_theme", threshold=0.001
+            ):
+                self._terapkan_tema_input(styles)
+            with db_service.performance_timer(
+                "Resi.theme_step.detail_table", threshold=0.001
+            ):
+                self._terapkan_tema_detail_barang(
+                    is_dark=is_dark,
+                    sz_base=UKURAN_FONT_INPUT,
+                )
+            with db_service.performance_timer(
+                "Resi.theme_step.account_style", threshold=0.001
+            ):
+                self._terapkan_style_rekening(is_dark)
 
-            self.date_input.update()
-            self._perbarui_style_tombol_clear(is_dark)
-            terapkan_style_input_global(self, is_dark)
-            self._terapkan_style_tombol_reset_histori(is_dark)
+            with db_service.performance_timer(
+                "Resi.theme_step.date_clear_buttons", threshold=0.001
+            ):
+                self.date_input.update()
+                self._perbarui_style_tombol_clear(is_dark)
+                self._terapkan_style_tombol_reset_histori(is_dark)
+            with db_service.performance_timer(
+                "Resi.theme_step.global_input_styles", threshold=0.001
+            ):
+                terapkan_style_input_global(self, is_dark)
         finally:
             self.setUpdatesEnabled(True)
             self.update()
@@ -1125,7 +1194,12 @@ class TabResi(QWidget):
         for nama in nama_widgets:
             widget = getattr(self, nama, None)
             qss = styles.get(nama)
-            if widget is not None and qss is not None and not is_input_form(widget):
+            if (
+                widget is not None
+                and qss is not None
+                and not is_input_form(widget)
+                and widget.styleSheet() != qss
+            ):
                 widget.setStyleSheet(qss)
 
     def _terapkan_style_tombol_reset_histori(self, is_dark):

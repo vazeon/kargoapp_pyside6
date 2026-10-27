@@ -1,3 +1,4 @@
+#tabs/tab_manifest.py
 import re
 from PySide6.QtCore import QDate, QSettings, QStringListModel, Qt
 from PySide6.QtGui import QBrush
@@ -1126,18 +1127,25 @@ class TabManifest(QWidget):
             f"{manifest_id}{truk_display}{kapal_display} ({jumlah_resi} Resi)",
         )
 
-        for role_offset, value in enumerate((
+        nilai_pencarian = (
             manifest_id,
             truk,
             nama_kapal,
             note_manifest,
             tanggal_raw,
-        )):
+            str(jumlah_resi or ""),
+        )
+        for role_offset, value in enumerate(nilai_pencarian):
             child.setData(
                 0,
                 Qt.ItemDataRole.UserRole + role_offset,
                 value,
             )
+        child.setData(
+            0,
+            Qt.ItemDataRole.UserRole + 10,
+            " ".join(str(value or "") for value in nilai_pencarian).casefold(),
+        )
 
     @db_service.profile_performance("Manifest.load_history", threshold=0.05)
     def load_histori(self):
@@ -1787,7 +1795,11 @@ class TabManifest(QWidget):
 
             for index_child in range(parent.childCount()):
                 child = parent.child(index_child)
-                haystack = f"{child.text(0)} {child.text(1)}".lower()
+                haystack = child.data(0, Qt.ItemDataRole.UserRole + 10)
+                if not haystack:
+                    haystack = f"{child.text(0)} {child.text(1)}".casefold()
+                else:
+                    haystack = f"{child.text(0)} {child.text(1)} {haystack}".casefold()
                 match = keyword in haystack
                 child.setHidden(not match)
                 parent_visible = parent_visible or match

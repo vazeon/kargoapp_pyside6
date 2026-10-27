@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         self._logout_signout_thread = None
         self._logout_signout_error = None
         self._logout_poll_timer = None
+        self._close_sync_wait_timer = None
 
         # Profiling first-visible work is opt-in and only active when requested.
         # It helps distinguish lazy construction from each tab's first showEvent.
@@ -188,7 +189,10 @@ class MainWindow(QMainWindow):
             self,
             on_scale_changed=self._saat_ui_scale_berubah,
         )
-        self._ui_scaler.apply_now()
+        with db_service.performance_timer(
+            "MainWindow.responsive_scaler.apply_now", threshold=0.001
+        ):
+            self._ui_scaler.apply_now()
 
         self._session_signature_terakhir = self._buat_signature_session()
         self._auto_sync = AutoSyncController(self, interval_ms=15_000)
@@ -237,6 +241,25 @@ class MainWindow(QMainWindow):
             self._bangun_shell_utama()
         with db_service.performance_timer("MainWindow.init_ui.top_controls", threshold=0.02):
             self._bangun_kontrol_kanan()
+
+        # Pasang stylesheet shell sebelum halaman Resi dibuat dan dimasukkan ke
+        # QTabWidget. Mengubah stylesheet QTabWidget setelah seluruh subtree Resi
+        # terpasang dapat memicu pemrosesan ulang style pada banyak widget.
+        with db_service.performance_timer(
+            "MainWindow.init_ui.shell_theme_preload", threshold=0.01
+        ):
+            try:
+                shell_scale = dapatkan_ui_scale()
+            except Exception:
+                shell_scale = 1.0
+            ThemeManager.apply_shell_theme(
+                self.tabs,
+                self.custom_tab_bar,
+                self.container_top_right,
+                self.current_theme == self.THEME_DARK,
+                shell_scale,
+            )
+
         with db_service.performance_timer("MainWindow.init_ui.tabs", threshold=0.02):
             self._bangun_tab_utama()
         with db_service.performance_timer("MainWindow.init_ui.scrolling", threshold=0.02):
@@ -1229,7 +1252,7 @@ class MainWindow(QMainWindow):
             return
 
         self.dialog_setting = QDialog(self)
-        self.dialog_setting.setWindowTitle("PENGATURAN")
+        self.dialog_setting.setWindowTitle("Mahkota Kargo App")
         self.dialog_setting.setMinimumSize(800, 600)
         layout = QVBoxLayout(self.dialog_setting)
         with db_service.performance_timer("UI.settings_dialog_construct", threshold=0.05):
@@ -1489,6 +1512,33 @@ class MainWindow(QMainWindow):
             self._logout_signout_error = exc
 
     def closeEvent(self, event):
+        auto_sync = getattr(self, "_auto_sync", None)
+        if auto_sync is not None and auto_sync.is_running():
+            # Jangan menutup proses saat worker masih menggunakan DB/session.
+            # Hentikan jadwal sync baru, lalu tunggu worker selesai melalui
+            # event loop agar UI tidak membeku saat proses sinkronisasi berjalan.
+            event.ignore()
+            self._hentikan_pemanasan_tab_tunda()
+            auto_sync.stop(wait=False)
+
+            if self._close_sync_wait_timer is None:
+                print(
+                    "[SHUTDOWN] Menunggu sinkronisasi aktif selesai sebelum aplikasi ditutup.",
+                    flush=True,
+                )
+                timer = QTimer(self)
+                timer.setInterval(100)
+                timer.timeout.connect(self._lanjutkan_tutup_setelah_sync)
+                self._close_sync_wait_timer = timer
+                timer.start()
+            return
+
+        timer = self._close_sync_wait_timer
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._close_sync_wait_timer = None
+
         try:
             self._lepas_resource_native()
             scaler = getattr(self, "_ui_scaler", None)
@@ -1499,6 +1549,19 @@ class MainWindow(QMainWindow):
                     pass
         finally:
             super().closeEvent(event)
+
+    def _lanjutkan_tutup_setelah_sync(self):
+        """Tutup aplikasi setelah worker sync aktif benar-benar selesai."""
+        auto_sync = getattr(self, "_auto_sync", None)
+        if auto_sync is not None and auto_sync.is_running():
+            return
+
+        timer = self._close_sync_wait_timer
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self._close_sync_wait_timer = None
+        self.close()
 
     def _lepas_resource_native(self):
         self._hentikan_pemanasan_tab_tunda()
@@ -1632,8 +1695,15 @@ def jalankan_aplikasi():
             CURRENT_SESSION.get("db_name", db_path)
             or db_path
         ).strip()
-        with db_service.performance_timer("Dashboard.init_db", threshold=0.05):
-            db_path_aktif = init_db(nama_db_aktif)
+        # Database sudah disiapkan sebelum layar login ditampilkan.
+        # DEV_SUPER juga menginisialisasi sandbox saat validasi akunnya.
+        # Hindari pemeriksaan schema/migrasi berulang ketika dashboard dibuka.
+        if os.path.isabs(nama_db_aktif):
+            db_path_aktif = os.path.normpath(nama_db_aktif)
+        else:
+            # Fallback untuk path relatif dari alur legacy.
+            with db_service.performance_timer("Dashboard.init_db", threshold=0.05):
+                db_path_aktif = init_db(nama_db_aktif)
         CURRENT_SESSION["db_name"] = db_path_aktif
 
         with db_service.performance_timer("Dashboard.load_system_settings", threshold=0.05):
@@ -1649,12 +1719,33 @@ def jalankan_aplikasi():
         # online/developer/offline-cache. Gunakan snapshot sesi itu untuk
         # tampilan pertama, agar tidak mengulang request akses yang baru selesai.
         main_window.update_session_ui(refresh_branch_access=False)
+        if os.environ.get("KARGO_PERF_LOG", "").strip() == "1":
+            try:
+                widget_count = 1 + len(main_window.findChildren(QWidget))
+            except RuntimeError:
+                widget_count = -1
+            print(
+                f"[PERF] Dashboard.widget_count | {widget_count}",
+                flush=True,
+            )
+
         with db_service.performance_timer(
             "Dashboard.present_window", threshold=0.02
         ):
-            main_window.showMaximized()
-            main_window.raise_()
-            main_window.activateWindow()
+            # Pecah pengukuran tanpa mengubah urutan atau perilaku presentasi.
+            # Data ini membantu membedakan biaya layout/show dari aktivasi window.
+            with db_service.performance_timer(
+                "Dashboard.show_maximized", threshold=0.001
+            ):
+                main_window.showMaximized()
+            with db_service.performance_timer(
+                "Dashboard.raise_window", threshold=0.001
+            ):
+                main_window.raise_()
+            with db_service.performance_timer(
+                "Dashboard.activate_window", threshold=0.001
+            ):
+                main_window.activateWindow()
 
     def buat_login_window(show=True):
         """Buat login window baru untuk startup maupun setelah logout eksplisit."""

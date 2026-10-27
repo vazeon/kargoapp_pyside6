@@ -16,8 +16,8 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     return gelap if is_dark else terang
 
 
-def get_resi_static_styles(is_dark: bool) -> dict:
-    """Style statis Tab Resi yang aman dipakai sebelum refresh tema."""
+def get_resi_static_styles() -> dict:
+    """Style netral Tab Resi yang tidak bergantung pada tema."""
     return {
         "scroll_kiri": """
             QScrollArea {
@@ -81,10 +81,7 @@ def get_resi_rekening_styles(is_dark: bool) -> dict:
     }
 
 
-def get_resi_detail_barang_theme(
-        is_dark: bool,
-        sz_base: int,
-) -> dict:
+def get_resi_detail_barang_theme(is_dark: bool) -> dict:
     """Warna dan style khusus tabel Detail Barang tanpa mengubah scrollbar."""
     ui = get_theme_colors(is_dark)["ui"]
 
@@ -203,7 +200,7 @@ def get_resi_styles(
     """
 
     rekening_styles = get_resi_rekening_styles(is_dark)
-    static_styles = get_resi_static_styles(is_dark)
+    static_styles = get_resi_static_styles()
 
     return {
         "lbl_main_title": f"""

@@ -1249,7 +1249,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(250)
-        self._search_timer.timeout.connect(self.filter_histori_invoice)
+        self._search_timer.timeout.connect(self.load_histori_invoice)
 
         self.template_configs = deepcopy(INVOICE_TEMPLATES)
         self.current_template_override = None
@@ -2389,11 +2389,14 @@ class TabInvoice(ZoomTableMixin, QWidget):
     @db_service.profile_performance("Invoice.load_history", threshold=0.05)
     def load_histori_invoice(self):
         tabel = self.tabel_histori_invoice
+        keyword = self.txt_cari_invoice.text().strip()
         tabel.setUpdatesEnabled(False)
         tabel.blockSignals(True)
         try:
             tabel.setRowCount(0)
-            for data in db_service.ambil_histori_invoice(limit=300) or []:
+            for data in db_service.ambil_histori_invoice(
+                limit=300, keyword=keyword
+            ) or []:
                 if isinstance(data, (list, tuple)):
                     self._tambahkan_baris_histori_invoice(tabel, data)
             return True

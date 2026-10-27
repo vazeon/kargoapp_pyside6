@@ -1,29 +1,84 @@
-# file: themes/shell.py
-"""Style ringan untuk kerangka utama aplikasi."""
+# themes/shell.py
+"""Stylesheet shell utama dengan scope yang sesuai sasaran widget.
+
+Style QTabBar utama diterapkan langsung ke MainTabBar. Style tombol/label shell
+kanan atas diterapkan ke ContainerTopRight. Dengan pemisahan ini, aturan untuk
+widget di luar subtree target tidak ikut ditulis ulang di stylesheet yang salah.
+"""
+
+import re
+from functools import lru_cache
 
 from themes.colors import get_theme_colors
 from utils.typography import get_master_font
+from utils.ui_metrics import (
+    MAIN_TAB_BAR_MIN_HEIGHT,
+    TAB_MIN_WIDTH,
+    TAB_PADDING_H,
+    TAB_PADDING_V,
+)
+
+
+@lru_cache(maxsize=4)
+def _ambil_qdark_tabbar_rules(qss: str) -> str:
+    """Ambil aturan QTabBar dari stylesheet QDarkTheme saja."""
+    if not qss:
+        return ""
+
+    hasil = []
+    for selector_blob, deklarasi in re.findall(
+        r"([^{}]+)\{([^{}]*)}",
+        qss,
+        flags=re.DOTALL,
+    ):
+        selectors = [
+            selector.strip()
+            for selector in selector_blob.split(",")
+            if selector.strip()
+        ]
+        selectors_tabbar = [
+            selector for selector in selectors if "QTabBar" in selector
+        ]
+        if not selectors_tabbar:
+            continue
+
+        hasil.append(
+            ", ".join(selectors_tabbar)
+            + " {\n"
+            + deklarasi.strip()
+            + "\n}"
+        )
+
+    return "\n".join(hasil)
+
+
+def get_main_tab_bar_style(*, qdark_stylesheet: str = "") -> str:
+    """Style QTabBar utama; geometri bersumber dari utils.ui_metrics."""
+    qdark_tabs = _ambil_qdark_tabbar_rules(qdark_stylesheet)
+
+    return f"""
+        {qdark_tabs}
+
+        /* Geometri tab utama mengikuti sumber metrik global. */
+        QTabBar#MainTabBar::tab {{
+            min-width: {TAB_MIN_WIDTH}px;
+            padding: {TAB_PADDING_V}px {TAB_PADDING_H}px;
+            margin-top: 4px;
+        }}
+
+        QTabBar#MainTabBar {{
+            min-height: {MAIN_TAB_BAR_MIN_HEIGHT}px;
+        }}
+    """
 
 
 def get_main_shell_styles(is_dark: bool) -> str:
+    """Style komponen di dalam ContainerTopRight saja."""
     colors = get_theme_colors(is_dark)
     palette = colors["palette"]
     ui = colors["ui"]
 
-    # Warna global
-    bg_main = ui["main_background"]
-    bg_pane = ui["main_background"]
-    text = palette["window_text"]
-
     if is_dark:
-        bg_tab = "#242932"
-        bg_tab_hover = "#2b313c"
-        bg_tab_selected = ui["main_background"]
-        text_muted = "#aeb7c4"
-        accent = "#4f9cff"
-        border = "#3a414d"
-
-        # Warna Top Right
         btn_background = ui["panel_background"]
         btn_text = ui["on_primary"]
         btn_border = "#24334d"
@@ -32,14 +87,6 @@ def get_main_shell_styles(is_dark: bool) -> str:
         hover_border_rule = f"border: 1px solid {ui['primary']};"
         pressed_border_rule = f"border: 1px solid {ui['primary_hover']};"
     else:
-        bg_tab = "#e9edf3"
-        bg_tab_hover = "#f2f5f9"
-        bg_tab_selected = bg_pane
-        text_muted = "#475569"
-        accent = "#2563eb"
-        border = "#c8d0dc"
-
-        # Warna Top Right
         btn_background = "#edf2f7"
         btn_text = "#2d3748"
         btn_border = ui["field_border"]
@@ -49,69 +96,6 @@ def get_main_shell_styles(is_dark: bool) -> str:
         pressed_border_rule = ""
 
     return f"""
-        /* --- CENTRAL WIDGET --- */
-        QWidget#CentralWidget {{
-            background-color: {bg_main};
-            color: {text};
-        }}
-
-        /* --- TABS --- */
-        QTabWidget#MainTabs {{
-            background-color: transparent;
-        }}
-        QTabWidget#MainTabs::pane {{
-            background-color: {bg_pane};
-            border: 1px solid {border};
-            border-top-left-radius: 0px;
-            border-top-right-radius: 0px;
-            border-bottom-left-radius: 0px;
-            border-bottom-right-radius: 0px;
-            top: -1px;
-        }}
-
-        /* --- TAB BAR --- */
-        QTabBar#MainTabBar {{
-            background-color: transparent;
-            qproperty-drawBase: 0;
-        }}
-        QTabBar#MainTabBar::tab {{
-            background-color: {bg_tab};
-            color: {text_muted};
-            font-family: "{get_master_font()}";
-            font-size: 12px;
-            font-weight: 500;
-            min-width: 130px;
-            padding: 11px 16px;
-            margin-top: 4px;
-            margin-right: 2px;
-            border: 1px solid {border};
-            border-bottom: 1px solid {border};
-            border-top-left-radius: 6px;
-            border-top-right-radius: 6px;
-        }}
-        QTabBar#MainTabBar::tab:selected {{
-            background-color: {bg_tab_selected};
-            color: {text};
-            font-weight: 600;
-            font-size: 13px;
-            border-left: 1px solid {border};
-            border-right: 1px solid {border};
-            border-top: 2px solid {accent};
-            border-bottom: 1px solid {bg_tab_selected};
-            margin-top: 2px;
-            margin-bottom: -2px;
-        }}
-        QTabBar#MainTabBar::tab:hover:!selected {{
-            background-color: {bg_tab_hover};
-            color: {text};
-            border-color: {accent};
-        }}
-        QTabBar#MainTabBar::tab:disabled {{
-            background-color: transparent;
-            color: {text_muted};
-        }}
-
-        /* --- TOP RIGHT CONTAINER & KOMPONEN --- */
         QWidget#ContainerTopRight {{
             background-color: transparent;
         }}

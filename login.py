@@ -29,6 +29,7 @@ from session_store import (
     load_last_login,
     clear_last_login,
     save_offline_login_cache,
+    update_offline_login_profile,
 )
 from database_manager import init_db
 from utils.typography import get_fixed_font_sizes_pt
@@ -277,7 +278,14 @@ class LoginWindow(QWidget):
             CURRENT_SESSION.get("db_name", "database_cargo.db")
             or "database_cargo.db"
         ).strip()
-        CURRENT_SESSION["db_name"] = init_db(db_name)
+        # Jalur login yang sukses sudah menyiapkan database sebelumnya:
+        # database utama saat startup, atau sandbox saat validasi DEV_SUPER.
+        # Hindari menjalankan migrasi/schema check kedua pada path yang sama.
+        # Fallback init_db tetap tersedia untuk jalur legacy yang memberi path relatif.
+        if os.path.isabs(db_name):
+            CURRENT_SESSION["db_name"] = os.path.normpath(db_name)
+        else:
+            CURRENT_SESSION["db_name"] = init_db(db_name)
         if role_user and not CURRENT_SESSION.get("role"):
             CURRENT_SESSION["role"] = str(role_user).strip()
         if nama_lengkap and not CURRENT_SESSION.get("nama_lengkap"):
@@ -298,7 +306,9 @@ class LoginWindow(QWidget):
             CURRENT_SESSION.get("db_name", "database_cargo.db")
             or "database_cargo.db"
         ).strip()
-        info = bootstrap_from_supabase(db_name)
+        # Database sudah diinisialisasi sebelum autentikasi sukses; jangan
+        # memanggil init_db lagi hanya untuk membaca/menerapkan client config.
+        info = bootstrap_from_supabase(db_name, database_initialized=True)
         print(
             "[CLIENT_BOOTSTRAP] "
             f"client={info.get('client_code')} "
@@ -330,8 +340,24 @@ class LoginWindow(QWidget):
                     if isinstance(item, dict)
                 ],
             }
-            with phase_timer("Auth.persist_offline_cache"):
-                save_offline_login_cache(identifier, password, snapshot)
+            if mode == "restore":
+                # Login restore sudah memverifikasi password ke Supabase.
+                # Cukup segarkan snapshot profil tanpa mengulang PBKDF2 310k
+                # iterasi; bila cache/verifier belum tersedia, lakukan fallback
+                # penyimpanan lengkap agar login offline tetap terjaga.
+                try:
+                    with phase_timer("Auth.refresh_offline_cache_profile"):
+                        cache_updated = update_offline_login_profile(identifier, snapshot)
+                except Exception:
+                    # Cache adalah fitur pemulihan offline, bukan sumber
+                    # autentikasi online. Gunakan jalur lengkap sebagai fallback.
+                    cache_updated = False
+                if not cache_updated:
+                    with phase_timer("Auth.persist_offline_cache"):
+                        save_offline_login_cache(identifier, password, snapshot)
+            else:
+                with phase_timer("Auth.persist_offline_cache"):
+                    save_offline_login_cache(identifier, password, snapshot)
 
         if mode == "login":
             with phase_timer("Auth.persist_last_login"):
@@ -596,10 +622,13 @@ class LoginWindow(QWidget):
                     clear_last_login()
 
         if mode == "restore":
-            # Jangan menghapus last-session hanya karena Supabase sedang offline.
-            # Credential baru dihapus bila restore gagal karena alasan non-jaringan
-            # (mis. password salah atau akun sudah tidak valid).
-            if error is None or not self._is_network_error(error):
+            # Jangan menghapus last-session hanya karena restore gagal.
+            # verifikasi_login_sistem dapat mengembalikan (False, None, None)
+            # untuk beberapa penyebab, termasuk jaringan offline tanpa cache;
+            # dalam kasus itu `error` tetap None sehingga penyebabnya ambigu.
+            # Hapus credential hanya bila ada error eksplisit yang bukan jaringan.
+            # Login manual yang sukses akan memperbarui last-session tersimpan.
+            if error is not None and not self._is_network_error(error):
                 clear_last_login()
             if error is not None:
                 print(

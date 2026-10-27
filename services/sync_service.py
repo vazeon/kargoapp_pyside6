@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any, Dict, Optional
 from config import CURRENT_SESSION
 from audit_context import install_sqlite_audit_functions, set_sqlite_audit_sync
 from supabase_client import supabase
+import services.numbering_service as numbering_service
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +201,21 @@ def _set_suppress(conn, enabled: bool) -> None:
     set_sqlite_audit_sync(conn, enabled)
 
 
+def _is_local_only_session() -> bool:
+    """DEV_SUPER benar-benar lokal: semua jalur sync harus berhenti sebelum akses Supabase."""
+    role = str(CURRENT_SESSION.get("role") or "").strip().upper()
+    return bool(
+        CURRENT_SESSION.get("is_developer")
+        or CURRENT_SESSION.get("is_dev_super")
+        or CURRENT_SESSION.get("dev_super")
+        or role in {"DEV_SUPER", "DEV SUPER"}
+    )
+
+
 def _session_ready() -> bool:
-    """True hanya bila sesi Supabase benar-benar aktif."""
+    """True hanya bila sesi Supabase benar-benar aktif dan bukan DEV_SUPER lokal."""
+    if _is_local_only_session():
+        return False
     if not str(CURRENT_SESSION.get("auth_email") or "").strip():
         return False
     try:
@@ -218,7 +233,7 @@ def _ensure_online_session() -> bool:
     untuk autentikasi ulang ke Supabase. Password tidak ditulis ulang ke file
     database atau log.
     """
-    if bool(CURRENT_SESSION.get("is_developer")):
+    if _is_local_only_session():
         return False
 
     if _session_ready():
@@ -407,6 +422,128 @@ def _server_resi_row(sync_id: str) -> Optional[Dict[str, Any]]:
     return rows[0] if rows else None
 
 
+def _local_resi_tax_suffix() -> str:
+    """Baca suffix pajak aktif dari setting lokal; fallback kompatibel ke -P."""
+    conn = None
+    try:
+        conn = _connect()
+        row = conn.execute(
+            "SELECT nilai FROM pengaturan_sistem WHERE kunci=? LIMIT 1",
+            ("kode_akhiran_pajak",),
+        ).fetchone()
+        suffix = str(row[0] or "").strip().upper() if row else ""
+        return suffix or "-P"
+    except sqlite3.Error:
+        return "-P"
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _resi_tax_base(no_resi: Any, suffix: Optional[str] = None) -> str:
+    nomor = str(no_resi or "").strip().upper()
+    suffix = str(suffix or _local_resi_tax_suffix() or "-P").strip().upper()
+    if suffix and nomor.endswith(suffix):
+        return nomor[:-len(suffix)].rstrip()
+    return nomor
+
+
+def _server_active_resi_variants(no_resi: str, kode_cabang: str) -> list[Dict[str, Any]]:
+    """Ambil kedua varian aktif dari satu identitas Resi, tanpa mengubah server."""
+    nomor = str(no_resi or "").strip().upper()
+    cabang = str(kode_cabang or "").strip().upper()
+    suffix = _local_resi_tax_suffix()
+    base = _resi_tax_base(nomor, suffix)
+    if not base or not cabang:
+        return []
+    variants = sorted({base, f"{base}{suffix}"})
+    response = (
+        supabase
+        .table("data_resi")
+        .select("no_resi,kode_cabang,sync_id,deleted_at,revision,updated_at")
+        .eq("kode_cabang", cabang)
+        .in_("no_resi", variants)
+        .limit(10)
+        .execute()
+    )
+    rows = response.data or []
+    return [
+        row for row in rows
+        if not row.get("deleted_at")
+        and str(row.get("kode_cabang") or "").strip().upper() == cabang
+        and _resi_tax_base(row.get("no_resi"), suffix) == base
+    ]
+
+
+def _validate_resi_variant_transition(
+    payload: Dict[str, Any], remote: Optional[Dict[str, Any]] = None
+) -> None:
+    """Tahan rename/insert yang akan membuat pasangan aktif -P dan non--P.
+
+    Perubahan field biasa pada row yang sama tetap diizinkan. Pemeriksaan ini
+    hanya berjalan untuk INSERT (belum ada row dengan sync_id tersebut) atau
+    perubahan identitas nomor; pasangan yang sudah terlanjur ganda dilaporkan
+    agar dibersihkan secara eksplisit, bukan dipilih/dihapus diam-diam.
+    """
+    target = str(payload.get("no_resi") or "").strip().upper()
+    branch = str(payload.get("kode_cabang") or "").strip().upper()
+    sync_id = str(payload.get("sync_id") or "").strip()
+    current_number = str((remote or {}).get("no_resi") or "").strip().upper()
+    if not target or not branch:
+        return
+    if remote is not None and target == current_number:
+        return
+
+    rows = _server_active_resi_variants(target, branch)
+    conflicts = [
+        row for row in rows
+        if str(row.get("sync_id") or "").strip() != sync_id
+    ]
+    if not conflicts:
+        return
+
+    suffix = _local_resi_tax_suffix()
+    base = _resi_tax_base(target, suffix)
+    detail = ", ".join(
+        f"{str(row.get('no_resi') or '').strip().upper()} "
+        f"(sync_id={str(row.get('sync_id') or '').strip() or 'kosong'})"
+        for row in conflicts
+    )
+    raise SyncConflictError(
+        f"Perubahan Resi {target} ditahan: identitas dasar {base} masih memiliki "
+        f"varian aktif lain di Supabase ({detail}). Rapikan pasangan lama terlebih "
+        "dahulu agar nomor pajak dan nonpajak tidak menjadi dua Resi aktif."
+    )
+
+
+def _same_resi_business_state(
+    local: Dict[str, Any],
+    remote: Dict[str, Any],
+    *,
+    ignore_revision: bool = False,
+) -> bool:
+    """True jika isi bisnis Resi sudah sama di server, walau timestamp berbeda.
+
+    Dipakai untuk membedakan retry idempoten dari dua edit berbeda yang kebetulan
+    memiliki revision/timestamp sama (SQLite CURRENT_TIMESTAMP hanya sampai detik).
+    Identitas sync, timestamp, dan metadata actor tidak menentukan isi bisnis.
+    """
+    ignored = {
+        "sync_id", "created_at", "updated_at",
+        "created_by_user_id", "created_by_username", "created_by_name",
+        "updated_by_user_id", "updated_by_username", "updated_by_name",
+    }
+    fields = set(SYNC_COLUMNS.get("data_resi", set())) - ignored
+    if ignore_revision:
+        fields.discard("revision")
+    return all(
+        _normalized_sync_value(local.get(field), field)
+        == _normalized_sync_value(remote.get(field), field)
+        for field in fields
+    )
+
+
+
 def _resi_push_conflict(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Deteksi edit Resi server yang lebih baru sebelum push lokal."""
     sync_id = str(payload.get("sync_id") or "").strip()
@@ -421,21 +558,20 @@ def _resi_push_conflict(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     local_dt = _parse_dt(payload.get("updated_at"))
     remote_dt = _parse_dt(remote.get("updated_at"))
 
-    # Retry idempotent setelah response/network timeout.
-    if remote_revision == local_revision and local_dt is not None and remote_dt is not None and remote_dt == local_dt:
+    # Respons push bisa hilang karena jaringan putus setelah server menerima
+    # perubahan. Anggap retry aman HANYA bila isi bisnisnya memang sama.
+    # Sebaliknya, revision dan updated_at yang sama tidak cukup: dua perangkat
+    # dapat mengedit dalam detik yang sama dengan revision yang sama.
+    if _same_resi_business_state(payload, remote, ignore_revision=True):
         return None
 
-    if remote_revision > local_revision:
+    if remote_revision >= local_revision:
         return remote
-    # Timestamp server yang lebih baru tetap dianggap konflik walaupun revision
-    # belum berubah, misalnya bila row diubah langsung dari Supabase Table Editor.
+
+    # Timestamp server yang lebih baru tetap dihormati ketika payload bisnis
+    # berbeda, walau revision lokal kebetulan lebih tinggi.
     if local_dt is not None and remote_dt is not None and remote_dt > local_dt:
         return remote
-    if remote_revision == local_revision:
-        # Revision sama tetapi timestamp berbeda berarti dua perangkat menulis
-        # versi yang sama; tahan perubahan lokal daripada menimpa server.
-        if local_dt is None or remote_dt is None or remote_dt != local_dt:
-            return remote
     return None
 
 
@@ -447,6 +583,9 @@ def _update_resi_with_cas(clean: Dict[str, Any]) -> None:
 
     remote = _server_resi_row(sync_id)
     if remote is None:
+        # Jangan pernah membuat row kedua hanya karena versi lama aplikasi
+        # menghasilkan sync_id baru untuk nomor yang sama dengan suffix -P.
+        _validate_resi_variant_transition(clean, remote=None)
         # Jangan pernah mengandalkan auth user yang sedang login untuk actor
         # sebuah insert offline. Payload harus sudah membawa snapshot pembuat asli.
         if not clean.get("created_by_user_id") and not clean.get("created_by_username"):
@@ -463,19 +602,23 @@ def _update_resi_with_cas(clean: Dict[str, Any]) -> None:
         if remote.get(field) not in (None, ""):
             clean[field] = remote.get(field)
 
+    # Rename hanya suffix pajak/nonpajak. Jika target sudah ditempati oleh row
+    # aktif lain dengan sync_id berbeda, tahan push sebagai CONFLICT daripada
+    # membiarkan dua row aktif untuk satu identitas bisnis.
+    _validate_resi_variant_transition(clean, remote=remote)
+
+    # Idempotensi berbasis isi bisnis, bukan hanya timestamp/revision. Ini
+    # mencegah edit perangkat lain yang berbeda tetapi memiliki updated_at sampai
+    # detik dan revision yang sama dianggap sukses tanpa benar-benar tersimpan.
+    if _same_resi_business_state(clean, remote, ignore_revision=True):
+        return
+
     local_revision = _to_int(clean.get("revision"), 0)
     remote_revision = _to_int(remote.get("revision"), 0)
-    if remote_revision == local_revision:
-        local_dt = _parse_dt(clean.get("updated_at"))
-        remote_dt = _parse_dt(remote.get("updated_at"))
-        if local_dt is not None and remote_dt is not None and local_dt == remote_dt:
-            return
+    if remote_revision >= local_revision:
         raise SyncConflictError(
-            "Perubahan Resi lokal berbenturan dengan perubahan server pada revision yang sama."
-        )
-    if remote_revision > local_revision:
-        raise SyncConflictError(
-            "Perubahan Resi lokal kalah dari revision server yang lebih baru."
+            "Perubahan Resi lokal berbenturan dengan perubahan server pada revision "
+            "yang sama atau lebih baru. Perubahan lokal ditahan agar tidak hilang."
         )
 
     # PENTING: updated_at lokal (SQLite CURRENT_TIMESTAMP) berbentuk string naif
@@ -512,6 +655,10 @@ def _update_resi_with_cas(clean: Dict[str, Any]) -> None:
         raise SyncConflictError("Resi hilang dari server saat push berlangsung.")
     latest_revision = _to_int(latest.get("revision"), 0)
     latest_dt = _parse_dt(latest.get("updated_at"))
+    if _same_resi_business_state(clean, latest, ignore_revision=True):
+        # Server ternyata telah menerima payload yang sama meskipun respons
+        # UPDATE tidak membawa representation (mis. reset koneksi sesudah commit).
+        return
     if latest_revision >= local_revision or (
         local_dt is not None and latest_dt is not None and latest_dt > local_dt
     ):
@@ -539,6 +686,7 @@ def _update_resi_with_cas(clean: Dict[str, Any]) -> None:
     )
 
 
+
 def _server_buku_gudang_row(id_gudang: str) -> Optional[Dict[str, Any]]:
     """Ambil satu Buku Gudang dari server untuk idempotent push."""
     gid = str(id_gudang or "").strip().upper()
@@ -549,6 +697,27 @@ def _server_buku_gudang_row(id_gudang: str) -> Optional[Dict[str, Any]]:
         .table("buku_gudang")
         .select("id_gudang,kode_cabang,tanggal,no_resi,jenis,status_resi,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name")
         .eq("id_gudang", gid)
+        .limit(1)
+        .execute()
+    ).data or []
+    return rows[0] if rows else None
+
+
+def _server_buku_gudang_by_sync_id(sync_id: str) -> Optional[Dict[str, Any]]:
+    """Cari Buku Gudang dengan identitas lintas perangkat yang stabil.
+
+    `id_gudang` berisi GDG-<no_resi> dan memang berubah saat suffix pajak Resi
+    berganti. `sync_id` tidak berubah; lookup berdasarkan id_gudang saja akan
+    menganggap row yang sama tidak ada lalu mencoba INSERT dengan sync_id lama.
+    """
+    sid = str(sync_id or "").strip()
+    if not sid:
+        return None
+    rows = (
+        supabase
+        .table("buku_gudang")
+        .select("id_gudang,kode_cabang,tanggal,no_resi,jenis,status_resi,sync_id,created_at,updated_at,deleted_at,created_by_user_id,created_by_username,created_by_name,updated_by_user_id,updated_by_username,updated_by_name")
+        .eq("sync_id", sid)
         .limit(1)
         .execute()
     ).data or []
@@ -573,6 +742,120 @@ def _same_buku_gudang_business_state(local: Dict[str, Any], remote: Dict[str, An
         if lv != rv:
             return False
     return True
+
+
+def _same_buku_gudang_state_except_id(
+    local: Dict[str, Any], remote: Dict[str, Any]
+) -> bool:
+    """Bandingkan isi Buku Gudang selain id_gudang yang diturunkan dari no_resi."""
+    fields = ("kode_cabang", "tanggal", "no_resi", "jenis", "status_resi", "sync_id", "deleted_at")
+    for field in fields:
+        lv, rv = local.get(field), remote.get(field)
+        if field in {"kode_cabang", "no_resi", "jenis", "status_resi", "sync_id"}:
+            lv, rv = str(lv or "").strip().upper(), str(rv or "").strip().upper()
+        elif field == "tanggal":
+            lv, rv = str(lv or "").strip(), str(rv or "").strip()
+        elif field == "deleted_at":
+            lv = None if lv in (None, "") else str(lv).strip()
+            rv = None if rv in (None, "") else str(rv).strip()
+        if lv != rv:
+            return False
+    return True
+
+
+def _buku_gudang_only_remote_key_mismatch(
+    local: Dict[str, Any], remote: Optional[Dict[str, Any]]
+) -> bool:
+    """True only when the server's GDG key is malformed and every other business field matches.
+
+    id_gudang is a derived key (GDG-<no_resi>). A legacy row can therefore be
+    older by updated_at while its key is structurally inconsistent. In that narrow
+    case, allow the normal verified UPDATE path to repair the key; real business
+    differences such as status/date still go through the conflict guard.
+    """
+    if not isinstance(remote, dict) or not remote:
+        return False
+    sync_id = str(local.get("sync_id") or "").strip()
+    if not sync_id or str(remote.get("sync_id") or "").strip() != sync_id:
+        return False
+    local_no = str(local.get("no_resi") or "").strip().upper()
+    remote_no = str(remote.get("no_resi") or "").strip().upper()
+    remote_gid = str(remote.get("id_gudang") or "").strip().upper()
+    if not local_no or local_no != remote_no:
+        return False
+    if not remote_gid.startswith("GDG-") or remote_gid == f"GDG-{remote_no}":
+        return False
+    return _same_buku_gudang_state_except_id(local, remote)
+
+
+
+def _requeue_buku_gudang_key_repairs(conn) -> int:
+    """Queue a fresh canonical Buku Gudang UPDATE for safe, stuck key-only conflicts."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT record_key FROM sync_conflicts
+            WHERE table_name='buku_gudang' AND status='OPEN'
+            UNION
+            SELECT record_key FROM sync_outbox
+            WHERE table_name='buku_gudang' AND status='CONFLICT'
+            ORDER BY record_key
+            LIMIT 100
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return 0
+
+    queued = 0
+    for row in rows:
+        sync_id = str(row[0] or "").strip()
+        if not sync_id:
+            continue
+        if conn.execute(
+            """
+            SELECT 1 FROM sync_outbox
+            WHERE table_name='buku_gudang' AND record_key=? AND status='PENDING'
+            LIMIT 1
+            """,
+            (sync_id,),
+        ).fetchone():
+            continue
+        try:
+            local = _local_row_json(conn, "buku_gudang", "sync_id=?", (sync_id,))
+            if not local:
+                continue
+            remote = _server_buku_gudang_by_sync_id(sync_id)
+            if not _buku_gudang_only_remote_key_mismatch(local, remote):
+                continue
+            no_resi = str(local.get("no_resi") or "").strip().upper()
+            if not no_resi:
+                continue
+            payload = {
+                field: local.get(field)
+                for field in SYNC_COLUMNS["buku_gudang"]
+                if field in local
+            }
+            # Do not trust a malformed local derived key either.
+            payload["id_gudang"] = f"GDG-{no_resi}"
+            conn.execute(
+                """
+                INSERT INTO sync_outbox(table_name, record_key, operation, payload_json)
+                VALUES ('buku_gudang', ?, 'UPDATE', ?)
+                """,
+                (sync_id, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+            )
+            queued += 1
+            logger.warning(
+                "[SYNC] Antrean perbaikan id_gudang dibuat untuk buku_gudang/%s (%s).",
+                sync_id, payload["id_gudang"],
+            )
+        except Exception as exc:
+            # A transient network issue or malformed legacy row must not block
+            # unrelated outbox work. The original conflict remains for diagnosis.
+            logger.debug(
+                "[SYNC] Belum bisa menyiapkan perbaikan id_gudang %s: %s", sync_id, exc
+            )
+    return queued
 
 
 def _same_manifest_business_state(local: Dict[str, Any], remote: Dict[str, Any]) -> bool:
@@ -655,10 +938,9 @@ def _server_upsert(table_name: str, operation: str, payload: Dict[str, Any]) -> 
         )
     elif table_name == "numbering_counters":
         clean.pop("id", None)
-        # Counter punya dua identitas: sync_id untuk sinkronisasi, dan
-        # (kode_cabang, document_type, series_code) sebagai business key UNIQUE.
-        # Local DB bisa saja membawa sync_id lama/berbeda akibat seed awal.
-        # Karena itu JANGAN menjadikan sync_id satu-satunya conflict target.
+        # Counter diidentifikasi dengan business key. Untuk current_count dan
+        # starting_count, jangan gunakan UPDATE biasa tanpa guard: request dari
+        # PC lain bisa menaikkan counter setelah SELECT dan lalu tertimpa nilai lama.
         branch = str(clean.get("kode_cabang") or "").strip().upper()
         document_type = str(clean.get("document_type") or "").strip().upper()
         series_code = str(clean.get("series_code") or "").strip().upper()
@@ -668,9 +950,8 @@ def _server_upsert(table_name: str, operation: str, payload: Dict[str, Any]) -> 
             )
 
         remote_rows = (
-            supabase
-            .table("numbering_counters")
-            .select("sync_id,starting_count,current_count,padding,aktif,deleted_at,updated_at")
+            supabase.table("numbering_counters")
+            .select("sync_id,starting_count,current_count,padding,aktif,deleted_at,updated_at,created_by_user_id,created_by_username,created_by_name")
             .eq("kode_cabang", branch)
             .eq("document_type", document_type)
             .eq("series_code", series_code)
@@ -679,53 +960,56 @@ def _server_upsert(table_name: str, operation: str, payload: Dict[str, Any]) -> 
         ).data or []
 
         if remote_rows:
+            response = None
             remote = remote_rows[0]
-            # Server adalah identity resmi untuk counter ini. Pertahankan
-            # sync_id server agar update berikutnya tidak membuat duplicate key
-            # pada UNIQUE(kode_cabang, document_type, series_code).
             remote_sid = str(remote.get("sync_id") or "").strip()
-            if remote_sid:
-                clean["sync_id"] = remote_sid
-
-            # Counter monotonic: nomor yang pernah dicapai tidak boleh mundur.
-            clean["starting_count"] = max(
+            requested_start = max(
                 _to_int(clean.get("starting_count"), 0),
                 _to_int(remote.get("starting_count"), 0),
             )
-            clean["current_count"] = max(
+            requested_current = max(
                 _to_int(clean.get("current_count"), 0),
                 _to_int(remote.get("current_count"), 0),
             )
 
-            # Update berdasarkan sync_id resmi server. Ini menghindari UPSERT
-            # yang mencoba INSERT karena sync_id lokal berbeda, tetapi business
-            # key sudah ada di server.
-            if remote_sid:
-                response = (
-                    supabase
-                    .table("numbering_counters")
-                    .update(clean)
-                    .eq("sync_id", remote_sid)
-                    .execute()
-                )
-            else:
-                response = (
-                    supabase
-                    .table("numbering_counters")
-                    .upsert(
-                        clean,
-                        on_conflict="kode_cabang,document_type,series_code",
-                    )
-                    .execute()
-                )
+            # created_by immutable; timestamp server tidak boleh mundur karena
+            # snapshot SQLite yang lebih lama. Sequence di-update terpisah dengan
+            # filter < sehingga request lama tidak bisa menurunkan nilai server.
+            metadata = {
+                key: value for key, value in clean.items()
+                if key not in {
+                    "id", "sync_id", "starting_count", "current_count",
+                    "created_at", "updated_at",
+                    "created_by_user_id", "created_by_username", "created_by_name",
+                }
+            }
+            row_query = supabase.table("numbering_counters")
+            if metadata:
+                response = row_query.update(metadata).eq("kode_cabang", branch).eq(
+                    "document_type", document_type
+                ).eq("series_code", series_code).execute()
+
+            if requested_start > _to_int(remote.get("starting_count"), 0):
+                response = supabase.table("numbering_counters").update(
+                    {"starting_count": requested_start}
+                ).eq("kode_cabang", branch).eq(
+                    "document_type", document_type
+                ).eq("series_code", series_code).lt(
+                    "starting_count", requested_start
+                ).execute()
+            if requested_current > _to_int(remote.get("current_count"), 0):
+                response = supabase.table("numbering_counters").update(
+                    {"current_count": requested_current}
+                ).eq("kode_cabang", branch).eq(
+                    "document_type", document_type
+                ).eq("series_code", series_code).lt(
+                    "current_count", requested_current
+                ).execute()
         else:
-            # Counter benar-benar baru di server. Insert dengan sync_id lokal.
-            response = (
-                supabase
-                .table("numbering_counters")
-                .insert(clean)
-                .execute()
-            )
+            # Counter baru disisipkan satu kali. Bila ada perangkat lain yang
+            # lebih dahulu membuat business key sama, duplicate key ditahan dan
+            # siklus berikutnya akan membaca baris server resmi sebelum update.
+            response = supabase.table("numbering_counters").insert(clean).execute()
     elif table_name == "master_penerima":
         clean.pop("is_synced", None)
         response = (
@@ -760,21 +1044,55 @@ def _server_upsert(table_name: str, operation: str, payload: Dict[str, Any]) -> 
         )
     elif table_name == "buku_gudang":
         clean.pop("is_synced", None)
-        # Jangan gunakan UPSERT untuk Buku Gudang: retry INSERT yang sebenarnya
-        # sudah diterima server dapat berubah menjadi UPDATE dan mentok RLS.
+        # Kontrak aplikasi: id_gudang adalah key turunan GDG-<no_resi>.
+        # Recovery/fallback ini penting untuk outbox legacy yang mungkin masih
+        # membawa id_gudang lama meski no_resi sudah berubah (contoh KT-18042
+        # menjadi KT-18042-P). Normalisasi hanya untuk ID dalam namespace GDG-;
+        # identitas lintas perangkat sync_id tetap tidak berubah.
+        no_resi = str(clean.get("no_resi") or "").strip().upper()
         gid = str(clean.get("id_gudang") or "").strip().upper()
+        if no_resi and gid.startswith("GDG-"):
+            canonical_gid = f"GDG-{no_resi}"
+            if gid != canonical_gid:
+                logger.warning(
+                    "[SYNC] Memulihkan id_gudang %s menjadi %s berdasarkan no_resi %s.",
+                    gid, canonical_gid, no_resi,
+                )
+                clean["id_gudang"] = canonical_gid
+                gid = canonical_gid
         sid = str(clean.get("sync_id") or "").strip()
         if not gid or not sid:
             raise ValueError("buku_gudang membutuhkan id_gudang dan sync_id.")
 
-        remote = _server_buku_gudang_row(gid)
+        remote_by_gid = _server_buku_gudang_row(gid)
+        remote_by_sid = _server_buku_gudang_by_sync_id(sid)
+
+        # Jika gid baru belum ada tetapi sync_id sudah tersimpan pada row
+        # dengan gid lama, ini adalah rename Buku Gudang (misalnya pajak toggle),
+        # bukan INSERT baru. Jika kedua lookup menunjuk row berbeda, hentikan
+        # sebagai konflik eksplisit daripada menimpa row yang tidak terkait.
+        if (
+            remote_by_gid
+            and remote_by_sid
+            and str(remote_by_gid.get("sync_id") or "").strip() != sid
+            and str(remote_by_sid.get("sync_id") or "").strip() == sid
+        ):
+            raise SyncConflictError(
+                "id_gudang tujuan sudah dipakai row Buku Gudang lain di server."
+            )
+        remote = remote_by_sid or remote_by_gid
+        if remote_by_gid and str(remote_by_gid.get("sync_id") or "").strip() not in ("", sid):
+            raise SyncConflictError(
+                "Buku Gudang dengan id_gudang sama sudah dimiliki sync_id lain di server."
+            )
 
         if operation == "INSERT":
             if remote:
                 remote_sid = str(remote.get("sync_id") or "").strip()
                 if remote_sid == sid:
-                    # INSERT sebelumnya sudah sukses; retry sekarang hanya perlu
-                    # dianggap selesai, tanpa menyentuh UPDATE/RLS.
+                    # INSERT sebelumnya sudah sukses atau row yang sama sudah
+                    # diperbarui lewat event rename. Jangan memutar state server
+                    # kembali ke id_gudang lama hanya karena antrean INSERT lama.
                     return
                 raise SyncConflictError(
                     "Buku Gudang dengan id_gudang sama sudah dimiliki sync_id lain di server."
@@ -796,11 +1114,54 @@ def _server_upsert(table_name: str, operation: str, payload: Dict[str, Any]) -> 
                     # Ini terutama menangani retry/housekeeping tanpa membutuhkan
                     # izin UPDATE dari RLS.
                     return
-                response = supabase.table("buku_gudang").update(clean).eq("id_gudang", gid).execute()
+                # Update via sync_id agar perubahan id_gudang tidak menjadi
+                # INSERT palsu dengan sync_id yang sudah unique di server.
+                # Minta representation dan verifikasi hasilnya: UPDATE yang
+                # terkena RLS/0 row tidak boleh dianggap sukses hanya karena
+                # request HTTP tidak melempar exception.
+                response = (
+                    supabase.table("buku_gudang")
+                    .update(clean)
+                    .eq("sync_id", sid)
+                    .select("sync_id,id_gudang,no_resi")
+                    .execute()
+                )
+                updated_rows = getattr(response, "data", None) or []
+                if updated_rows:
+                    updated = updated_rows[0]
+                    if (
+                        str(updated.get("sync_id") or "").strip() == sid
+                        and str(updated.get("id_gudang") or "").strip().upper() == gid
+                        and str(updated.get("no_resi") or "").strip().upper() == no_resi
+                    ):
+                        return
+
+                # Some deployments may not return representation despite the
+                # select request. Re-read by stable identity before deciding.
+                verified = _server_buku_gudang_by_sync_id(sid)
+                if (
+                    verified
+                    and str(verified.get("sync_id") or "").strip() == sid
+                    and str(verified.get("id_gudang") or "").strip().upper() == gid
+                    and str(verified.get("no_resi") or "").strip().upper() == no_resi
+                ):
+                    return
+                raise SyncConflictError(
+                    "UPDATE Buku Gudang tidak terkonfirmasi: server belum menyimpan "
+                    f"id_gudang={gid} dan no_resi={no_resi} untuk sync_id={sid}. "
+                    "Periksa RLS, trigger, atau antrean konflik."
+                )
         else:
             # DELETE/soft-delete memang merupakan UPDATE server. Biarkan RLS
             # memutuskan apakah user berwenang melakukan penghapusan.
-            response = supabase.table("buku_gudang").update(clean).eq("id_gudang", gid).execute()
+            if remote is None:
+                return
+            remote_sid = str(remote.get("sync_id") or "").strip()
+            if remote_sid and remote_sid != sid:
+                raise SyncConflictError(
+                    "Buku Gudang yang hendak dihapus memiliki sync_id berbeda di server."
+                )
+            response = supabase.table("buku_gudang").update(clean).eq("sync_id", sid).execute()
     elif table_name == "manifest":
         clean.pop("is_synced", None)
         manifest_id = str(clean.get("id_manifest") or "").strip().upper()
@@ -910,6 +1271,239 @@ def _server_detail_position_conflict(payload: Dict[str, Any]) -> Optional[Dict[s
     return None
 
 
+def _detail_row_from_sync_id(conn, sync_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM data_resi_detail WHERE sync_id=? AND deleted_at IS NULL LIMIT 1",
+        (sync_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    columns = [str(item[1]) for item in conn.execute("PRAGMA table_info(data_resi_detail)").fetchall()]
+    return dict(zip(columns, row))
+
+
+def _remote_detail_by_sync_id(sync_id: str) -> Optional[Dict[str, Any]]:
+    """Baca identitas detail live dari server; bukan dari snapshot konflik lama."""
+    sid = str(sync_id or "").strip()
+    if not sid:
+        return None
+    result = (
+        supabase.table("data_resi_detail")
+        .select("*")
+        .eq("sync_id", sid)
+        .limit(1)
+        .execute()
+    ).data or []
+    return result[0] if result and isinstance(result[0], dict) else None
+
+
+def _heal_tombstoned_detail_slot_conflicts(conn) -> Dict[str, set[str]]:
+    """Adopsi kembali sync_id remote bila edit lama menciptakan alias detail.
+
+    Kasus yang ditangani sangat spesifik: konflik OPEN menyimpan bukti bahwa
+    payload lokal aktif dan payload remote bertombstone memakai slot yang sama,
+    identitas remote masih bertombstone saat dibaca ulang, dan identitas remote
+    belum ada di cache lokal. Karena UNIQUE(no_resi, urutan) juga mencakup
+    tombstone, detail lokal harus memakai kembali sync_id remote tersebut agar
+    UPDATE dapat menghidupkan baris yang sama, bukan mencoba INSERT baris kedua.
+
+    Fungsi hanya mengubah cache/outbox lokal. Konflik lama baru ditutup setelah
+    UPDATE kanonis berhasil dikirim ke Supabase.
+    """
+    try:
+        conflicts = conn.execute(
+            """
+            SELECT id, record_key, local_payload, remote_payload
+            FROM sync_conflicts
+            WHERE table_name='data_resi_detail'
+              AND status='OPEN'
+              AND local_payload IS NOT NULL
+              AND remote_payload IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    aliases_by_canonical: Dict[str, set[str]] = {}
+    processed_aliases: set[str] = set()
+    for _conflict_id, record_key, local_raw, remote_raw in conflicts:
+        try:
+            local_snapshot = json.loads(local_raw or "{}")
+            remote_snapshot = json.loads(remote_raw or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(local_snapshot, dict) or not isinstance(remote_snapshot, dict):
+            continue
+
+        local_sid = str(local_snapshot.get("sync_id") or record_key or "").strip()
+        remote_sid = str(remote_snapshot.get("sync_id") or "").strip()
+        if (
+            not local_sid or not remote_sid or local_sid == remote_sid
+            or local_sid in processed_aliases
+            or not remote_snapshot.get("deleted_at")
+        ):
+            continue
+
+        local = _detail_row_from_sync_id(conn, local_sid)
+        if not local:
+            continue
+
+        try:
+            remote = _remote_detail_by_sync_id(remote_sid)
+        except Exception as exc:
+            # Offline/network errors must not mutate local identity or queue.
+            logger.debug(
+                "[SYNC] Pemeriksaan alias detail %s ditunda; server tidak bisa dibaca: %s",
+                local_sid, exc,
+            )
+            continue
+        if not isinstance(remote, dict) or not remote.get("deleted_at"):
+            # Jangan memakai tombstone snapshot yang sudah kedaluwarsa.
+            continue
+        if str(remote.get("sync_id") or "").strip() != remote_sid:
+            continue
+
+        local_no = str(local.get("no_resi") or "").strip().upper()
+        remote_no = str(remote.get("no_resi") or "").strip().upper()
+        try:
+            local_order = int(local.get("urutan") or 0)
+            remote_order = int(remote.get("urutan") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not local_no or local_no != remote_no or local_order <= 0 or local_order != remote_order:
+            continue
+
+        # Remote sync_id harus benar-benar belum terwakili di cache lokal.
+        if conn.execute(
+            "SELECT 1 FROM data_resi_detail WHERE sync_id=? LIMIT 1", (remote_sid,)
+        ).fetchone():
+            continue
+        # Jangan memilih alias bila ada row lokal lain di slot yang sama.
+        other_slot = conn.execute(
+            """
+            SELECT sync_id FROM data_resi_detail
+            WHERE UPPER(no_resi)=? AND urutan=? AND id_detail<>?
+            LIMIT 1
+            """,
+            (local_no, local_order, local.get("id_detail")),
+        ).fetchone()
+        if other_slot:
+            continue
+        # Parent lokal yang aktif harus masih tersedia.
+        parent = conn.execute(
+            "SELECT 1 FROM data_resi WHERE UPPER(no_resi)=? LIMIT 1", (local_no,)
+        ).fetchone()
+        if not parent:
+            continue
+
+        # Lakukan perubahan identitas tanpa menambah event trigger baru.
+        control = conn.execute(
+            "SELECT suppress_outbox FROM sync_control WHERE id=1 LIMIT 1"
+        ).fetchone()
+        was_suppressed = bool(control[0]) if control else False
+        assignments = ["sync_id=?", "deleted_at=NULL"]
+        values: list[Any] = [remote_sid]
+        local_columns = {
+            str(item[1]) for item in conn.execute("PRAGMA table_info(data_resi_detail)").fetchall()
+        }
+        # created_at dan created_by bersifat immutable: pulihkan dari identitas
+        # server kanonis, sementara isi barang serta updated_at tetap dari lokal.
+        for field in ("created_at", "created_by_user_id", "created_by_username", "created_by_name"):
+            if field in local_columns and remote.get(field) not in (None, ""):
+                assignments.append(f'"{field}"=?')
+                values.append(remote[field])
+        values.extend((local.get("id_detail"), local_sid))
+        try:
+            if not was_suppressed:
+                _set_suppress(conn, True)
+            updated = conn.execute(
+                f"UPDATE data_resi_detail SET {', '.join(assignments)} "
+                "WHERE id_detail=? AND sync_id=? AND deleted_at IS NULL",
+                values,
+            )
+            if updated.rowcount != 1:
+                continue
+        except sqlite3.Error as exc:
+            logger.warning(
+                "[SYNC] Pemulihan identitas detail %s ditunda: %s", local_sid, exc
+            )
+            continue
+        finally:
+            if not was_suppressed:
+                _set_suppress(conn, False)
+
+        payload = _local_row_json(conn, "data_resi_detail", "sync_id=?", (remote_sid,))
+        if not payload:
+            continue
+        payload["sync_id"] = remote_sid
+        payload["deleted_at"] = None
+        reason = f"Superseded by canonical detail sync_id {remote_sid}; see newer UPDATE."
+        placeholders = ",".join("?" for _ in (local_sid, remote_sid))
+        conn.execute(
+            f"""
+            UPDATE sync_outbox
+            SET status='SYNCED', last_error=?
+            WHERE table_name='data_resi_detail'
+              AND record_key IN ({placeholders})
+              AND status IN ('PENDING','CONFLICT')
+            """,
+            (reason, local_sid, remote_sid),
+        )
+        conn.execute(
+            """
+            INSERT INTO sync_outbox(table_name, record_key, operation, payload_json, status)
+            VALUES ('data_resi_detail', ?, 'UPDATE', ?, 'PENDING')
+            """,
+            (remote_sid, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+        )
+        aliases_by_canonical.setdefault(remote_sid, set()).add(local_sid)
+        processed_aliases.add(local_sid)
+        logger.warning(
+            "[SYNC] Identitas detail lama dipulihkan: %s -> %s pada %s urutan %s; "
+            "UPDATE kanonis diantrikan.",
+            local_sid, remote_sid, local_no, local_order,
+        )
+
+    return aliases_by_canonical
+
+
+def _resolve_rebound_detail_conflicts(conn, canonical_sync_id: str, aliases: set[str]) -> int:
+    """Tutup hanya konflik identitas detail yang sudah berhasil dipush kanonis."""
+    keys = {str(canonical_sync_id or "").strip()}
+    keys.update(str(item or "").strip() for item in (aliases or set()))
+    keys.discard("")
+    if not keys:
+        return 0
+    placeholders = ",".join("?" for _ in keys)
+    params = tuple(sorted(keys))
+    alias_ids = set(keys) - {str(canonical_sync_id or "").strip()}
+    if alias_ids:
+        alias_placeholders = ",".join("?" for _ in alias_ids)
+        conn.execute(
+            f"""
+            UPDATE sync_outbox
+            SET status='SYNCED', last_error=NULL
+            WHERE table_name='data_resi_detail'
+              AND record_key IN ({alias_placeholders})
+              AND status IN ('PENDING','CONFLICT')
+            """,
+            tuple(sorted(alias_ids)),
+        )
+    cur = conn.execute(
+        f"""
+        UPDATE sync_conflicts
+        SET status='RESOLVED'
+        WHERE table_name='data_resi_detail'
+          AND status='OPEN'
+          AND record_key IN ({placeholders})
+        """,
+        params,
+    )
+    return int(cur.rowcount or 0)
+
+
 def _mark_success(conn, outbox_id: int, table_name: str, record_key: str) -> None:
     conn.execute(
         """
@@ -986,8 +1580,22 @@ def _is_offline_network_error(error: BaseException) -> bool:
         "temporary failure in name resolution",
         "network is unreachable",
         "connection reset",
+        "connection was reset",
         "connection refused",
         "connection aborted",
+        "remoteprotocolerror",
+        "server disconnected",
+        "remote end closed connection",
+        "peer closed connection",
+        "connection closed unexpectedly",
+        "brokenpipeerror",
+        "broken pipe",
+        "socket is closed",
+        "clientconnectorerror",
+        "sslerror",
+        "ssl eof",
+        "eof occurred in violation of protocol",
+        "unexpected eof while reading",
         "winerror 10054",
         "winerror 10060",
         "errno 11001",
@@ -1046,26 +1654,11 @@ def _server_master_row(table_name: str, sync_id: str) -> Optional[Dict[str, Any]
     return rows[0] if rows else None
 
 
-def _local_master_is_older_than_server(
-    table_name: str,
-    payload: Dict[str, Any],
+def _master_remote_newer_than_payload(
+    payload: Dict[str, Any], remote: Optional[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
-    """Detect a genuine remote-newer master conflict without flagging our own INSERT.
-
-    Supabase may stamp/update ``updated_at`` a little later when the INSERT reaches
-    the server. For a brand-new row, ``created_at`` remains the same identity
-    timestamp that came from the local payload. Therefore a later server
-    ``updated_at`` on a row with the same ``created_at`` is not a remote edit; it
-    is normally the server acknowledgement/normalization of our own write.
-    """
-    if table_name not in MASTER_TABLES:
-        return None
-    sync_id = str(payload.get("sync_id") or "").strip()
-    if not sync_id:
-        return None
-
-    remote = _server_master_row(table_name, sync_id)
-    if not remote:
+    """Compare a local outbox snapshot with a row already fetched from Supabase."""
+    if not isinstance(remote, dict) or not remote:
         return None
 
     local_created = _parse_dt(payload.get("created_at"))
@@ -1086,9 +1679,29 @@ def _local_master_is_older_than_server(
     if local_updated is None or remote_updated is None:
         return None
 
-    if remote_updated > local_updated:
-        return remote
-    return None
+    return remote if remote_updated > local_updated else None
+
+
+def _local_master_is_older_than_server(
+    table_name: str,
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Detect a genuine remote-newer master conflict without flagging our own INSERT.
+
+    Supabase may stamp/update ``updated_at`` a little later when the INSERT reaches
+    the server. For a brand-new row, ``created_at`` remains the same identity
+    timestamp that came from the local payload. Therefore a later server
+    ``updated_at`` on a row with the same ``created_at`` is not a remote edit; it
+    is normally the server acknowledgement/normalization of our own write.
+    """
+    if table_name not in MASTER_TABLES:
+        return None
+    sync_id = str(payload.get("sync_id") or "").strip()
+    if not sync_id:
+        return None
+    return _master_remote_newer_than_payload(
+        payload, _server_master_row(table_name, sync_id)
+    )
 
 
 def _mark_conflict(
@@ -1230,6 +1843,84 @@ def _hydrate_immutable_created_by(conn, table_name: str, payload: Dict[str, Any]
             result[field] = value
     return result
 
+def _supersede_obsolete_pending_resi_updates(conn) -> int:
+    """Coalesce intermediate full-row Resi UPDATE snapshots before pushing.
+
+    Editing a Resi from Buku Gudang can update the Resi header/ringkasan and
+    then increment revision in the same SQLite transaction. The local outbox
+    trigger records each intermediate full-row snapshot. Only the newest
+    PENDING UPDATE for the same no_resi + sync_id is needed; sending an older
+    snapshot first can create a false server-newer conflict even though the
+    final snapshot will sync successfully. INSERT/DELETE events, different
+    Resi keys and different sync_id values are never coalesced.
+
+    Superseded events remain in sync_outbox for audit; no row is deleted and
+    no CONFLICT event is silently resolved here.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, record_key, payload_json
+        FROM sync_outbox
+        WHERE table_name = 'data_resi'
+          AND operation = 'UPDATE'
+          AND status = 'PENDING'
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+    groups = {}
+    for row in rows:
+        try:
+            outbox_id = int(row[0])
+            record_key = str(row[1] or '').strip().upper()
+            payload = json.loads(row[2] or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        sync_id = str(payload.get('sync_id') or '').strip()
+        payload_no_resi = str(payload.get('no_resi') or '').strip().upper()
+        # Only complete, full-row snapshots with consistent keys are safe to
+        # fold. Leave malformed/legacy partial payloads untouched.
+        if not record_key or not sync_id or payload_no_resi != record_key:
+            continue
+        if 'revision' not in payload or 'updated_at' not in payload:
+            continue
+        groups.setdefault((record_key, sync_id), []).append(outbox_id)
+
+    superseded = 0
+    for (record_key, sync_id), ids in groups.items():
+        if len(ids) < 2:
+            continue
+        latest_id = max(ids)
+        old_ids = [item_id for item_id in ids if item_id < latest_id]
+        if not old_ids:
+            continue
+        placeholders = ','.join('?' for _ in old_ids)
+        cur = conn.execute(
+            f"""
+            UPDATE sync_outbox
+            SET status = 'SUPERSEDED',
+                last_error = ?
+            WHERE id IN ({placeholders})
+              AND table_name = 'data_resi'
+              AND operation = 'UPDATE'
+              AND status = 'PENDING'
+            """,
+            (
+                f'Snapshot UPDATE Resi perantara digabung ke event terbaru #{latest_id} '
+                f'(no_resi={record_key}, sync_id={sync_id}); histori dipertahankan.',
+                *old_ids,
+            ),
+        )
+        superseded += int(cur.rowcount or 0)
+
+    if superseded:
+        logger.info(
+            "[SYNC] Melewati %s snapshot UPDATE Resi perantara; snapshot terbaru akan dikirim. Histori outbox dipertahankan.",
+            superseded,
+        )
+    return superseded
+
+
 def push_pending(limit: int = BATCH_SIZE) -> int:
     if not _session_ready():
         return 0
@@ -1241,6 +1932,27 @@ def push_pending(limit: int = BATCH_SIZE) -> int:
         if healed:
             conn.commit()
             logger.info("[SYNC] Memulihkan %s konflik master lama yang ternyata hanya timestamp server.", healed)
+
+        detail_aliases_by_canonical = _heal_tombstoned_detail_slot_conflicts(conn)
+        if detail_aliases_by_canonical:
+            conn.commit()
+            repaired_count = sum(len(v) for v in detail_aliases_by_canonical.values())
+            logger.warning(
+                "[SYNC] Memulihkan %s alias identitas detail lama; data bisnis lokal dipertahankan.",
+                repaired_count,
+            )
+
+        # Coalesce intermediate full-row Resi updates produced by one edit before
+        # running revision/timestamp conflict checks. Keep the final snapshot and
+        # preserve older queue history with status SUPERSEDED.
+        coalesced_resi = _supersede_obsolete_pending_resi_updates(conn)
+        # A legacy Buku Gudang conflict may be stuck because the server row's
+        # id_gudang is inconsistent with its own no_resi. Requeue a verified,
+        # idempotent UPDATE only when every other business field matches; real
+        # status/date/branch conflicts remain untouched.
+        repaired_buku_keys = _requeue_buku_gudang_key_repairs(conn)
+        if coalesced_resi or repaired_buku_keys:
+            conn.commit()
 
         rows = conn.execute(
             """
@@ -1310,7 +2022,23 @@ def push_pending(limit: int = BATCH_SIZE) -> int:
                         )
                         continue
                 elif table_name in MASTER_TABLES and table_name != 'numbering_counters' and operation in {'UPDATE', 'DELETE'}:
-                    remote_newer = _local_master_is_older_than_server(table_name, payload)
+                    if table_name == "buku_gudang" and operation == "UPDATE":
+                        remote_book = _server_buku_gudang_by_sync_id(
+                            str(payload.get("sync_id") or "").strip()
+                        )
+                        if _buku_gudang_only_remote_key_mismatch(payload, remote_book):
+                            # id_gudang is derived from no_resi. Repair a malformed
+                            # server key when all other business fields agree, even
+                            # if server updated_at is newer due to prior housekeeping.
+                            remote_newer = None
+                            logger.warning(
+                                "[SYNC] Memulihkan id_gudang Buku Gudang %s agar sesuai dengan no_resi %s.",
+                                remote_book.get("id_gudang"), payload.get("no_resi"),
+                            )
+                        else:
+                            remote_newer = _master_remote_newer_than_payload(payload, remote_book)
+                    else:
+                        remote_newer = _local_master_is_older_than_server(table_name, payload)
                     if remote_newer:
                         _mark_conflict(
                             conn, outbox_id, table_name, record_key, payload, remote_newer
@@ -1324,6 +2052,17 @@ def push_pending(limit: int = BATCH_SIZE) -> int:
 
                 _server_upsert(table_name, operation, payload)
                 _mark_success(conn, outbox_id, table_name, record_key)
+                if table_name == "data_resi_detail":
+                    aliases = detail_aliases_by_canonical.get(str(record_key), set())
+                    if aliases:
+                        resolved = _resolve_rebound_detail_conflicts(
+                            conn, str(record_key), aliases
+                        )
+                        if resolved:
+                            logger.info(
+                                "[SYNC] Menutup %s konflik detail lama setelah sync_id kanonis %s berhasil.",
+                                resolved, record_key,
+                            )
                 conn.commit()
                 berhasil += 1
             except SyncConflictError as exc:
@@ -1435,6 +2174,79 @@ def _store_pull_conflict(conn, event_id: str, table_name: str, record_key: str, 
     )
 
 
+def _numbering_counter_business_key(payload: Any) -> tuple[str, str, str] | None:
+    """Bentuk identitas bisnis counter yang stabil meski sync_id lokal berbeda."""
+    if not isinstance(payload, dict):
+        return None
+    branch = str(payload.get("kode_cabang") or "").strip().upper()
+    document_type = str(payload.get("document_type") or "").strip().upper()
+    series_code = str(payload.get("series_code") or "").strip().upper()
+    if not branch or not document_type or not series_code:
+        return None
+    return branch, document_type, series_code
+
+
+def _resolve_merged_numbering_counter_pull_conflicts(
+    conn, payload: Dict[str, Any]
+) -> int:
+    """Tutup konflik PULL counter lama setelah snapshot berhasil di-merge.
+
+    numbering_counters punya aturan resolusi khusus: sequence digabung dengan
+    MAX sehingga tidak turun, sedangkan metadata mengikuti snapshot server.
+    Konflik PULL yang pernah dibuat oleh guard umum sudah tidak diperlukan setelah
+    snapshot counter dengan business key yang sama berhasil diterapkan. Konflik
+    PUSH eksplisit tetap disimpan untuk audit dan tidak disentuh.
+    """
+    business_key = _numbering_counter_business_key(payload)
+    if business_key is None:
+        return 0
+
+    rows = conn.execute(
+        """
+        SELECT event_key, record_key, local_payload, remote_payload
+        FROM sync_conflicts
+        WHERE table_name = 'numbering_counters' AND status = 'OPEN'
+        """
+    ).fetchall()
+    remote_sync_id = str(payload.get("sync_id") or "").strip()
+    resolved = 0
+
+    for event_key, record_key, local_raw, remote_raw in rows:
+        # PUSH-CONFLICT menandai konflik eksplisit dari push dan tidak boleh
+        # dianggap selesai hanya karena sebuah snapshot PULL berhasil digabung.
+        if str(event_key or "").startswith("PUSH-CONFLICT:"):
+            continue
+
+        matches = bool(remote_sync_id and str(record_key or "").strip() == remote_sync_id)
+        for raw in (local_raw, remote_raw):
+            if not raw:
+                continue
+            try:
+                candidate = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if _numbering_counter_business_key(candidate) == business_key:
+                matches = True
+                break
+
+        if not matches:
+            continue
+
+        cur = conn.execute(
+            """
+            UPDATE sync_conflicts
+            SET status = 'RESOLVED'
+            WHERE event_key = ?
+              AND table_name = 'numbering_counters'
+              AND status = 'OPEN'
+            """,
+            (event_key,),
+        )
+        resolved += int(cur.rowcount or 0)
+
+    return resolved
+
+
 def _record_key_from_remote(table_name: str, payload: Dict[str, Any]) -> str:
     if table_name == "data_resi":
         return str(payload.get("no_resi") or "").strip().upper()
@@ -1479,7 +2291,200 @@ def _delete_local_resi(conn, no_resi: str) -> None:
     conn.execute("DELETE FROM data_resi WHERE no_resi = ?", (no_resi,))
 
 
+def _local_active_resi_variant_conflicts(
+    conn, no_resi: str, kode_cabang: str, sync_id: str = ""
+) -> list[dict[str, str]]:
+    """Find another active local Resi using the same base number with the tax suffix toggled."""
+    target = str(no_resi or "").strip().upper()
+    branch = str(kode_cabang or "").strip().upper()
+    suffix_row = conn.execute(
+        "SELECT nilai FROM pengaturan_sistem WHERE kunci=? LIMIT 1",
+        ("kode_akhiran_pajak",),
+    ).fetchone()
+    suffix = str(suffix_row[0] or "").strip().upper() if suffix_row else ""
+    suffix = suffix or "-P"
+    base = target[:-len(suffix)].rstrip() if suffix and target.endswith(suffix) else target
+    if not target or not base or not branch:
+        return []
+    variants = sorted({base, f"{base}{suffix}"})
+    placeholders = ",".join("?" for _ in variants)
+    rows = conn.execute(
+        f"""
+        SELECT no_resi, sync_id
+        FROM data_resi
+        WHERE UPPER(TRIM(COALESCE(kode_cabang, ''))) = ?
+          AND UPPER(TRIM(COALESCE(no_resi, ''))) IN ({placeholders})
+          AND COALESCE(TRIM(deleted_at), '') = ''
+        """,
+        (branch, *variants),
+    ).fetchall()
+    return [
+        {"no_resi": str(row[0] or "").strip().upper(), "sync_id": str(row[1] or "").strip()}
+        for row in rows
+        if str(row[0] or "").strip().upper() != target
+        and str(row[1] or "").strip() != str(sync_id or "").strip()
+    ]
+
+
 def _apply_remote_resi(conn, payload: Dict[str, Any]) -> None:
+    target_no = str(payload.get("no_resi") or "").strip().upper()
+    target_branch = str(payload.get("kode_cabang") or "").strip().upper()
+    target_sid = str(payload.get("sync_id") or "").strip()
+
+    # no_resi is mutable when the tax suffix is toggled. Before upserting by the
+    # visible number, reconcile by stable sync_id so an old sync_changes event
+    # cannot recreate the previous number as a second Resi.
+    if target_no and target_sid:
+        local_by_sid = conn.execute(
+            """
+            SELECT no_resi, kode_cabang, revision, updated_at
+            FROM data_resi WHERE sync_id=? LIMIT 1
+            """,
+            (target_sid,),
+        ).fetchone()
+        if local_by_sid:
+            current_no = str(local_by_sid[0] or "").strip().upper()
+            current_branch = str(local_by_sid[1] or "").strip().upper()
+            local_revision = _to_int(local_by_sid[2], 0)
+            remote_revision = _to_int(payload.get("revision"), 0)
+            local_updated = _parse_dt(local_by_sid[3])
+            remote_updated = _parse_dt(payload.get("updated_at"))
+
+            if current_no and current_no != target_no:
+                # A newer local revision means this remote row is a stale snapshot
+                # of the same record under its old business key. Never insert it as
+                # a second history item.
+                local_is_newer = local_revision > remote_revision or (
+                    local_revision == remote_revision
+                    and local_updated is not None
+                    and remote_updated is not None
+                    and local_updated >= remote_updated
+                )
+                if local_is_newer:
+                    logger.info(
+                        "[SYNC] Mengabaikan snapshot Resi lama %s; sync_id yang sama sudah berada pada %s.",
+                        target_no, current_no,
+                    )
+                    return
+
+                if _local_has_pending_or_conflict(conn, "data_resi", current_no):
+                    current_payload = _local_row_json(
+                        conn, "data_resi", "no_resi=?", (current_no,)
+                    )
+                    _record_recovery_conflict(
+                        conn, "data_resi", current_no, current_payload, payload,
+                        "REMOTE_RENAME_VS_LOCAL_PENDING",
+                    )
+                    logger.warning(
+                        "[SYNC] Rename Resi remote %s ditahan; sync_id yang sama masih punya perubahan lokal pada %s.",
+                        target_no, current_no,
+                    )
+                    return
+
+                if current_branch != target_branch:
+                    _record_recovery_conflict(
+                        conn, "data_resi", current_no,
+                        _local_row_json(conn, "data_resi", "no_resi=?", (current_no,)),
+                        payload, "REMOTE_RENAME_BRANCH_MISMATCH",
+                    )
+                    logger.warning(
+                        "[SYNC] Rename Resi %s -> %s ditahan karena cabang berbeda.",
+                        current_no, target_no,
+                    )
+                    return
+
+                occupied = conn.execute(
+                    "SELECT sync_id FROM data_resi WHERE no_resi=? LIMIT 1",
+                    (target_no,),
+                ).fetchone()
+                if occupied:
+                    occupied_sid = str(occupied[0] or "").strip()
+                    if occupied_sid != target_sid:
+                        _record_recovery_conflict(
+                            conn, "data_resi", target_no,
+                            _local_row_json(conn, "data_resi", "no_resi=?", (target_no,)),
+                            payload, "REMOTE_RENAME_KEY_COLLISION",
+                        )
+                        logger.warning(
+                            "[SYNC] Rename Resi %s -> %s ditahan; nomor tujuan sudah dimiliki sync_id lain.",
+                            current_no, target_no,
+                        )
+                        return
+                    _record_recovery_conflict(
+                        conn, "data_resi", target_no,
+                        _local_row_json(conn, "data_resi", "no_resi=?", (target_no,)),
+                        payload, "DUPLICATE_LOCAL_SYNC_ID",
+                    )
+                    logger.warning(
+                        "[SYNC] Ditemukan dua row lokal untuk sync_id Resi %s; tidak ada row yang dihapus otomatis.",
+                        target_sid,
+                    )
+                    return
+
+                sibling_conflicts = _local_active_resi_variant_conflicts(
+                    conn, target_no, target_branch, target_sid
+                )
+                if sibling_conflicts:
+                    _record_recovery_conflict(
+                        conn, "data_resi", target_no, sibling_conflicts, payload,
+                        "REMOTE_RENAME_TAX_VARIANT_COLLISION",
+                    )
+                    logger.warning(
+                        "[SYNC] Rename Resi %s -> %s ditahan; varian aktif lain sudah ada lokal (%s).",
+                        current_no, target_no,
+                        ", ".join(item["no_resi"] for item in sibling_conflicts),
+                    )
+                    return
+
+                # Reuse the database service's already-tested copy/move/delete
+                # transaction so FK children, Buku Gudang, invoice relations, and
+                # original history rowid follow the same sync_id safely.
+                from services.database_service import _rename_resi_aman
+                _rename_resi_aman(
+                    conn.cursor(), current_no, target_no, target_branch
+                )
+                logger.info(
+                    "[SYNC] Resi remote direkonsiliasi berdasarkan sync_id: %s -> %s.",
+                    current_no, target_no,
+                )
+
+        else:
+            # A different sync_id must not overwrite the existing row or introduce
+            # the other tax variant into the local active history.
+            target_row = conn.execute(
+                "SELECT sync_id FROM data_resi WHERE no_resi=? LIMIT 1",
+                (target_no,),
+            ).fetchone()
+            if target_row and str(target_row[0] or "").strip() != target_sid:
+                existing_payload = _local_row_json(
+                    conn, "data_resi", "no_resi=?", (target_no,)
+                )
+                _record_recovery_conflict(
+                    conn, "data_resi", target_no, existing_payload, payload,
+                    "REMOTE_KEY_DIFFERENT_SYNC_ID",
+                )
+                logger.warning(
+                    "[SYNC] Resi remote %s ditahan: nomor lokal sudah dimiliki sync_id berbeda.",
+                    target_no,
+                )
+                return
+
+            if not target_row:
+                sibling_conflicts = _local_active_resi_variant_conflicts(
+                    conn, target_no, target_branch, target_sid
+                )
+                if sibling_conflicts:
+                    _record_recovery_conflict(
+                        conn, "data_resi", target_no, sibling_conflicts, payload,
+                        "REMOTE_TAX_VARIANT_COLLISION",
+                    )
+                    logger.warning(
+                        "[SYNC] Resi remote %s tidak dimasukkan; varian aktif lain sudah ada lokal (%s).",
+                        target_no,
+                        ", ".join(item["no_resi"] for item in sibling_conflicts),
+                    )
+                    return
+
     columns = [
         "no_resi", "kode_cabang", "tanggal_masuk", "tanggal_keluar", "pengirim",
         "hp_pengirim", "alamat_pengirim", "kota_asal", "penerima", "hp_penerima",
@@ -1804,6 +2809,13 @@ def _apply_remote_kapal(conn, payload: Dict[str, Any], *, force: bool = False) -
 
 
 def _apply_remote_buku_gudang(conn, payload: Dict[str, Any], *, force: bool = False) -> bool:
+    """Terapkan snapshot Buku Gudang berdasarkan sync_id yang stabil.
+
+    ``id_gudang`` dibentuk dari nomor resi sehingga dapat berubah saat suffix
+    pajak berubah. Karena itu, row yang sudah ada harus diperbarui berdasarkan
+    ``sync_id``; UPSERT yang hanya menargetkan ``id_gudang`` akan mencoba INSERT
+    dengan sync_id lama dan melanggar unique index lokal.
+    """
     sid = str(payload.get("sync_id") or "").strip()
     gid = str(payload.get("id_gudang") or "").strip().upper()
     branch = str(payload.get("kode_cabang") or "").strip().upper()
@@ -1813,19 +2825,52 @@ def _apply_remote_buku_gudang(conn, payload: Dict[str, Any], *, force: bool = Fa
         logger.warning("[SYNC] buku_gudang/%s ditahan: cabang %s belum tersedia lokal.", sid, branch)
         return False
 
-    local = conn.execute(
-        "SELECT updated_at FROM buku_gudang WHERE id_gudang=? OR sync_id=? LIMIT 1",
-        (gid, sid),
+    local_by_sid = conn.execute(
+        "SELECT id_gudang, updated_at FROM buku_gudang WHERE sync_id=? LIMIT 1",
+        (sid,),
     ).fetchone()
-    # Supabase authoritative: tombstone remote menghapus cache operasional lokal.
+    local_by_gid = conn.execute(
+        "SELECT sync_id FROM buku_gudang WHERE id_gudang=? LIMIT 1",
+        (gid,),
+    ).fetchone()
+
+    # Tombstone hanya boleh menghapus identitas yang cocok. Menghapus dengan
+    # ``id_gudang OR sync_id`` dapat menghapus dua row berbeda saat cache lama
+    # sudah memiliki pemetaan id_gudang/sync_id yang tidak konsisten.
     if payload.get("deleted_at"):
-        if local:
-            conn.execute("DELETE FROM buku_gudang WHERE id_gudang=? OR sync_id=?", (gid, sid))
-            return True
+        if local_by_sid:
+            conn.execute("DELETE FROM buku_gudang WHERE sync_id=?", (sid,))
+        # Tombstone yang sudah tidak ada di cache tetap dianggap telah diterapkan.
+        return True
+
+    identity_changed = bool(
+        local_by_sid and str(local_by_sid[0] or "").strip().upper() != gid
+    )
+    if (
+        local_by_sid
+        and not identity_changed
+        and not _master_remote_is_newer(local_by_sid[1], payload.get("updated_at"), force)
+    ):
         return False
 
-    if not force and local and not _master_remote_is_newer(local[0], payload.get("updated_at"), force):
-        return False
+    # Jika id_gudang tujuan masih ditempati sync_id lain, itu adalah row cache
+    # yang tertinggal dari pemetaan sebelumnya karena PK id_gudang unik di server.
+    # Hapus hanya bila row tersebut tidak punya perubahan lokal/conflict pending.
+    if local_by_gid and str(local_by_gid[0] or "").strip() != sid:
+        occupying_sid = str(local_by_gid[0] or "").strip()
+        if occupying_sid and _local_has_pending_or_conflict(
+            conn, "buku_gudang", occupying_sid
+        ):
+            logger.warning(
+                "[SYNC] buku_gudang/%s ditahan: id_gudang %s ditempati row %s "
+                "yang masih memiliki perubahan/conflict lokal.",
+                sid, gid, occupying_sid,
+            )
+            return False
+        conn.execute(
+            "DELETE FROM buku_gudang WHERE id_gudang=? AND COALESCE(sync_id, '')=?",
+            (gid, occupying_sid),
+        )
 
     columns = [
         "id_gudang", "kode_cabang", "tanggal", "no_resi", "jenis", "status_resi",
@@ -1852,14 +2897,24 @@ def _apply_remote_buku_gudang(conn, payload: Dict[str, Any], *, force: bool = Fa
         payload.get("updated_by_name"),
         1,
     )
-    _sqlite_master_upsert(
-        conn,
-        "buku_gudang",
-        columns,
-        values,
-        ["id_gudang"],
-        [c for c in columns if c != "id_gudang"],
-    )
+
+    if local_by_sid:
+        # Update tepat pada row canonical: sync_id dipakai sebagai identitas
+        # lintas perangkat, sementara id_gudang boleh berubah mengikuti no_resi.
+        assignments = ", ".join(f"{column}=?" for column in columns)
+        conn.execute(
+            f"UPDATE buku_gudang SET {assignments} WHERE sync_id=?",
+            values + (sid,),
+        )
+    else:
+        _sqlite_master_upsert(
+            conn,
+            "buku_gudang",
+            columns,
+            values,
+            ["id_gudang"],
+            [column for column in columns if column != "id_gudang"],
+        )
     return True
 
 
@@ -2233,19 +3288,135 @@ def sync_generic_masters() -> Dict[str, int]:
         conn.close()
 
 
+def _resolve_superseded_buku_gudang_conflicts(conn) -> int:
+    """Resolve stale Buku Gudang conflicts only when a newer push succeeded.
+
+    Conflict payloads are historical snapshots. If the current local row is
+    marked synced, a later outbox event succeeded, there are no newer pending
+    changes, and the current live Supabase row has the same business state, the
+    older conflict is superseded. Preserve audit/conflict rows but mark them
+    RESOLVED; never use the historical remote_payload as the source of truth.
+    """
+    open_rows = conn.execute(
+        """
+        SELECT record_key FROM sync_conflicts
+        WHERE table_name = 'buku_gudang' AND status = 'OPEN'
+        UNION
+        SELECT record_key FROM sync_outbox
+        WHERE table_name = 'buku_gudang' AND status = 'CONFLICT'
+        ORDER BY record_key
+        """
+    ).fetchall()
+
+    healed = 0
+    local_columns = {
+        str(row[1]).strip()
+        for row in conn.execute("PRAGMA table_info(buku_gudang)").fetchall()
+    }
+    if not {"sync_id", "is_synced"}.issubset(local_columns):
+        return 0
+
+    for (record_key_raw,) in open_rows:
+        sync_id = str(record_key_raw or "").strip()
+        if not sync_id:
+            continue
+
+        local = _local_row_json(conn, "buku_gudang", "sync_id = ?", (sync_id,))
+        if not local or int(local.get("is_synced") or 0) != 1:
+            continue
+
+        success_row = conn.execute(
+            """
+            SELECT MAX(id) FROM sync_outbox
+            WHERE table_name = 'buku_gudang' AND record_key = ? AND status = 'SYNCED'
+            """,
+            (sync_id,),
+        ).fetchone()
+        latest_success_id = int(success_row[0] or 0) if success_row else 0
+        if not latest_success_id:
+            # No confirmed successful push means historical conflict cannot be
+            # safely inferred as resolved from the local cache alone.
+            continue
+
+        conflict_row = conn.execute(
+            """
+            SELECT MAX(id) FROM sync_outbox
+            WHERE table_name = 'buku_gudang' AND record_key = ? AND status = 'CONFLICT'
+            """,
+            (sync_id,),
+        ).fetchone()
+        latest_conflict_id = int(conflict_row[0] or 0) if conflict_row else 0
+        if latest_conflict_id >= latest_success_id:
+            continue
+
+        newer_unsettled = conn.execute(
+            """
+            SELECT 1 FROM sync_outbox
+            WHERE table_name = 'buku_gudang' AND record_key = ?
+              AND status IN ('PENDING', 'CONFLICT') AND id > ?
+            LIMIT 1
+            """,
+            (sync_id, latest_success_id),
+        ).fetchone()
+        if newer_unsettled:
+            continue
+
+        try:
+            remote = _server_buku_gudang_by_sync_id(sync_id)
+        except Exception as exc:
+            logger.debug(
+                "[SYNC] Belum bisa merekonsiliasi konflik Buku Gudang %s; pembacaan server gagal: %s",
+                sync_id, exc,
+            )
+            continue
+        if not isinstance(remote, dict) or not remote:
+            continue
+        if not _same_buku_gudang_business_state(local, remote):
+            continue
+
+        # The latest successful event is newer than all conflicted outbox events
+        # and live server state now matches. Retain queue/history rows for audit.
+        conn.execute(
+            """
+            UPDATE sync_outbox
+            SET status = 'SYNCED', last_error = NULL
+            WHERE table_name = 'buku_gudang' AND record_key = ?
+              AND status = 'CONFLICT' AND id < ?
+            """,
+            (sync_id, latest_success_id),
+        )
+        conn.execute(
+            """
+            UPDATE sync_conflicts
+            SET status = 'RESOLVED'
+            WHERE table_name = 'buku_gudang' AND record_key = ? AND status = 'OPEN'
+            """,
+            (sync_id,),
+        )
+        healed += 1
+
+    if healed:
+        logger.info(
+            "[SYNC] Menutup %s konflik Buku Gudang lama setelah push sukses terbaru "
+            "dan state bisnis cocok dengan Supabase; histori konflik dipertahankan.",
+            healed,
+        )
+    return healed
+
+
 def _resolve_superseded_data_resi_conflicts(conn) -> int:
     """Resolve stale Resi conflicts only after comparing against live Supabase state.
 
     A conflict's remote_payload is a historical snapshot; it may be older than a
-    later successful Manifest edit. Therefore it must not be used as the source
-    of truth for deciding whether the conflict is now resolved. This routine
-    checks the current server row, requires a later successful outbox operation,
-    requires no newer pending/conflicted operation, and compares business fields
-    before changing only sync metadata plus queue/history status.
+    later successful edit. This routine checks the CURRENT server row rather than
+    trusting the stored snapshot and compares the complete business state before
+    changing only sync metadata plus queue/history status.
 
-    If the live server row cannot be read, is deleted, or differs in any business
-    field, the conflict is left untouched. No business field is copied from a
-    historical payload.
+    A later successful outbox event is sufficient evidence that a local edit was
+    superseded. A synchronized local row with no pending/conflicted outbox is also
+    safe to reconcile, but only when every business field matches the live server.
+    If the live server cannot be read, is deleted, or differs in any business
+    field, the conflict is left untouched.
     """
     open_rows = conn.execute(
         """
@@ -2325,31 +3496,46 @@ def _resolve_superseded_data_resi_conflicts(conn) -> int:
             (record_key,),
         ).fetchone()
         latest_success_id = int(success_row[0] or 0) if success_row else 0
-        if not latest_success_id:
-            continue
 
-        conflict_row = conn.execute(
-            """
-            SELECT MAX(id) FROM sync_outbox
-            WHERE table_name = 'data_resi' AND record_key = ? AND status = 'CONFLICT'
-            """,
-            (record_key,),
-        ).fetchone()
-        latest_conflict_id = int(conflict_row[0] or 0) if conflict_row else 0
-        if latest_conflict_id >= latest_success_id:
-            continue
+        if latest_success_id:
+            conflict_row = conn.execute(
+                """
+                SELECT MAX(id) FROM sync_outbox
+                WHERE table_name = 'data_resi' AND record_key = ? AND status = 'CONFLICT'
+                """,
+                (record_key,),
+            ).fetchone()
+            latest_conflict_id = int(conflict_row[0] or 0) if conflict_row else 0
+            if latest_conflict_id >= latest_success_id:
+                continue
 
-        newer_local_change = conn.execute(
-            """
-            SELECT 1 FROM sync_outbox
-            WHERE table_name = 'data_resi' AND record_key = ?
-              AND status IN ('PENDING', 'CONFLICT') AND id > ?
-            LIMIT 1
-            """,
-            (record_key, latest_success_id),
-        ).fetchone()
-        if newer_local_change:
-            continue
+            newer_local_change = conn.execute(
+                """
+                SELECT 1 FROM sync_outbox
+                WHERE table_name = 'data_resi' AND record_key = ?
+                  AND status IN ('PENDING', 'CONFLICT') AND id > ?
+                LIMIT 1
+                """,
+                (record_key, latest_success_id),
+            ).fetchone()
+            if newer_local_change:
+                continue
+        else:
+            # Legacy pull-only conflict: local row is marked synced but no outbox
+            # history exists (for example, an older initial sync). It can only be
+            # closed if there is absolutely no outstanding local operation and
+            # the full business payload matches the live server below.
+            outstanding = conn.execute(
+                """
+                SELECT 1 FROM sync_outbox
+                WHERE table_name='data_resi' AND record_key=?
+                  AND status IN ('PENDING','CONFLICT')
+                LIMIT 1
+                """,
+                (record_key,),
+            ).fetchone()
+            if outstanding:
+                continue
 
         # Read the live row from Supabase. A stale sync_conflicts.remote_payload
         # is intentionally not used here because a later successful push can
@@ -2449,8 +3635,9 @@ def pull_server_changes(limit: int = BATCH_SIZE) -> int:
     try:
         _ensure_buku_gudang_local_schema(conn)
         _validate_local_master_sync_schema(conn)
-        # Resolve only stale conflicts where a newer successful push exists and
-        # retained server business fields match the current local Resi.
+        # Resolve stale conflicts only after a newer successful push exists and
+        # the current live server business state matches the local row.
+        _resolve_superseded_buku_gudang_conflicts(conn)
         _resolve_superseded_data_resi_conflicts(conn)
         conn.commit()
         cursor = int(_get_state(conn, "last_server_change_id", "0") or 0)
@@ -2489,7 +3676,12 @@ def pull_server_changes(limit: int = BATCH_SIZE) -> int:
                 _manifest_local_key_by_id(conn, payload)
                 if table_name == "manifest" else ""
             )
-            if (
+            # numbering_counters tidak memakai strategi konflik umum. Sequence
+            # digabung secara monotonic (MAX), jadi snapshot server tetap aman
+            # diterapkan walau ada event counter lokal yang masih pending.
+            # Event pending tersebut tidak dihapus; push berikutnya tetap mengirim
+            # nilai terbesar melalui _server_upsert().
+            if table_name != "numbering_counters" and (
                 _has_pending(conn, table_name, record_key)
                 or _has_unresolved_conflict(conn, table_name, record_key)
                 or (
@@ -2528,7 +3720,18 @@ def pull_server_changes(limit: int = BATCH_SIZE) -> int:
                 elif table_name == "numbering_settings":
                     _apply_remote_numbering(conn, payload, force=True)
                 elif table_name == "numbering_counters":
-                    _apply_remote_numbering_counter(conn, payload, force=True)
+                    counter_applied = _apply_remote_numbering_counter(
+                        conn, payload, force=True
+                    )
+                    if counter_applied:
+                        healed_counter_conflicts = _resolve_merged_numbering_counter_pull_conflicts(
+                            conn, payload
+                        )
+                        if healed_counter_conflicts:
+                            logger.info(
+                                "[SYNC] Menutup %s konflik PULL numbering_counters lama setelah merge monotonic berhasil.",
+                                healed_counter_conflicts,
+                            )
                 elif table_name == "cabang_wilayah":
                     applied_wilayah = _apply_remote_cabang_wilayah(conn, payload, force=True)
                     if not applied_wilayah:
@@ -4027,6 +5230,19 @@ def sync_once() -> Dict[str, int]:
             raise SyncOfflineError(str(exc)) from exc
         raise
 
+    # Siapkan cadangan kecil untuk Resi/Manifest agar perangkat yang baru saja
+    # online tetap dapat membuat beberapa dokumen jika Wi-Fi putus sesaat. Invoice
+    # sengaja tidak diprefetch karena sinkronisasi invoice belum termasuk scope.
+    try:
+        reserved_ranges = numbering_service.prefetch_local_reservations()
+        if reserved_ranges:
+            logger.info(
+                "[SYNC] Reservasi nomor offline disiapkan: %s rentang.",
+                reserved_ranges,
+            )
+    except Exception as exc:
+        logger.debug("[SYNC] Prefetch reservasi nomor tertunda: %s", exc)
+
     return {
         "pushed": pushed,
         "pulled": pulled,
@@ -4045,6 +5261,38 @@ def sync_once() -> Dict[str, int]:
         "buku_gudang": int(generic.get("buku_gudang", 0)),
         "manifest": int(generic.get("manifest", 0)),
     }
+
+
+# Retry singkat untuk gangguan jaringan sementara. Retry dilakukan di worker
+# background dan tetap memakai outbox/cursor yang sama; jangan retry konflik
+# data, constraint lokal, atau error autentikasi.
+_SYNC_RETRY_DELAYS_SECONDS = (0.8, 1.8)
+
+
+def _sync_once_with_network_retry() -> Dict[str, int]:
+    """Jalankan satu siklus sync dengan retry terbatas untuk error jaringan.
+
+    sync_once dirancang agar dapat dilanjutkan: event outbox yang sudah berhasil
+    ditandai selesai, sedangkan event yang gagal tetap pending. Karena itu retry
+    pada level siklus hanya dilakukan untuk SyncOfflineError, bukan error umum.
+    """
+    for attempt in range(len(_SYNC_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            return sync_once()
+        except SyncOfflineError:
+            if attempt >= len(_SYNC_RETRY_DELAYS_SECONDS):
+                raise
+            delay = _SYNC_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "[SYNC] Koneksi sementara terputus; percobaan ulang %s/%s dalam %.1f detik.",
+                attempt + 1,
+                len(_SYNC_RETRY_DELAYS_SECONDS) + 1,
+                delay,
+            )
+            time.sleep(delay)
+
+    # Defensive fallback: loop selalu return atau raise.
+    raise SyncOfflineError("Sync gagal setelah percobaan ulang jaringan.")
 
 
 class AutoSyncController:
@@ -4067,7 +5315,7 @@ class AutoSyncController:
 
     def _run_worker(self):
         try:
-            result = sync_once()
+            result = _sync_once_with_network_retry()
             self._offline_logged = False
             print(f"[SYNC] {result}", flush=True)
         except SyncOfflineError:
@@ -4080,11 +5328,15 @@ class AutoSyncController:
         except Exception as exc:
             print(f"[SYNC] Gagal: {type(exc).__name__}: {exc}", flush=True)
         finally:
+            # Kosongkan referensi selagi lock masih dipegang. Dengan urutan ini,
+            # worker berikutnya tidak bisa mulai lalu kehilangan referensinya
+            # karena worker lama mengosongkan _worker_thread belakangan.
+            if self._worker_thread is threading.current_thread():
+                self._worker_thread = None
             try:
                 self._worker_lock.release()
             except RuntimeError:
                 pass
-            self._worker_thread = None
 
     def _start_worker(self):
         if self._stopping:
@@ -4094,11 +5346,13 @@ class AutoSyncController:
         if not self._worker_lock.acquire(blocking=False):
             return
 
-        if not _ensure_online_session():
-            self._worker_lock.release()
-            return
-
+        worker_started = False
         try:
+            # Pastikan lock tetap dilepas jika pemulihan sesi gagal atau
+            # melempar exception sebelum thread worker berhasil dijalankan.
+            if not _ensure_online_session():
+                return
+
             worker = threading.Thread(
                 target=self._run_worker,
                 name="KargoSyncWorker",
@@ -4106,14 +5360,27 @@ class AutoSyncController:
             )
             self._worker_thread = worker
             worker.start()
+            worker_started = True
         except Exception:
             self._worker_thread = None
-            self._worker_lock.release()
             raise
+        finally:
+            # Jika belum ada worker yang benar-benar berjalan, lock dimiliki
+            # oleh pemanggil ini dan harus selalu dilepas di sini.
+            if not worker_started:
+                self._worker_thread = None
+                try:
+                    self._worker_lock.release()
+                except RuntimeError:
+                    pass
 
     def is_running(self) -> bool:
         worker = self._worker_thread
-        return bool(worker is not None and worker.is_alive())
+        # Lock juga mencakup fase akhir worker, sampai cleanup thread selesai.
+        return bool(
+            (worker is not None and worker.is_alive())
+            or self._worker_lock.locked()
+        )
 
     def stop(self, *, wait: bool = False, timeout: float = 5.0):
         self._stopping = True

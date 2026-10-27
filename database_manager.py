@@ -2452,8 +2452,10 @@ def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
     Data customer, akun contoh, dan branding tetap menjadi tanggung jawab seed opsional.
     """
     db_path = _resolve_db_path(db_name)
+    conn = None
     try:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
+        conn = sqlite3.connect(db_path, timeout=30.0)
+        with conn:
             conn.execute("PRAGMA foreign_keys = ON")
             install_sqlite_audit_functions(conn)
             conn.execute("BEGIN IMMEDIATE")
@@ -2473,6 +2475,9 @@ def init_db(db_name: str = DEFAULT_DB_NAME) -> str:
         return db_path
     except (sqlite3.Error, RuntimeError, ValueError) as exc:
         raise RuntimeError(f"Gagal membuat/memigrasikan struktur database: {exc}") from exc
+    finally:
+        if conn is not None:
+            conn.close()
 
 def _serialize_config_value(value: Any) -> str:
     if isinstance(value, bool):

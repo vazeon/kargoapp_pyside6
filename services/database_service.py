@@ -204,6 +204,39 @@ def sesuaikan_nomor_resi_dengan_pajak(no_resi, jenis_pajak):
         return nomor_dasar or nomor
     return nomor
 
+def _nomor_dasar_resi_pajak(no_resi):
+    """Normalisasi identitas bisnis Resi dengan mengabaikan suffix pajak."""
+    nomor = str(no_resi or "").strip().upper()
+    suffix = str(get_setting("kode_akhiran_pajak") or "-P").strip().upper()
+    if suffix and nomor.endswith(suffix):
+        nomor = nomor[:-len(suffix)].rstrip()
+    return nomor
+
+
+def _cari_varian_resi_lokal_cursor(cursor, no_resi, kode_cabang):
+    """Cari row aktif lokal yang hanya berbeda pada suffix pajak/nonpajak."""
+    nomor = str(no_resi or "").strip().upper()
+    cabang = str(kode_cabang or "").strip().upper()
+    basis = _nomor_dasar_resi_pajak(nomor)
+    if not basis:
+        return []
+    suffix = str(get_setting("kode_akhiran_pajak") or "-P").strip().upper()
+    variants = sorted({basis, f"{basis}{suffix}"})
+    placeholders = ", ".join("?" for _ in variants)
+    rows = cursor.execute(
+        f"""
+        SELECT no_resi FROM data_resi
+        WHERE kode_cabang = ?
+          AND UPPER(TRIM(COALESCE(no_resi, ''))) IN ({placeholders})
+        """,
+        (cabang, *variants),
+    ).fetchall()
+    return [
+        str(row[0] or "").strip().upper()
+        for row in rows
+        if str(row[0] or "").strip().upper() != nomor
+    ]
+
 def _sinkronkan_metadata_invoice_resi_cursor(
     cursor, no_resi_lama, no_resi_baru, kode_cabang
 ):
@@ -306,6 +339,20 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
             f"Nomor resi {baru} sudah ada di database.",
         )
 
+    # Histori lokal memakai rowid sebagai urutan stabil saat tanggal masuk sama.
+    # Simpan rowid asli karena strategi copy/pindah-child/hapus-parent akan
+    # menghasilkan rowid baru dan membuat Resi yang diedit tampak sebagai entri
+    # paling akhir, padahal created_at dan urutan bisnisnya tidak berubah.
+    rowid_lama_row = cursor.execute(
+        "SELECT rowid FROM data_resi WHERE no_resi = ? AND kode_cabang = ? LIMIT 1",
+        (lama, cabang),
+    ).fetchone()
+    if rowid_lama_row is None:
+        raise KesalahanTransaksiResi(
+            KODE_DB_ERROR, f"Resi lama {lama} tidak ditemukan untuk mempertahankan urutan histori."
+        )
+    rowid_histori_asli = int(rowid_lama_row[0])
+
     columns = [
         str(row[1])
         for row in cursor.execute("PRAGMA table_info(data_resi)").fetchall()
@@ -316,10 +363,30 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
         )
 
     quoted_columns = ", ".join(f'"{column}"' for column in columns)
-    select_parts = [
-        "?" if column == "no_resi" else ("?" if column == "sync_id" else f'"{column}"')
-        for column in columns
-    ]
+    # `sync_id` adalah identitas lintas perangkat yang stabil. Menghasilkan UUID
+    # baru setiap kali suffix pajak berubah membuat Supabase menganggapnya sebagai
+    # Resi baru dan meninggalkan row lama aktif. Salin identitas yang sama ke row
+    # sementara; setelah row lama dihapus, satu-satunya row lokal tetap memakai
+    # sync_id kanonis. Trigger INSERT/DELETE internal dihapus dari outbox di bawah,
+    # sedangkan UPDATE final setelah fungsi ini akan dikirim sebagai satu perubahan.
+    outbox_row = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_outbox' LIMIT 1"
+    ).fetchone()
+    outbox_start_id = None
+    if outbox_row:
+        outbox_start_id = int(
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM sync_outbox").fetchone()[0]
+            or 0
+        )
+
+    select_parts = []
+    for column in columns:
+        if column == "no_resi":
+            select_parts.append("?")
+        elif column == "sync_id":
+            select_parts.append('COALESCE(NULLIF("sync_id", \'\'), ?)')
+        else:
+            select_parts.append(f'"{column}"')
     cursor.execute(
         f"""
         INSERT INTO data_resi ({quoted_columns})
@@ -340,18 +407,22 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
         (baru, lama),
     )
 
-    id_gudang_lama = f"GDG-{lama}"
+    # Buku Gudang mengikuti nomor Resi aktif. Jangan hanya mengganti id_gudang
+    # ketika nilainya persis cocok dengan bentuk lama: row legacy yang sudah
+    # tidak konsisten (mis. no_resi=lama tetapi id_gudang berbeda) harus ikut
+    # dipulihkan ke pasangan kanonis. Bila ID tujuan dimiliki row lain, constraint
+    # PK SQLite membatalkan transaksi sehingga tidak ada row lain yang tertimpa.
     id_gudang_baru = f"GDG-{baru}"
     cursor.execute(
         """
         UPDATE buku_gudang
         SET no_resi = ?,
-            id_gudang = CASE WHEN id_gudang = ? THEN ? ELSE id_gudang END,
+            id_gudang = ?,
             is_synced = 0,
             updated_at = CURRENT_TIMESTAMP
         WHERE no_resi = ? AND kode_cabang = ?
         """,
-        (baru, id_gudang_lama, id_gudang_baru, lama, cabang),
+        (baru, id_gudang_baru, lama, cabang),
     )
 
     # Metadata Invoice masih menunjuk nomor lama pada titik ini; perbarui
@@ -398,6 +469,36 @@ def _rename_resi_aman(cursor, no_resi_lama, no_resi_baru, kode_cabang):
             KODE_DB_ERROR, f"Resi lama {lama} gagal diselesaikan saat perubahan nomor."
         )
 
+    # Slot rowid lama sudah bebas setelah parent lama dihapus. Kembalikan rowid
+    # tersebut ke parent baru agar histori Resi tetap pada posisi semula. Ini
+    # hanya housekeeping SQLite; identitas sinkronisasi tetap memakai sync_id.
+    cursor.execute(
+        "UPDATE data_resi SET rowid = ? WHERE no_resi = ? AND kode_cabang = ?",
+        (rowid_histori_asli, baru, cabang),
+    )
+    if cursor.rowcount != 1:
+        raise KesalahanTransaksiResi(
+            KODE_DB_ERROR,
+            f"Urutan histori Resi {baru} gagal dipertahankan saat perubahan nomor.",
+        )
+
+    # Penyalinan parent di atas hanya strategi teknis untuk menjaga foreign key
+    # SQLite. Secara bisnis ini BUKAN INSERT Resi baru dan BUKAN DELETE Resi lama.
+    # Hapus hanya event parent yang baru dibuat oleh strategi copy/delete ini;
+    # jangan menyentuh outbox lama atau event anak (detail/Buku Gudang). Setelah
+    # fungsi kembali, UPDATE final di _update_transaksi_resi_cursor akan membuat
+    # satu event UPDATE dengan no_resi dan sync_id kanonis.
+    if outbox_start_id is not None:
+        cursor.execute(
+            """
+            DELETE FROM sync_outbox
+            WHERE id > ?
+              AND table_name = 'data_resi'
+              AND record_key IN (?, ?)
+            """,
+            (outbox_start_id, lama, baru),
+        )
+
     return baru
 
 # ==============================================================================
@@ -418,6 +519,7 @@ def cari_histori_resi(keyword, kode_cabang):
             SELECT no_resi, penerima
             FROM data_resi
             WHERE kode_cabang = ?
+              AND COALESCE(TRIM(deleted_at), '') = ''
               AND (
                   LOWER(COALESCE(no_resi, '')) LIKE ?
                   OR LOWER(COALESCE(pengirim, '')) LIKE ?
@@ -435,7 +537,7 @@ def cari_histori_resi(keyword, kode_cabang):
 def ambil_histori_resi_by_tanggal(tgl_pilih, kode_cabang):
     """Memuat daftar resi di sidebar kanan berdasarkan kalender yang dipilih"""
     return _fetchall(
-        "SELECT no_resi, penerima FROM data_resi WHERE tanggal_masuk = ? AND kode_cabang = ? ORDER BY rowid ASC",
+        "SELECT no_resi, penerima FROM data_resi WHERE tanggal_masuk = ? AND kode_cabang = ? AND COALESCE(TRIM(deleted_at), '') = '' ORDER BY rowid ASC",
         (tgl_pilih, kode_cabang),
     )
 
@@ -461,6 +563,7 @@ def ambil_histori_resi_by_rentang(
         "SELECT no_resi, penerima, tanggal_masuk",
         "FROM data_resi",
         "WHERE kode_cabang = ?",
+        "  AND COALESCE(TRIM(deleted_at), '') = ''",
         "  AND tanggal_masuk BETWEEN ? AND ?",
     ]
     params = [cabang, tanggal_awal, tanggal_akhir]
@@ -786,10 +889,19 @@ def _nomor_resi_atomic_cursor(cursor, data, kode_cabang, fallback_no_resi):
             cursor, "RESI", kode_cabang,
             wilayah=wilayah, tanggal=data.get("tanggal_masuk"), suffix=suffix,
         )
-        return result.nomor
+        nomor = str(getattr(result, "nomor", "") or "").strip().upper()
+        if not nomor:
+            raise ValueError("allocator tidak mengembalikan nomor Resi.")
+        return nomor
     except Exception as exc:
-        logger.error("[Resi] Gagal alokasi numbering fixed: %s", exc)
-        return fallback_no_resi
+        # Atomic allocation may not fall back to a stale preview/local counter:
+        # for multi-device online/offline work that could reuse another PC's number.
+        logger.exception("[Resi] Gagal alokasi numbering fixed; transaksi dibatalkan.")
+        raise KesalahanTransaksiResi(
+            KODE_DB_ERROR,
+            "Nomor Resi gagal dialokasikan dengan aman. Data tidak disimpan; "
+            "sambungkan ke jaringan dan sinkronkan nomor, lalu coba lagi.",
+        ) from exc
 
 def _insert_resi_baru(cursor, data, no_resi, kode_cabang):
     cursor.execute(
@@ -881,20 +993,23 @@ def _upsert_master_pengirim_resi(cursor, data, kode_cabang):
             """
             UPDATE master_pengirim
             SET nama = ?, no_hp = ?, alamat = ?, kota = ?,
+                sync_id = COALESCE(NULLIF(sync_id, ''), ?),
                 is_synced = 0, updated_at = CURRENT_TIMESTAMP
             WHERE id_pengirim = ? AND kode_cabang = ?
             """,
-            values + (row[0], kode_cabang),
+            values + (str(uuid.uuid4()), row[0], kode_cabang),
         )
         return
 
     cursor.execute(
         """
         INSERT INTO master_pengirim (
-            id_pengirim, kode_cabang, nama, no_hp, alamat, kota, is_synced
-        ) VALUES (?, ?, ?, ?, ?, ?, 0)
+            id_pengirim, kode_cabang, nama, no_hp, alamat, kota,
+            is_synced, sync_id
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
         """,
-        (f"SHP-{uuid.uuid4().hex[:12].upper()}", kode_cabang) + values,
+        (f"SHP-{uuid.uuid4().hex[:12].upper()}", kode_cabang)
+        + values + (str(uuid.uuid4()),),
     )
 
 def _upsert_master_penerima_resi(cursor, data, kode_cabang):
@@ -940,12 +1055,13 @@ def _upsert_master_penerima_resi(cursor, data, kode_cabang):
             """
             UPDATE master_penerima
             SET nama = ?, no_hp = ?, alamat = ?, kota = ?, provinsi = ?,
-                pembayaran = ?, total_transaksi = ?, is_synced = 0,
-                updated_at = CURRENT_TIMESTAMP
+                pembayaran = ?, total_transaksi = ?,
+                sync_id = COALESCE(NULLIF(sync_id, ''), ?),
+                is_synced = 0, updated_at = CURRENT_TIMESTAMP
             WHERE id_penerima = ? AND kode_cabang = ?
             """,
             (nama, hp, alamat, kota, provinsi, pembayaran,
-             total_transaksi, row[0], kode_cabang),
+             total_transaksi, str(uuid.uuid4()), row[0], kode_cabang),
         )
         return
 
@@ -953,11 +1069,11 @@ def _upsert_master_penerima_resi(cursor, data, kode_cabang):
         """
         INSERT INTO master_penerima (
             id_penerima, kode_cabang, nama, no_hp, alamat, kota,
-            provinsi, total_transaksi, pembayaran, is_synced
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            provinsi, total_transaksi, pembayaran, is_synced, sync_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
         (f"CNE-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama, hp,
-         alamat, kota, provinsi, total_transaksi, pembayaran),
+         alamat, kota, provinsi, total_transaksi, pembayaran, str(uuid.uuid4())),
     )
 
 def _refresh_total_transaksi_master_penerima(cursor, nama, kode_cabang):
@@ -1055,25 +1171,73 @@ def _normalisasi_rincian_resi(data):
     }]
 
 def _ganti_rincian_resi(cursor, no_resi, data):
-    """Ganti seluruh detail barang satu Resi secara atomic."""
+    """Rekonsiliasi detail sambil mempertahankan identitas sinkronisasi.
+
+    Jangan DELETE lalu INSERT semua baris saat edit. Di Supabase detail yang
+    dihapus disimpan sebagai soft-delete, dan UNIQUE(no_resi, urutan) tetap
+    menahan slotnya. Memakai kembali row per urutan membuat edit detail menjadi
+    UPDATE atas sync_id yang sama dan mencegah konflik slot di server.
+    """
     rincian = _normalisasi_rincian_resi(data)
-    cursor.execute("DELETE FROM data_resi_detail WHERE no_resi = ?", (no_resi,))
+    nomor = str(no_resi or "").strip().upper()
+    rows = cursor.execute(
+        """
+        SELECT id_detail, urutan, sync_id, deleted_at
+        FROM data_resi_detail
+        WHERE no_resi = ?
+        ORDER BY urutan ASC, id_detail ASC
+        """,
+        (nomor,),
+    ).fetchall()
+    by_order = {int(row[1] or 0): row for row in rows}
+
     for urutan, item in enumerate(rincian, start=1):
-        cursor.execute(
-            """
-            INSERT INTO data_resi_detail (
-                no_resi, urutan, nama_barang, koli, berat, cbm, sync_id,
-                created_by_user_id, created_by_username, created_by_name,
-                updated_by_user_id, updated_by_username, updated_by_name, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """,
-            (
-                no_resi, urutan, item["nama"], item["qty"],
-                item["berat"], item["cbm"], str(uuid.uuid4()),
-                *_audit_actor_values(),
-                *_audit_actor_values(),
-            ),
-        )
+        existing = by_order.get(urutan)
+        sync_id_fallback = str(uuid.uuid4())
+        if existing:
+            cursor.execute(
+                """
+                UPDATE data_resi_detail
+                SET nama_barang = ?, koli = ?, berat = ?, cbm = ?,
+                    sync_id = COALESCE(NULLIF(sync_id, ''), ?),
+                    deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id_detail = ? AND no_resi = ?
+                """,
+                (
+                    item["nama"], item["qty"], item["berat"], item["cbm"],
+                    sync_id_fallback, existing[0], nomor,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO data_resi_detail (
+                    no_resi, urutan, nama_barang, koli, berat, cbm, sync_id,
+                    created_by_user_id, created_by_username, created_by_name,
+                    updated_by_user_id, updated_by_username, updated_by_name, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    nomor, urutan, item["nama"], item["qty"],
+                    item["berat"], item["cbm"], sync_id_fallback,
+                    *_audit_actor_values(),
+                    *_audit_actor_values(),
+                ),
+            )
+
+    # Baris di luar panjang detail baru dipertahankan sebagai soft-delete.
+    # Bila urutan itu dipakai lagi, loop di atas akan mengaktifkan row yang sama.
+    for row in rows:
+        urutan = int(row[1] or 0)
+        if urutan > len(rincian) and row[3] is None:
+            cursor.execute(
+                """
+                UPDATE data_resi_detail
+                SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                WHERE id_detail = ? AND no_resi = ? AND deleted_at IS NULL
+                """,
+                (row[0], nomor),
+            )
     return rincian
 
 def _ambil_rows_rincian_resi(cursor, no_resi):
@@ -1081,7 +1245,7 @@ def _ambil_rows_rincian_resi(cursor, no_resi):
         """
         SELECT nama_barang, koli, berat, cbm
         FROM data_resi_detail
-        WHERE no_resi = ?
+        WHERE no_resi = ? AND deleted_at IS NULL
         ORDER BY urutan ASC, id_detail ASC
         """,
         (no_resi,),
@@ -1203,7 +1367,7 @@ def _snapshot_resi_untuk_audit(cursor, no_resi, kode_cabang):
         """
         SELECT urutan, nama_barang, koli, berat, cbm
         FROM data_resi_detail
-        WHERE no_resi = ?
+        WHERE no_resi = ? AND deleted_at IS NULL
         ORDER BY urutan ASC, id_detail ASC
         """,
         (nomor,),
@@ -1374,6 +1538,17 @@ def simpan_transaksi_resi(data):
                 KODE_RESI_DUPLIKAT, "Nomor resi sudah ada di database."
             )
 
+        varian_aktif = _cari_varian_resi_lokal_cursor(
+            cursor, no_resi, kode_cabang
+        )
+        if varian_aktif:
+            conn.rollback()
+            return False, KesalahanTransaksiResi(
+                KODE_RESI_DUPLIKAT,
+                "Resi dengan nomor dasar yang sama sudah ada sebagai varian "
+                f"pajak/nonpajak: {', '.join(varian_aktif)}. Satu nomor dasar hanya boleh memiliki satu Resi aktif.",
+            )
+
         _insert_resi_baru(cursor, data, no_resi, kode_cabang)
         _ganti_rincian_resi(cursor, no_resi, data)
         _sinkronkan_ringkasan_resi_dari_detail(cursor, no_resi, kode_cabang)
@@ -1490,13 +1665,20 @@ def _update_transaksi_resi_cursor(
 
     _ganti_rincian_resi(cursor, no_resi, data)
     _sinkronkan_ringkasan_resi_dari_detail(cursor, no_resi, kode_cabang)
+    # `id_gudang` adalah business key turunan dari nomor Resi aktif.
+    # Jangan hanya memperbarui tanggal: bila row lokal sudah pernah masuk
+    # keadaan tidak konsisten (no_resi berakhiran -P tetapi id_gudang belum),
+    # setiap edit Resi juga memulihkan id_gudang ke bentuk kanonis. PK conflict
+    # akan membatalkan transaksi, bukan menimpa row Buku Gudang lain.
+    id_gudang_kanonis = f"GDG-{no_resi}"
     cursor.execute(
         """
         UPDATE buku_gudang
-        SET tanggal = ?, is_synced = 0, updated_at = CURRENT_TIMESTAMP
+        SET id_gudang = ?, no_resi = ?, tanggal = ?,
+            is_synced = 0, updated_at = CURRENT_TIMESTAMP
         WHERE no_resi = ? AND kode_cabang = ?
         """,
-        (data.get("tanggal_masuk"), no_resi, kode_cabang),
+        (id_gudang_kanonis, no_resi, data.get("tanggal_masuk"), no_resi, kode_cabang),
     )
 
     _upsert_master_pengirim_resi(cursor, data, kode_cabang)
@@ -1736,7 +1918,8 @@ def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
                r.ket_buku_gudang, d.id_detail, COALESCE(d.urutan, 1),
                r.revision
         FROM data_resi r
-        LEFT JOIN data_resi_detail d ON d.no_resi = r.no_resi
+        LEFT JOIN data_resi_detail d
+          ON d.no_resi = r.no_resi AND d.deleted_at IS NULL
         WHERE r.kode_cabang = ?
           AND r.kota_tujuan LIKE ?
           AND r.tanggal_masuk LIKE ?
@@ -1836,18 +2019,33 @@ def _update_detail_buku_gudang(
         row_detail = cursor.execute(
             """
             SELECT id_detail FROM data_resi_detail
-            WHERE no_resi = ? ORDER BY urutan ASC, id_detail ASC LIMIT 1
+            WHERE no_resi = ? AND deleted_at IS NULL
+            ORDER BY urutan ASC, id_detail ASC LIMIT 1
             """,
             (no_resi,),
         ).fetchone()
         target_detail_id = row_detail[0] if row_detail else None
 
+        # Jika satu-satunya detail slot pertama sebelumnya dihapus, gunakan
+        # kembali row soft-delete itu alih-alih mencoba INSERT pada UNIQUE
+        # (no_resi, urutan) yang masih ditempati row lama.
+        if target_detail_id is None:
+            row_detail = cursor.execute(
+                """
+                SELECT id_detail FROM data_resi_detail
+                WHERE no_resi = ? AND urutan = 1
+                ORDER BY id_detail ASC LIMIT 1
+                """,
+                (no_resi,),
+            ).fetchone()
+            target_detail_id = row_detail[0] if row_detail else None
+
     if target_detail_id is None:
         cursor.execute(
             """
             INSERT INTO data_resi_detail (
-                no_resi, urutan, nama_barang, koli, berat, cbm, updated_at
-            ) VALUES (?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                no_resi, urutan, nama_barang, koli, berat, cbm, sync_id, updated_at
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 no_resi,
@@ -1864,7 +2062,8 @@ def _update_detail_buku_gudang(
         cursor.execute(
             f"""
             UPDATE data_resi_detail
-            SET {", ".join(detail_fields)}, updated_at = CURRENT_TIMESTAMP
+            SET {", ".join(detail_fields)}, deleted_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id_detail = ? AND no_resi = ?
             """,
             detail_values,
@@ -2035,30 +2234,33 @@ def update_detail_barang_dari_buku_gudang(no_resi, kode_cabang, detail_barang):
                 return False
 
             revision_lama = int(row_resi[0] or 0)
-            cursor.execute(
-                "DELETE FROM data_resi_detail WHERE no_resi = ?",
-                (no_resi,),
-            )
+            payload_rincian = {
+                "rincian": [
+                    {
+                        "nama": str(item.get("nama_barang", "") or "").strip().upper(),
+                        "qty": str(item.get("koli", "") or "").strip(),
+                        "berat": item.get("berat", 0) or 0,
+                        "cbm": item.get("cbm", 0) or 0,
+                    }
+                    for item in (detail_barang or [])
+                    if isinstance(item, dict)
+                ]
+            }
+            rincian_tersimpan = _ganti_rincian_resi(cursor, no_resi, payload_rincian)
 
-            for idx, item in enumerate(detail_barang or [], start=1):
+            if rincian_tersimpan:
+                _sinkronkan_ringkasan_resi_dari_detail(cursor, no_resi, kode_cabang)
+            else:
                 cursor.execute(
                     """
-                    INSERT INTO data_resi_detail
-                    (no_resi, urutan, nama_barang, koli, berat, cbm, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    UPDATE data_resi
+                    SET nama_barang = '', koli = '', berat = 0, cbm = 0,
+                        rincian_json = '[]', is_synced = 0,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE no_resi = ? AND kode_cabang = ?
                     """,
-                    (
-                        no_resi,
-                        idx,
-                        str(item.get("nama_barang", "") or "").strip().upper(),
-                        str(item.get("koli", "") or ""),
-                        item.get("berat", 0) or 0,
-                        item.get("cbm", 0) or 0,
-                        str(uuid.uuid4()),
-                    ),
+                    (no_resi, kode_cabang),
                 )
-
-            _sinkronkan_ringkasan_resi_dari_detail(cursor, no_resi, kode_cabang)
             cursor.execute(
                 """
                 UPDATE data_resi
@@ -3344,15 +3546,38 @@ def simpan_atau_update_invoice(header, items, is_update=False):
     finally:
         _close(conn)
 
-def ambil_histori_invoice(limit=300):
-    """Mengambil daftar histori invoice untuk tabel sebelah kiri."""
-    try:
-        return _fetchall(
-            "SELECT no_invoice, tanggal, client, status, created_by_name FROM invoice_header ORDER BY id DESC LIMIT ?",
-            (limit,),
+def ambil_histori_invoice(limit=300, keyword=""):
+    """Ambil histori Invoice.
+
+    Tampilan awal dibatasi ke invoice terbaru agar pembukaan tab tetap ringan.
+    Ketika ada kata kunci, pencarian dilakukan di SQLite terhadap seluruh
+    histori (tanpa batas 300 baris), sehingga hasil lama tidak terlewat hanya
+    karena posisinya berada di luar daftar terbaru.
+    """
+    keyword = str(keyword or "").strip().casefold()
+    query = [
+        "SELECT no_invoice, tanggal, client, status, created_by_name",
+        "FROM invoice_header",
+    ]
+    params = []
+    if keyword:
+        pola = f"%{keyword}%"
+        query.append(
+            "WHERE LOWER(COALESCE(no_invoice, '')) LIKE ? "
+            "OR LOWER(COALESCE(tanggal, '')) LIKE ? "
+            "OR LOWER(COALESCE(client, '')) LIKE ? "
+            "OR LOWER(COALESCE(status, '')) LIKE ? "
+            "OR LOWER(COALESCE(created_by_name, '')) LIKE ?"
         )
+        params.extend((pola, pola, pola, pola, pola))
+    query.append("ORDER BY id DESC")
+    if not keyword:
+        query.append("LIMIT ?")
+        params.append(max(1, int(limit)))
+    try:
+        return _fetchall("\n".join(query), tuple(params))
     except Exception as e:
-        logger.error(f"[Invoice] Gagal ambil histori: {e}")
+        logger.error("[Invoice] Gagal mengambil histori: %s", e)
         return []
 
 def ambil_invoice_by_no(no_invoice):
@@ -4113,7 +4338,14 @@ def _remote_user_list() -> dict:
 
 
 def ambil_data_akses_cabang_user():
-    """Remote-first untuk akun Supabase; SQLite tetap dipakai sebagai fallback/cache offline."""
+    """Ambil daftar akses user remote-first, tetapi langsung gunakan cache saat offline."""
+    # Sesi offline hasil pemulihan cache masih dapat menyimpan auth_email, tetapi
+    # tidak memiliki sesi/token Supabase aktif. Jangan panggil Edge Function pada
+    # kondisi ini; baca cache SQLite langsung agar tidak menghasilkan warning palsu
+    # "Sesi Supabase tidak aktif" setiap dialog manajemen user dibuka.
+    if bool(CURRENT_SESSION.get("is_offline_session")):
+        return _ambil_data_akses_cabang_user_local()
+
     if _online_user_management_active():
         try:
             return _remote_user_list()
