@@ -11,12 +11,43 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # STEP 1: Validasi Supabase URL
+      - name: Validate Supabase URL
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "ERROR: SUPABASE_URL belum diatur di GitHub Secrets"
+            exit 1
+          fi
+
+          if [[ ! "$SUPABASE_URL" =~ ^https://[a-zA-Z0-9-]+\.supabase\.co$ ]]; then
+            echo "ERROR: Format SUPABASE_URL tidak valid"
+            exit 1
+          fi
+
+          echo "SUPABASE_URL format valid"
+
+      # STEP 2: Validasi Publishable Key
+      - name: Validate Supabase Key
+        env:
+          SUPABASE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_KEY" ]; then
+            echo "ERROR: SUPABASE_PUBLISHABLE_KEY belum diatur"
+            exit 1
+          fi
+
+          echo "Supabase Publishable Key tersedia"
+
+      # STEP 3: Ping Supabase Database
       - name: Ping Supabase Database
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-
         run: |
+          echo "Mengirim ping ke Supabase..."
+
           curl --fail-with-body \
             --silent \
             --show-error \
@@ -29,3 +60,7 @@ jobs:
             -H "Authorization: Bearer ${SUPABASE_KEY}" \
             -H "Content-Type: application/json" \
             -d '{}'
+
+          echo ""
+          echo "Ping Supabase berhasil!"
+
