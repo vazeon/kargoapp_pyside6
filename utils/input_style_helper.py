@@ -109,9 +109,6 @@ class _FormInputStyles(QObject):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.refresh)
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
 
     def _owns(self, widget):
         """Return True only for QWidget instances owned by this manager."""
@@ -211,34 +208,125 @@ class _FormInputStyles(QObject):
         finally:
             self._applying = False
 
+
+class _FormInputStyleEventRouter(QObject):
+    """Satu event filter aplikasi untuk seluruh pengelola style input.
+
+    Setiap modul tetap memiliki cache dan timer sendiri, tetapi event aplikasi
+    dirutekan satu kali agar tidak menumpuk banyak filter global yang identik.
+    """
+
+    def __init__(self, app: QApplication):
+        super().__init__(app)
+        self._app = app
+        self._managers = {}
+        app.installEventFilter(self)
+
+    def register(self, manager: _FormInputStyles) -> None:
+        key = id(manager)
+        self._managers[key] = manager
+        # Parent Qt yang dihancurkan akan menghancurkan manager juga. Lepaskan
+        # referensinya dari registry ketika objek C++ benar-benar dihapus.
+        manager.destroyed.connect(
+            lambda *_args, manager_id=key: self._managers.pop(manager_id, None)
+        )
+
+    def _manager_for_widget(self, widget):
+        """Cari pengelola pemilik input melalui hierarki QWidget."""
+        current = widget
+        while isinstance(current, QWidget):
+            try:
+                manager = getattr(current, "_global_form_input_styles", None)
+                if manager is not None:
+                    return manager
+                current = current.parentWidget()
+            except RuntimeError:
+                return None
+        return None
+
+    def _managers_snapshot(self):
+        # Gunakan snapshot agar perubahan registry saat penghancuran widget
+        # tidak mengubah koleksi yang sedang diproses.
+        return tuple(self._managers.values())
+
     def eventFilter(self, watched, event):
-        if self._applying:
+        try:
+            kind = event.type()
+        except RuntimeError:
+            # Wrapper event/Qt bisa menjadi tidak valid saat penghancuran.
             return False
-        kind = event.type()
-        if watched is QApplication.instance() and kind in (
-            QEvent.Type.ApplicationPaletteChange, QEvent.Type.StyleChange,
-        ):
-            root = self.parent()
-            # Tab yang tersembunyi akan menerapkan temanya sendiri ketika
-            # diaktifkan. Hindari walk ke seluruh input pada tiap pergantian
-            # tema; ini mencegah biaya naik seiring jumlah tab yang dimuat.
-            if isinstance(root, QWidget) and not root.isVisible():
-                self._pending_theme_refresh = True
-            else:
-                self._timer.start(0)
-        elif watched is self.parent() and kind == QEvent.Type.Show:
-            # Terapkan perubahan tema yang ditunda ketika subtree kembali tampil.
-            if self._pending_theme_refresh:
-                self._timer.start(0)
-        elif isinstance(watched, INPUT_TYPES) and kind in (
+
+        if watched is self._app:
+            if kind not in (
+                QEvent.Type.ApplicationPaletteChange, QEvent.Type.StyleChange,
+            ):
+                return False
+
+            for manager in self._managers_snapshot():
+                try:
+                    if manager._applying:
+                        continue
+                    root = manager.parent()
+                    if not isinstance(root, QWidget):
+                        continue
+                    # Tab tersembunyi diperbarui setelah ditampilkan kembali.
+                    if not root.isVisible():
+                        manager._pending_theme_refresh = True
+                    else:
+                        manager._timer.start(0)
+                except RuntimeError:
+                    continue
+            return False
+
+        # Perbarui tema yang ditunda ketika root modul/dialog muncul kembali.
+        if isinstance(watched, QWidget) and kind == QEvent.Type.Show:
+            try:
+                manager_root = getattr(watched, "_global_form_input_styles", None)
+                if (
+                    manager_root is not None
+                    and not manager_root._applying
+                    and manager_root._pending_theme_refresh
+                ):
+                    manager_root._timer.start(0)
+            except RuntimeError:
+                pass
+
+        if isinstance(watched, INPUT_TYPES) and kind in (
             QEvent.Type.Show, QEvent.Type.ReadOnlyChange,
         ):
-            self._applying = True
+            manager = self._manager_for_widget(watched)
+            if manager is None or manager._applying:
+                return False
             try:
-                self._apply(watched)
+                manager._applying = True
+                manager._apply(watched)
+            except RuntimeError:
+                # Abaikan widget yang sedang dihancurkan oleh Qt.
+                pass
             finally:
-                self._applying = False
+                try:
+                    manager._applying = False
+                except RuntimeError:
+                    pass
         return False
+
+
+_ROUTER_ATTRIBUTE = "_kargo_form_input_style_event_router"
+
+
+def _router_input_styles_global(app):
+    """Ambil atau buat router global; hanya satu per QApplication."""
+    router = getattr(app, _ROUTER_ATTRIBUTE, None)
+    if router is not None:
+        try:
+            if router._app is app:
+                return router
+        except RuntimeError:
+            pass
+
+    router = _FormInputStyleEventRouter(app)
+    setattr(app, _ROUTER_ATTRIBUTE, router)
+    return router
 
 
 def terapkan_style_input_global(root, is_dark=None):
@@ -247,4 +335,11 @@ def terapkan_style_input_global(root, is_dark=None):
     if manager is None:
         manager = _FormInputStyles(root)
         root._global_form_input_styles = manager
+
+    app = QApplication.instance()
+    if app is not None:
+        router = _router_input_styles_global(app)
+        if id(manager) not in router._managers:
+            router.register(manager)
+
     manager.refresh(is_dark)

@@ -1462,13 +1462,19 @@ class TabSettingSistem(QWidget):
             self._jadwalkan_tema_setting()
 
     def eventFilter(self, watched, event):
+        # Event filter aplikasi hanya boleh memproses pasangan QObject/QEvent.
+        # Guard ini juga membuat jalur aman bila ada wrapper Qt yang tidak valid.
+        if not isinstance(watched, QObject) or not isinstance(event, QEvent):
+            return False
+
         if watched is QApplication.instance() and event.type() in (
                 QEvent.Type.ApplicationPaletteChange,
                 QEvent.Type.PaletteChange,
                 QEvent.Type.StyleChange,
         ):
             self._jadwalkan_tema_setting()
-        return super().eventFilter(watched, event)
+        # Filter hanya mengamati perubahan tema; jangan panggil base wrapper.
+        return False
 
     def _jadwalkan_tema_setting(self):
         if getattr(self, "_setting_ui_ready", False) and not self._setting_theme_applying:

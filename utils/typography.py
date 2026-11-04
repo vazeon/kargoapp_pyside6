@@ -26,6 +26,7 @@ _FONT_SIZE_PX_PATTERN = re.compile(
 )
 _fonts_sudah_dimuat = False
 _family_font_termuat: Tuple[str, ...] = ()
+_master_font_cache: str | None = None
 
 T = TypeVar("T")
 
@@ -103,8 +104,16 @@ def konversi_style_font_ke_point(value: T) -> T:
 
 
 def get_master_font() -> str:
-    font = _get_settings_ui().value("font_aplikasi", DEFAULT_FONT)
-    return str(font or DEFAULT_FONT).strip() or DEFAULT_FONT
+    """Ambil font utama; baca QSettings sekali sampai preferensi berubah.
+
+    Fungsi ini dipanggil saat membangun banyak widget/baris histori. Cache
+    mencegah pembuatan objek QSettings berulang dalam jalur render UI.
+    """
+    global _master_font_cache
+    if _master_font_cache is None:
+        font = _get_settings_ui().value("font_aplikasi", DEFAULT_FONT)
+        _master_font_cache = str(font or DEFAULT_FONT).strip() or DEFAULT_FONT
+    return _master_font_cache
 
 
 def dapatkan_font_aplikasi_aktif() -> str:
@@ -118,10 +127,12 @@ def dapatkan_font_aplikasi_aktif() -> str:
 
 
 def perbarui_font_master(nama_font_baru: str) -> None:
+    global _master_font_cache
     nama = str(nama_font_baru or "").strip() or DEFAULT_FONT
     settings = _get_settings_ui()
     settings.setValue("font_aplikasi", nama)
     settings.sync()
+    _master_font_cache = nama
 
 
 def muat_font_aplikasi() -> Tuple[str, ...]:

@@ -60,17 +60,17 @@ THEME_COLORS = {
                 "PERJALANAN": {
                     "row_background": "#EBF3FA",
                     "row_alternate_background": "#DDEAF6",
-                    "text_color": "#174A7E",
+                    "text_color": "#1D4ED8",
                 },
                 "SELESAI": {
                     "row_background": "#E8F5E9",
                     "row_alternate_background": "#DDF0DF",
-                    "text_color": "#1B5E20",
+                    "text_color": "#15803D",
                 },
                 "MACET": {
                     "row_background": "#FDECEC",
                     "row_alternate_background": "#F8DFE2",
-                    "text_color": "#8F1D27",
+                    "text_color": "#B91C1C",
                 },
             },
         },
@@ -131,17 +131,17 @@ THEME_COLORS = {
                 "PERJALANAN": {
                     "row_background": "#17324D",
                     "row_alternate_background": "#142C44",
-                    "text_color": "#D6EAFF",
+                    "text_color": "#60A5FA",
                 },
                 "SELESAI": {
                     "row_background": "#173B2A",
                     "row_alternate_background": "#143425",
-                    "text_color": "#D7F7DF",
+                    "text_color": "#4ADE80",
                 },
                 "MACET": {
                     "row_background": "#4A2327",
                     "row_alternate_background": "#402025",
-                    "text_color": "#FFD9DD",
+                    "text_color": "#FF7070",
                 },
             },
         },

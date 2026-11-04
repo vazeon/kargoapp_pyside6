@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTableWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -29,7 +28,7 @@ from utils.input_style_helper import (
 
 from utils.typography import get_master_font, get_fixed_font_sizes_pt
 from utils.mixins import ZoomTableMixin
-from utils.table_helper import buat_tabel_item
+from utils.table_helper import ModelTableView
 import utils.zoom as zoom_helper
 
 
@@ -166,7 +165,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         header_layout.addWidget(self.input_cari)
         layout.addLayout(header_layout)
 
-        self.tabel_truk = QTableWidget()
+        self.tabel_truk = ModelTableView(parent=self)
         tabel = self.tabel_truk
         tabel.setColumnCount(len(self.HEADERS))
         tabel.setHorizontalHeaderLabels(self.HEADERS)
@@ -177,7 +176,9 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        tabel.cellClicked.connect(self.pilih_data_dari_tabel)
+        tabel.clicked.connect(
+            lambda index: self.pilih_data_dari_tabel(index.row(), index.column())
+        )
 
         header = tabel.horizontalHeader()
         header.setMinimumHeight(ARMADA_TABLE_HEADER_MIN_HEIGHT)
@@ -193,8 +194,6 @@ class SubTabTruk(QWidget, ZoomTableMixin):
     def _bangun_field_armada_truk(self, layout):
         self.lbl_jenis = QLabel("Jenis Truk:")
         self.combo_jenis = QComboBox()
-        self.combo_jenis.addItem("- Pilih jenis -")
-        self.combo_jenis.addItems(["TB", "Tronton", "CDD", "Pick-up", "Lainnya..."])
         self.combo_jenis.setEditable(False)
         self.combo_jenis.currentIndexChanged.connect(self.on_jenis_truk_changed)
         layout.addWidget(self.lbl_jenis)
@@ -217,6 +216,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         )
         self.lbl_jenis_lain.hide()
         self.input_jenis_lain.hide()
+        self._muat_opsi_jenis_truk()
 
     def _bangun_area_foto_truk(self, layout):
         layout.addSpacing(ARMADA_EDITOR_SECTION_GAP)
@@ -327,6 +327,64 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         if not pilih_lainnya:
             self.input_jenis_lain.clear()
 
+    def _muat_opsi_jenis_truk(self, jenis_terpilih=None):
+        """Rebuild pilihan dari satu sumber; pertahankan nilai editor jika ada."""
+        combo = getattr(self, "combo_jenis", None)
+        if combo is None:
+            return
+
+        input_lain = getattr(self, "input_jenis_lain", None)
+        if jenis_terpilih is None:
+            sedang_lainnya = combo.currentText().strip() == "Lainnya..."
+            if sedang_lainnya:
+                pilihan = input_lain.text().strip() if input_lain is not None else ""
+            elif combo.currentIndex() > 0:
+                pilihan = combo.currentText().strip()
+            else:
+                pilihan = ""
+        else:
+            pilihan = str(jenis_terpilih or "").strip()
+            sedang_lainnya = False
+
+        try:
+            daftar = db_service.ambil_daftar_jenis_truk() or []
+        except Exception as exc:
+            print(f"[Truk] Gagal memperbarui pilihan jenis: {exc}")
+            daftar = list(getattr(db_service, "JENIS_TRUK_DEFAULT", ()))
+
+        daftar = [str(jenis).strip() for jenis in daftar if str(jenis or "").strip()]
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("- Pilih jenis -")
+            combo.addItems(daftar)
+            combo.addItem("Lainnya...")
+
+            idx_ditemukan = next(
+                (idx + 1 for idx, nama in enumerate(daftar)
+                 if nama.casefold() == pilihan.casefold()),
+                -1,
+            ) if pilihan else -1
+
+            if idx_ditemukan >= 1:
+                combo.setCurrentIndex(idx_ditemukan)
+                if input_lain is not None:
+                    input_lain.clear()
+            elif pilihan:
+                combo.setCurrentIndex(combo.count() - 1)
+                if input_lain is not None:
+                    input_lain.setText(pilihan.upper())
+            elif sedang_lainnya:
+                combo.setCurrentIndex(combo.count() - 1)
+            else:
+                combo.setCurrentIndex(0)
+                if input_lain is not None:
+                    input_lain.clear()
+        finally:
+            combo.blockSignals(False)
+
+        self.on_jenis_truk_changed(combo.currentIndex())
+
     def ambil_jenis_truk_final(self):
         pilihan = self.combo_jenis.currentText().strip()
         if pilihan == "Lainnya...":
@@ -336,25 +394,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         return pilihan
 
     def set_jenis_truk_form(self, jenis):
-        jenis_bersih = str(jenis or "").strip()
-        if not jenis_bersih:
-            self.combo_jenis.setCurrentIndex(0)
-            return
-
-        for index in range(1, self.combo_jenis.count()):
-            item_text = self.combo_jenis.itemText(index)
-            if item_text == "Lainnya...":
-                continue
-            if item_text.casefold() == jenis_bersih.casefold():
-                self.combo_jenis.setCurrentIndex(index)
-                return
-
-        idx_lainnya = self.combo_jenis.findText(
-            "Lainnya...",
-            Qt.MatchFlag.MatchFixedString,
-        )
-        self.combo_jenis.setCurrentIndex(idx_lainnya)
-        self.input_jenis_lain.setText(jenis_bersih.upper())
+        self._muat_opsi_jenis_truk(str(jenis or "").strip())
 
     def bersihkan_form(self):
         self._identitas_terpilih = ""
@@ -547,18 +587,33 @@ class SubTabTruk(QWidget, ZoomTableMixin):
 
     @db_service.profile_performance("ArmadaTruk.refresh_table", threshold=0.05)
     def refresh_tabel(self):
+        # Jenis yang baru disimpan lewat "Lainnya..." langsung tersedia di combo.
+        self._muat_opsi_jenis_truk()
         tabel = self.tabel_truk
         tabel.setUpdatesEnabled(False)
-        tabel.blockSignals(True)
-        tabel.setRowCount(0)
         try:
-            for index, row in enumerate(db_service.ambil_semua_truk_full()):
+            rows = db_service.ambil_semua_truk_full() or []
+            display_rows = [
                 self._tambahkan_baris_truk(index, row)
+                for index, row in enumerate(rows)
+            ]
+            tabel.setRows(
+                display_rows,
+                alignments=(
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                ),
+            )
             self.filter_tabel_truk(self.input_cari.text())
         except Exception as exc:
             print(f"Error Load Tabel truk: {exc}")
+            tabel.setRows([])
         finally:
-            tabel.blockSignals(False)
             tabel.setUpdatesEnabled(True)
 
     def _data_baris_truk(self, row):
@@ -572,39 +627,19 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         )
 
     def _tambahkan_baris_truk(self, index, row):
-        baris = self.tabel_truk.rowCount()
-        self.tabel_truk.insertRow(baris)
-
         nopol, jenis, sopir, hp, ket, foto = self._data_baris_truk(row)
-        values = (str(index + 1), jenis, nopol, sopir, hp, ket, foto)
-        alignments = (
-            Qt.AlignmentFlag.AlignCenter,
-            Qt.AlignmentFlag.AlignCenter,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            Qt.AlignmentFlag.AlignCenter,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            None,
-        )
-        for column, (value, alignment) in enumerate(zip(values, alignments)):
-            kwargs = {"editable": False}
-            if alignment is not None:
-                kwargs["alignment"] = alignment
-            self.tabel_truk.setItem(baris, column, buat_tabel_item(value, **kwargs))
+        return (str(index + 1), jenis, nopol, sopir, hp, ket, foto)
 
     @db_service.profile_performance("ArmadaTruk.search_filter", threshold=0.025)
     def filter_tabel_truk(self, text):
-        kata_kunci = text.lower().strip()
+        kata_kunci = str(text or "").casefold().strip()
+        tabel = self.tabel_truk
         nomor_baru = 1
-        for row in range(self.tabel_truk.rowCount()):
-            muncul = any(
-                (item := self.tabel_truk.item(row, col))
-                and kata_kunci in item.text().lower()
-                for col in self.FILTER_COLUMNS
-            )
-            self.tabel_truk.setRowHidden(row, not muncul)
+        for row in range(tabel.rowCount()):
+            muncul = kata_kunci in tabel.searchText(row, self.FILTER_COLUMNS)
+            tabel.setRowHidden(row, not muncul)
             if muncul:
-                self.tabel_truk.item(row, self.KOL_NO).setText(str(nomor_baru))
+                tabel.model().setCell(row, self.KOL_NO, str(nomor_baru))
                 nomor_baru += 1
 
     def _ambil_input_simpan_truk(self):

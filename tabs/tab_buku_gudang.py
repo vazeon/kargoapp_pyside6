@@ -4,6 +4,7 @@ from datetime import datetime
 from time import perf_counter
 from weakref import ref
 from PySide6.QtCore import (
+    QAbstractTableModel,
     QDate,
     QEvent,
     QSettings,
@@ -15,9 +16,9 @@ from PySide6.QtCore import (
     Slot,
     QItemSelection,
     QItemSelectionModel,
+    QModelIndex,
 )
-from PySide6.QtGui import QBrush, QColor, QPalette
-
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -36,9 +37,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
-    QStyle,
-    QStyleOptionViewItem,
     QStyledItemDelegate,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -54,8 +54,8 @@ from config import CURRENT_SESSION, DATA_CLIENT
 
 import services.database_service as db_service
 
-from utils.frozen_table_helper import FrozenTableWidget
 from utils import zoom as zoom_helper
+from utils.frozen_table_helper import FrozenTableView
 from utils.typography import (
     APPLICATION_NAME,
     ORGANIZATION_NAME,
@@ -71,20 +71,15 @@ from utils.number_formatters import (
     angka_indonesia_to_decimal,
 )
 from utils.date_ind_format import format_tanggal_ke_ui
-from utils.table_helper import atur_editor_sel, buat_tabel_item, setup_tabel_modern
+from utils.table_helper import atur_editor_sel, setup_tabel_modern
 from utils.validators import UppercaseValidator, get_decimal_validator, get_integer_validator
-from delegates.status_delegate import (
-    StatusColorDelegate,
-    update_status_delegate_theme,
-)
-
 from themes.modules.buku_gudang import (
     get_buku_gudang_action_styles,
     get_buku_gudang_tabbar_styles,
     get_buku_gudang_menu_style,
-    get_buku_gudang_status_colors,
     get_buku_gudang_styles,
     get_buku_gudang_tooltip_style,
+    get_buku_gudang_status_colors,
     get_dialog_pilih_penagih_styles,
 )
 from utils.input_style_helper import paksa_kapital_lineedit, terapkan_style_input_global
@@ -130,51 +125,502 @@ BUKU_GUDANG_FALLBACK_COLUMN_WIDTH = 110
 BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT = 28
 BUKU_GUDANG_AUTOCOMPLETE_MAX_VISIBLE_ITEMS = 12
 
-class BukuGudangItemDelegate(StatusColorDelegate):
-    """Jarak antar-detail khusus Buku Gudang, mengikuti ukuran font tabel."""
+class _BukuGudangRow:
+    """Satu resi dalam slot tetap; tidak membuat objek Qt untuk setiap sel."""
+
+    __slots__ = (
+        "values", "no_resi", "detail_id", "revision", "invoice_no",
+        "invoice_status", "status_highlight", "detail_rows",
+        "search_text", "tooltips",
+    )
+
+    def __init__(self, values, roles=None, tooltips=None):
+        roles = roles or {}
+        self.values = tuple(values)
+        self.no_resi = roles.get(TabBukuGudang.ROLE_NO_RESI)
+        self.detail_id = roles.get(TabBukuGudang.ROLE_DETAIL_ID)
+        self.revision = roles.get(TabBukuGudang.ROLE_REVISION)
+        self.invoice_no = roles.get(TabBukuGudang.ROLE_INVOICE_NO)
+        self.invoice_status = roles.get(TabBukuGudang.ROLE_INVOICE_STATUS)
+        self.status_highlight = roles.get(TabBukuGudang.ROLE_STATUS_HIGHLIGHT)
+        self.detail_rows = roles.get(TabBukuGudang.ROLE_DETAIL_ROWS)
+        self.search_text = str(roles.get(TabBukuGudang.ROLE_SEARCH_TEXT, "") or "")
+        self.tooltips = dict(tooltips) if tooltips else None
+
+    def role_value(self, role):
+        if role == TabBukuGudang.ROLE_NO_RESI:
+            return self.no_resi
+        if role == TabBukuGudang.ROLE_DETAIL_ID:
+            return self.detail_id
+        if role == TabBukuGudang.ROLE_REVISION:
+            return self.revision
+        if role == TabBukuGudang.ROLE_INVOICE_NO:
+            return self.invoice_no
+        if role == TabBukuGudang.ROLE_INVOICE_STATUS:
+            return self.invoice_status
+        if role == TabBukuGudang.ROLE_STATUS_HIGHLIGHT:
+            return self.status_highlight
+        if role == TabBukuGudang.ROLE_DETAIL_ROWS:
+            return self.detail_rows
+        if role == TabBukuGudang.ROLE_SEARCH_TEXT:
+            return self.search_text
+        return None
+
+    def set_role_value(self, role, value):
+        if role == TabBukuGudang.ROLE_NO_RESI:
+            self.no_resi = value
+        elif role == TabBukuGudang.ROLE_DETAIL_ID:
+            self.detail_id = value
+        elif role == TabBukuGudang.ROLE_REVISION:
+            self.revision = value
+        elif role == TabBukuGudang.ROLE_INVOICE_NO:
+            self.invoice_no = value
+        elif role == TabBukuGudang.ROLE_INVOICE_STATUS:
+            self.invoice_status = value
+        elif role == TabBukuGudang.ROLE_STATUS_HIGHLIGHT:
+            self.status_highlight = value
+        elif role == TabBukuGudang.ROLE_DETAIL_ROWS:
+            self.detail_rows = value
+        elif role == TabBukuGudang.ROLE_SEARCH_TEXT:
+            self.search_text = str(value or "")
+
+
+class BukuGudangTableModel(QAbstractTableModel):
+    """Model tabel Buku Gudang yang hanya menyimpan data, bukan item per sel."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._headers = []
+        self._rows = []
+        self._column_count = 0
+        self._alignments = ()
+        self._pending_first_row = None
+        self._pending_last_row = None
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else self._column_count
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row_number = index.row()
+        column = index.column()
+        if row_number < 0 or row_number >= len(self._rows):
+            return None
+        row = self._rows[row_number]
+        if row is None or column < 0 or column >= self._column_count:
+            return None
+
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            return row.values[column]
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return self._alignments[column] if column < len(self._alignments) else Qt.AlignmentFlag.AlignLeft
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return row.tooltips.get(column) if row.tooltips is not None else None
+        # Status warna adalah metadata per-baris, sehingga tersedia untuk
+        # seluruh kolom tanpa menggandakan data di setiap sel.
+        if role == TabBukuGudang.ROLE_STATUS_HIGHLIGHT:
+            return row.status_highlight
+        if role == TabBukuGudang.ROLE_DETAIL_COUNT:
+            return len(row.detail_rows) if row.detail_rows else 1
+        if column == 0:
+            return row.role_value(int(role))
+        return None
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if not index.isValid():
+            return False
+        row_number = index.row()
+        column = index.column()
+        if row_number < 0 or row_number >= len(self._rows) or column < 0 or column >= self._column_count:
+            return False
+        row = self._rows[row_number]
+        if row is None:
+            values = [""] * self._column_count
+            row = _BukuGudangRow(values)
+            self._rows[row_number] = row
+
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
+            values = list(row.values)
+            values[column] = str(value or "")
+            row.values = tuple(values)
+        elif role == Qt.ItemDataRole.ToolTipRole:
+            if value is None:
+                if row.tooltips is not None:
+                    row.tooltips.pop(column, None)
+            else:
+                if row.tooltips is None:
+                    row.tooltips = {}
+                row.tooltips[column] = str(value)
+        elif column == 0:
+            row.set_role_value(int(role), value)
+
+        self.dataChanged.emit(index, index, [int(role)])
+        return True
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self._headers):
+            return self._headers[section]
+        return None
+
+    def setColumnCount(self, count):
+        count = max(0, int(count))
+        self.beginResetModel()
+        self._column_count = count
+        self._headers = (self._headers[:count] + [""] * max(0, count - len(self._headers)))
+        self._rows = []
+        self._pending_first_row = None
+        self._pending_last_row = None
+        self.endResetModel()
+
+    def setHeaders(self, labels):
+        self._headers = list(labels or [])[:self._column_count]
+        if self._headers:
+            self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self._headers) - 1)
+
+    def setAlignments(self, alignments):
+        self._alignments = tuple(alignments or ())
+
+    def setRowCount(self, count):
+        count = max(0, int(count))
+        self.beginResetModel()
+        self._rows = [None] * count
+        self._pending_first_row = None
+        self._pending_last_row = None
+        self.endResetModel()
+
+    def insertRows(self, row, count=1, parent=QModelIndex()):
+        if parent.isValid() or count <= 0 or row < 0 or row > len(self._rows):
+            return False
+        self.beginInsertRows(parent, row, row + count - 1)
+        self._rows[row:row] = [None] * count
+        self.endInsertRows()
+        return True
+
+    def removeRows(self, row, count=1, parent=QModelIndex()):
+        if parent.isValid() or count <= 0 or row < 0 or row + count > len(self._rows):
+            return False
+        self.beginRemoveRows(parent, row, row + count - 1)
+        del self._rows[row:row + count]
+        self.endRemoveRows()
+        return True
+
+    def setRowData(self, row_number, values, roles=None, tooltips=None):
+        if row_number < 0 or row_number >= len(self._rows):
+            return False
+        self._rows[row_number] = _BukuGudangRow(values, roles, tooltips)
+        if self._pending_first_row is None:
+            self._pending_first_row = row_number
+            self._pending_last_row = row_number
+        else:
+            self._pending_first_row = min(self._pending_first_row, row_number)
+            self._pending_last_row = max(self._pending_last_row, row_number)
+        return True
+
+    def flushPendingChanges(self):
+        """Kirim satu sinyal perubahan untuk semua baris pada batch render."""
+        first_row = self._pending_first_row
+        last_row = self._pending_last_row
+        self._pending_first_row = None
+        self._pending_last_row = None
+        if first_row is None or last_row is None or self._column_count <= 0:
+            return
+        self.dataChanged.emit(
+            self.index(first_row, 0),
+            self.index(last_row, self._column_count - 1),
+            [],
+        )
+
+    def hasRowData(self, row_number):
+        return 0 <= row_number < len(self._rows) and self._rows[row_number] is not None
+
+    def searchText(self, row_number):
+        if 0 <= row_number < len(self._rows):
+            row = self._rows[row_number]
+            return row.search_text if row is not None else ""
+        return ""
+
+    def detailCountAt(self, row_number):
+        if 0 <= row_number < len(self._rows):
+            row = self._rows[row_number]
+            return len(row.detail_rows) if row is not None and row.detail_rows else 1
+        return 1
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        # Header sorting is disabled for this view. Keep an implementation for
+        # API compatibility should a caller explicitly request sorting later.
+        if not 0 <= column < self._column_count:
+            return
+        reverse = order == Qt.SortOrder.DescendingOrder
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda row: (row.values[column] if row is not None else ""),
+            reverse=reverse,
+        )
+        self.layoutChanged.emit()
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+
+class _BukuGudangItemProxy:
+    """Adapter ringan agar helper lama yang membaca item tetap kompatibel."""
+
+    __slots__ = ("_table", "_row", "_column")
+
+    def __init__(self, table, row, column):
+        self._table = table
+        self._row = row
+        self._column = column
+
+    def _index(self):
+        return self._table.model().index(self._row, self._column)
+
+    def text(self):
+        value = self._table.model().data(self._index(), Qt.ItemDataRole.DisplayRole)
+        return str(value or "")
+
+    def setText(self, value):
+        return self.setData(value, Qt.ItemDataRole.DisplayRole)
+
+    def data(self, role=Qt.ItemDataRole.UserRole):
+        return self._table.model().data(self._index(), role)
+
+    def setData(self, value, role=Qt.ItemDataRole.UserRole):
+        return self._table.model().setData(self._index(), value, role)
+
+    def setToolTip(self, value):
+        return self.setData(value, Qt.ItemDataRole.ToolTipRole)
+
+    def row(self):
+        return self._row
+
+    def column(self):
+        return self._column
+
+    def isSelected(self):
+        selection = self._table.selectionModel()
+        return bool(selection and selection.isSelected(self._index()))
+
+
+class BukuGudangTableView(FrozenTableView):
+    """QTableView dengan adapter API minimal untuk kompatibilitas TabBukuGudang."""
+
+    def __init__(self, parent=None):
+        # Bekukan kolom RESI (kolom pertama), sama seperti implementasi
+        # FrozenTableWidget pada versi Buku Gudang sebelumnya.
+        super().__init__(parent, frozen_cols=1)
+        self._buku_gudang_model = BukuGudangTableModel(self)
+        self.setModel(self._buku_gudang_model)
+
+    def setColumnCount(self, count):
+        self._buku_gudang_model.setColumnCount(count)
+        self.sync_frozen_columns()
+
+    def setHorizontalHeaderLabels(self, labels):
+        self._buku_gudang_model.setHeaders(labels)
+
+    def setRowCount(self, count):
+        self._buku_gudang_model.setRowCount(count)
+
+    def rowCount(self):
+        return self._buku_gudang_model.rowCount()
+
+    def columnCount(self):
+        return self._buku_gudang_model.columnCount()
+
+    def insertRow(self, row):
+        return self._buku_gudang_model.insertRows(row, 1)
+
+    def removeRow(self, row):
+        return self._buku_gudang_model.removeRows(row, 1)
+
+    def setRowData(self, row, values, roles=None, tooltips=None):
+        return self._buku_gudang_model.setRowData(row, values, roles, tooltips)
+
+    def searchText(self, row):
+        return self._buku_gudang_model.searchText(row)
+
+    def item(self, row, column):
+        if not self._buku_gudang_model.hasRowData(row) or not (0 <= column < self.columnCount()):
+            return None
+        return _BukuGudangItemProxy(self, row, column)
+
+    def setItem(self, row, column, item):
+        if item is None or not (0 <= row < self.rowCount() and 0 <= column < self.columnCount()):
+            return
+        proxy = _BukuGudangItemProxy(self, row, column)
+        proxy.setText(item.text())
+
+    def itemAt(self, position):
+        index = self.indexAt(position)
+        if not index.isValid():
+            return None
+        return _BukuGudangItemProxy(self, index.row(), index.column())
+
+    def selectedItems(self):
+        return [
+            _BukuGudangItemProxy(self, index.row(), index.column())
+            for index in self.selectedIndexes()
+            if index.isValid()
+        ]
+
+    def setCellWidget(self, row, column, widget):
+        index = self.model().index(row, column)
+        if index.isValid():
+            self.setIndexWidget(index, widget)
+
+    def cellWidget(self, row, column):
+        index = self.model().index(row, column)
+        return self.indexWidget(index) if index.isValid() else None
+
+    def currentRow(self):
+        index = self.currentIndex()
+        return index.row() if index.isValid() else -1
+
+    def currentColumn(self):
+        index = self.currentIndex()
+        return index.column() if index.isValid() else -1
+
+
+
+class BukuGudangFastPaintDelegate(QStyledItemDelegate):
+    """Paint ringan dengan warna teks status tanpa highlight background."""
+
+    PADDING_LEFT = 6
+    PADDING_RIGHT = 6
+
+    def __init__(self, parent=None, *, is_dark=False, status_role=None):
+        super().__init__(parent)
+        self._is_dark = bool(is_dark)
+        self._status_role = (
+            TabBukuGudang.ROLE_STATUS_HIGHLIGHT
+            if status_role is None else int(status_role)
+        )
+        # Cache per status/tema; warna tidak dihitung ulang untuk setiap sel.
+        self._status_foreground_cache = {}
+        # Cache jarak baris per QFont; berubah otomatis ketika zoom mengubah font.
+        self._line_pitch_cache = {}
+
+    def set_theme(self, is_dark):
+        is_dark = bool(is_dark)
+        if self._is_dark == is_dark:
+            return
+        self._is_dark = is_dark
+        self._status_foreground_cache.clear()
+        view = self.parent()
+        if isinstance(view, QAbstractItemView):
+            view.viewport().update()
 
     @staticmethod
     def jarak_baris(font_metrics):
+        """Jarak antardetail, mempertahankan spasi nyaman dari tampilan lama."""
         return font_metrics.lineSpacing() + max(3, round(font_metrics.height() * 0.25))
 
-    def paint(self, painter, option, index):
-        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        if "\n" not in text:
-            super().paint(painter, option, index)
-            return
+    def _status_foreground(self, index):
+        # Metadata status sudah dinormalisasi saat satu record dibuat. Hindari
+        # strip()/upper() berulang untuk setiap sel yang sedang di-paint.
+        status = index.data(self._status_role)
+        if not status:
+            return None
+        if not isinstance(status, str):
+            status = str(status)
 
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        widget = opt.widget or self.parent()
-        style = widget.style() if widget is not None else QApplication.style()
-        background = None
-        if not opt.state & QStyle.StateFlag.State_Selected:
-            background, foreground = self._color_provider(
-                is_dark=self.is_dark,
-                status=self._status_for_index(index),
+        color = self._status_foreground_cache.get(status)
+        if color is None:
+            # DI GUDANG bukan status selesai, jadi tidak diberi warna hijau
+            # hanya karena metadata invoice berisi LUNAS. MACET tetap mengikuti
+            # prioritas merah dari aturan lama.
+            status_invoice, separator, status_resi = status.partition("|")
+            if (
+                separator
+                and status_resi.strip() == "DI GUDANG"
+                and status_invoice.strip() != "MACET"
+            ):
+                self._status_foreground_cache[status] = False
+                return None
+
+            _background, foreground = get_buku_gudang_status_colors(
+                is_dark=self._is_dark,
+                status=status,
                 is_alternate_row=bool(index.row() % 2),
             )
-            if foreground is not None:
-                for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText):
-                    opt.palette.setBrush(role, QBrush(QColor(foreground)))
+            if foreground is None:
+                # Simpan sentinel agar status normal tidak dievaluasi berulang.
+                self._status_foreground_cache[status] = False
+                return None
+            self._status_foreground_cache[status] = foreground
+            color = foreground
+
+        return None if color is False else color
+
+    def paint(self, painter, option, index):
+        value = index.data(Qt.ItemDataRole.DisplayRole)
+        text = "" if value is None else str(value)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+
+        palette = option.palette
+        if selected:
+            background_role = QPalette.ColorRole.Highlight
+            foreground = palette.color(QPalette.ColorRole.HighlightedText)
+        else:
+            background_role = (
+                QPalette.ColorRole.AlternateBase
+                if index.row() % 2
+                else QPalette.ColorRole.Base
+            )
+            foreground = self._status_foreground(index)
+            if foreground is None:
+                foreground = palette.color(QPalette.ColorRole.Text)
 
         painter.save()
         try:
-            painter.setClipRect(opt.rect, Qt.ClipOperation.IntersectClip)
-            if background is not None:
-                painter.fillRect(opt.rect, QColor(background))
-                opt.backgroundBrush = QBrush(Qt.BrushStyle.NoBrush)
-            rect = opt.rect
-            opt.text = ""
-            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
-            pitch = self.jarak_baris(opt.fontMetrics)
-            for line, value in enumerate(text.split("\n")):
-                part = QStyleOptionViewItem(opt)
-                part.rect.setTop(rect.top() + line * pitch)
-                part.rect.setHeight(min(pitch + 8, rect.bottom() - part.rect.top() + 1))
-                part.state &= ~QStyle.StateFlag.State_HasFocus
-                part.text = value
-                style.drawControl(QStyle.ControlElement.CE_ItemViewItem, part, painter, widget)
+            painter.setClipRect(option.rect)
+            # Background zebra/selection tetap persis dari palette tabel.
+            # Status hanya mengubah pen teks, tidak pernah mengisi warna sel.
+            painter.fillRect(option.rect, palette.brush(background_role))
+            painter.setFont(option.font)
+            painter.setPen(foreground)
+
+            alignment = index.data(Qt.ItemDataRole.TextAlignmentRole)
+            if alignment is None:
+                alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+            text_rect = option.rect.adjusted(
+                self.PADDING_LEFT, 0, -self.PADDING_RIGHT, 0
+            )
+            if text:
+                # Render dari teks DisplayRole yang sudah disusun sebagai
+                # multiline saat data dimuat. Ini jalur yang sudah tervalidasi
+                # pada versi multiline sebelumnya.
+                lines = text.split("\n")
+                if len(lines) == 1:
+                    painter.drawText(text_rect, int(alignment), text)
+                else:
+                    # Cache pitch berdasarkan font agar metrik tidak dihitung
+                    # ulang setiap sel saat scrolling.
+                    # QFont.cacheKey() tidak tersedia pada semua binding PySide6.
+                    # toString() stabil dan kompatibel untuk identitas konfigurasi font.
+                    font_key = option.font.toString()
+                    line_pitch = self._line_pitch_cache.get(font_key)
+                    if line_pitch is None:
+                        line_pitch = self.jarak_baris(painter.fontMetrics())
+                        self._line_pitch_cache[font_key] = line_pitch
+                    bottom = text_rect.bottom()
+                    for line_number, line in enumerate(lines):
+                        top = text_rect.top() + line_number * line_pitch
+                        if top > bottom:
+                            break
+                        line_rect = text_rect.adjusted(0, line_number * line_pitch, 0, 0)
+                        line_rect.setHeight(min(line_pitch + 8, bottom - top + 1))
+                        painter.drawText(line_rect, int(alignment), line)
         finally:
             painter.restore()
 
@@ -211,20 +657,13 @@ class DBIndex(int, Enum):
     STATUS_INVOICE = 20
     TANGGAL_INVOICE = 21
     JUMLAH_INVOICE = 22
+    NAMA_KAPAL = 23  # Metadata tampilan dari histori Manifest; bukan kolom Resi.
 
 
 NAMA_BULAN = (
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
     "Juli", "Agustus", "September", "Oktober", "November", "Desember",
 )
-
-
-def _get_buku_gudang_v2_status_colors(*, is_dark, status, is_alternate_row):
-    return get_buku_gudang_status_colors(
-        is_dark=is_dark,
-        status=status,
-        is_alternate_row=is_alternate_row,
-    )
 
 
 class DatabaseWorkerBukuGudang(QThread):
@@ -266,9 +705,70 @@ class DatabaseWorkerBukuGudang(QThread):
                 self.wilayah,
                 self.tahun,
                 self.filters,
-            )
+            ) or []
+
+            if rows and not self.isInterruptionRequested():
+                # Nama kapal disimpan pada header Manifest, sedangkan data Resi
+                # menyimpan tanggal keluar dan teks truk. Ambil histori sekali
+                # per tahun yang relevan (bukan query per baris/resi).
+                try:
+                    tahun_keluar = {
+                        str(row[DBIndex.KELUAR] or "").strip()[:4]
+                        for row in rows
+                        if len(row) > DBIndex.KELUAR
+                        and str(row[DBIndex.KELUAR] or "").strip()[:4].isdigit()
+                    }
+                    histori_manifest = []
+                    for tahun in sorted(tahun_keluar):
+                        if self.isInterruptionRequested():
+                            break
+                        histori_manifest.extend(
+                            db_service.ambil_histori_manifest(
+                                self.kode_cabang,
+                                tahun,
+                            ) or []
+                        )
+
+                    kapal_by_trip = {}
+                    trip_ambiguous = set()
+                    for manifest in histori_manifest:
+                        if len(manifest) < 4:
+                            continue
+                        tanggal = str(manifest[0] or "").strip()
+                        truk = str(manifest[2] or "").strip().casefold()
+                        nama_kapal = str(manifest[3] or "").strip().upper()
+                        if not tanggal or not truk or not nama_kapal:
+                            continue
+                        key = (tanggal, truk)
+                        existing = kapal_by_trip.get(key)
+                        if existing is None:
+                            kapal_by_trip[key] = nama_kapal
+                        elif existing.casefold() != nama_kapal.casefold():
+                            # Jangan pasangkan kapal yang salah bila satu truk
+                            # tercatat untuk kapal berbeda pada tanggal sama.
+                            trip_ambiguous.add(key)
+
+                    for key in trip_ambiguous:
+                        kapal_by_trip.pop(key, None)
+
+                    # Metadata ditambahkan di indeks baru; seluruh posisi data
+                    # Resi lama tetap utuh untuk logika Buku Gudang lainnya.
+                    rows = [
+                        tuple(row) + (
+                            kapal_by_trip.get((
+                                str(row[DBIndex.KELUAR] or "").strip(),
+                                str(row[DBIndex.TRUK] or "").strip().casefold(),
+                            ), ""),
+                        )
+                        for row in rows
+                    ]
+                except Exception:
+                    # Nama kapal hanya informasi tambahan. Kegagalan membaca
+                    # histori tidak boleh menggagalkan pemuatan Buku Gudang.
+                    rows = [tuple(row) + ("",) for row in rows]
+
             if not self.isInterruptionRequested():
-                self.data_ready.emit(rows or [])
+                self.data_ready.emit(rows)
         except Exception as e:
             self.error_occurred.emit(str(e))
 
@@ -414,6 +914,14 @@ class TabBukuGudang(QWidget):
     KOLOM_DESIMAL = (KOL_BERAT, KOL_CBM)
     KOLOM_RATA_KANAN = (KOL_KOLI, KOL_BERAT, KOL_CBM, KOL_ONGKIR)
     KOLOM_TANGGAL = (KOL_MASUK, KOL_KELUAR)
+    # Mapping tetap untuk detail barang; jangan buat dictionary baru setiap
+    # kali satu baris Buku Gudang dirender.
+    KOLOM_DETAIL_DB = {
+        KOL_NAMA_BARANG: DBIndex.NAMA_BARANG,
+        KOL_KOLI: DBIndex.KOLI,
+        KOL_BERAT: DBIndex.BERAT,
+        KOL_CBM: DBIndex.CBM,
+    }
     KOLOM_DB = {
         KOL_PENGIRIM: "pengirim",
         KOL_KOTA_ASAL: "kota_asal",
@@ -568,9 +1076,7 @@ class TabBukuGudang(QWidget):
             self.tabs_list.append(widget_tabel)
             self.tabs_wilayah.addTab(widget_tabel, wilayah.title())
 
-        # Tunda penerapan tema tabel untuk wilayah yang tersembunyi sampai
-        # wilayah tersebut dipilih. Ini menghindari re-style tiga FrozenTableWidget
-        # sekaligus setiap kali tema aplikasi berganti.
+        # Tunda penerapan tema tabel untuk wilayah tersembunyi sampai dipilih.
         self.tabs_wilayah.currentChanged.connect(self._on_wilayah_changed)
         return self.tabs_wilayah
 
@@ -632,24 +1138,56 @@ class TabBukuGudang(QWidget):
         keyword = self.txt_cari.text().strip().casefold()
         if getattr(tabel, "_render_state", None) is not None:
             return
-        targets = [tabel]
-        frozen = getattr(tabel, "frozen_table", None)
-        if frozen is not None:
-            targets.append(frozen)
-        previous = [target.updatesEnabled() for target in targets]
+
+        hidden_rows = getattr(tabel, "_buku_gudang_hidden_rows", None)
+        if hidden_rows is None:
+            hidden_rows = set()
+            tabel._buku_gudang_hidden_rows = hidden_rows
+
+        if not keyword:
+            if hidden_rows:
+                previous_updates = tabel.updatesEnabled()
+                try:
+                    tabel.setUpdatesEnabled(False)
+                    row_count = tabel.rowCount()
+                    for row in hidden_rows:
+                        if 0 <= row < row_count and tabel.isRowHidden(row):
+                            tabel.setRowHidden(row, False)
+                    hidden_rows.clear()
+                finally:
+                    tabel.setUpdatesEnabled(previous_updates)
+            tabel._buku_gudang_search_keyword = ""
+            return
+
+        previous_keyword = getattr(tabel, "_buku_gudang_search_keyword", "")
+        narrowing = bool(previous_keyword and keyword.startswith(previous_keyword))
+        row_count = tabel.rowCount()
+
+        # Saat pengguna menambah karakter, baris yang sudah tersembunyi
+        # pasti tetap tidak cocok. Hindari lookup item Qt untuk baris tersebut.
+        if narrowing:
+            candidate_rows = (
+                row for row in range(row_count) if row not in hidden_rows
+            )
+            next_hidden_rows = set(hidden_rows)
+        else:
+            candidate_rows = range(row_count)
+            next_hidden_rows = set()
+
+        previous_updates = tabel.updatesEnabled()
         try:
-            for target in targets:
-                target.setUpdatesEnabled(False)
-            for row in range(tabel.rowCount()):
-                item = tabel.item(row, self.KOL_RESI) if keyword else None
-                teks = item.data(self.ROLE_SEARCH_TEXT) if item else ""
-                hidden = bool(keyword and keyword not in (teks or ""))
-                for target in targets:
-                    if target.isRowHidden(row) != hidden:
-                        target.setRowHidden(row, hidden)
+            tabel.setUpdatesEnabled(False)
+            for row in candidate_rows:
+                teks = tabel.searchText(row)
+                hidden = keyword not in (teks or "")
+                if hidden:
+                    next_hidden_rows.add(row)
+                if tabel.isRowHidden(row) != hidden:
+                    tabel.setRowHidden(row, hidden)
+            tabel._buku_gudang_hidden_rows = next_hidden_rows
+            tabel._buku_gudang_search_keyword = keyword
         finally:
-            for target, enabled in zip(targets, previous):
-                target.setUpdatesEnabled(enabled)
+            tabel.setUpdatesEnabled(previous_updates)
 
     def _settings_kolom(self):
         return QSettings(
@@ -730,21 +1268,8 @@ class TabBukuGudang(QWidget):
             return None
 
     def _baris_induk_resi(self, tabel, row):
-        item = tabel.item(row, self.KOL_RESI)
-        if item is not None and item.data(self.ROLE_IS_PARENT):
-            return row
-        no_resi = self._no_resi_dari_baris(tabel, row)
-        if not no_resi:
-            return row
-        for indeks in range(tabel.rowCount()):
-            item = tabel.item(indeks, self.KOL_RESI)
-            if item is None:
-                continue
-            if (
-                str(item.data(self.ROLE_NO_RESI) or "").strip() == no_resi
-                and bool(item.data(self.ROLE_IS_PARENT))
-            ):
-                return indeks
+        # Tampilan Buku Gudang saat ini memakai satu baris per Resi.
+        # Detail barang disimpan pada metadata baris, bukan sebagai baris anak.
         return row
 
     def _data_invoice_dari_baris(self, tabel, row):
@@ -895,22 +1420,10 @@ class TabBukuGudang(QWidget):
             )
         self.batalkan_mode_invoice()
 
-    def _pasang_status_delegate(self, tabel, is_dark):
-        for target in (tabel, getattr(tabel, "frozen_table", None)):
-            if target is not None:
-                delegate = BukuGudangItemDelegate(
-                    parent=target,
-                    status_column=self.KOL_STATUS_PENAGIHAN,
-                    color_provider=_get_buku_gudang_v2_status_colors,
-                    is_dark=is_dark,
-                    status_role=self.ROLE_STATUS_HIGHLIGHT,
-                )
-                target.setItemDelegate(delegate)
-                target._status_color_delegate = delegate
-
     def _konfigurasi_tabel_gudang(self, tabel):
         tabel.setColumnCount(len(self.HEADERS))
         tabel.setHorizontalHeaderLabels(self.HEADERS)
+        tabel._buku_gudang_model.setAlignments(self.ALIGNMENT_KOLOM)
 
         setup_tabel_modern(
             tabel,
@@ -932,25 +1445,91 @@ class TabBukuGudang(QWidget):
         header.sectionResized.connect(
             lambda _i, _old, _new, t=tabel: self.jadwalkan_simpan_lebar_kolom(t)
         )
+        frozen = getattr(tabel, "frozen_table", None)
+        if frozen is not None:
+            # Saat kolom RESI diubah lewat header overlay, perubahan juga
+            # masuk ke mekanisme penyimpanan lebar kolom seperti header utama.
+            frozen.horizontalHeader().sectionResized.connect(
+                lambda col, _old, _new, t=tabel: (
+                    self.jadwalkan_simpan_lebar_kolom(t) if col == self.KOL_RESI else None
+                )
+            )
+            frozen.horizontalHeader().customContextMenuRequested.connect(
+                lambda pos, t=tabel, h=frozen.horizontalHeader(): self.show_header_menu(
+                    pos,
+                    t,
+                    forced_col=self.KOL_RESI,
+                    menu_global_pos=h.viewport().mapToGlobal(pos),
+                )
+            )
+            frozen.customContextMenuRequested.connect(
+                lambda pos, t=tabel, v=frozen: self.show_cell_context_menu(
+                    pos, t, frozen_view=v
+                )
+            )
 
-        for target in (tabel, getattr(tabel, "frozen_table", None)):
-            if target is None:
-                continue
-            target.setWordWrap(False)
-            target.setTextElideMode(Qt.TextElideMode.ElideRight)
+        # Profil scrolling: hindari jalur paint QStyledItemDelegate/QStyle untuk
+        # setiap sel. Delegate khusus juga dipasang pada view kolom beku.
+        is_dark = self._tema_gelap_aktif()
+        tabel.setItemDelegate(
+            BukuGudangFastPaintDelegate(
+                tabel,
+                is_dark=is_dark,
+                status_role=self.ROLE_STATUS_HIGHLIGHT,
+            )
+        )
+        frozen = getattr(tabel, "frozen_table", None)
+        if frozen is not None:
+            frozen.setItemDelegate(
+                BukuGudangFastPaintDelegate(
+                    frozen,
+                    is_dark=is_dark,
+                    status_role=self.ROLE_STATUS_HIGHLIGHT,
+                )
+            )
+
+        tabel.setWordWrap(False)
+        # Teks dipotong oleh batas sel, tanpa biaya kalkulasi elipsis per paint.
+        tabel.setTextElideMode(Qt.TextElideMode.ElideNone)
 
         tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         tabel.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Pertahankan tampilan Buku Gudang: warna selang-seling dan garis grid.
         tabel.setAlternatingRowColors(True)
+        tabel.setShowGrid(True)
+        tabel.setMouseTracking(False)
 
-        timer = QTimer(tabel)
-        timer.setSingleShot(True)
-        timer.timeout.connect(lambda t=tabel: self._sinkronkan_baris_resi(t))
-        tabel._buku_gudang_row_timer = timer
-        tabel.verticalHeader().sectionResized.connect(
-            lambda *_: self._jadwalkan_tinggi_baris(tabel)
+        # Tinggi baris tetap dikendalikan manual: satu baris dasar ditambah
+        # jarak per detail barang. FrozenTableView menyinkronkan tinggi ke overlay.
+        vertical_header = tabel.verticalHeader()
+        vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        vertical_header.setDefaultSectionSize(BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT)
+        frozen = getattr(tabel, "frozen_table", None)
+        if frozen is not None:
+            frozen.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            frozen.verticalHeader().setDefaultSectionSize(
+                BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT
+            )
+
+        row_timer = QTimer(tabel)
+        row_timer.setSingleShot(True)
+        row_timer.timeout.connect(lambda t=tabel: self._sinkronkan_baris_resi(t))
+        tabel._buku_gudang_row_timer = row_timer
+        vertical_header.sectionResized.connect(
+            lambda *_args, t=tabel: self._jadwalkan_tinggi_baris(t)
         )
+
+        # Pixel scrolling mempertahankan kompatibilitas dengan smooth-scroll global.
+        tabel.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        tabel.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # Pertahankan gerak smooth, tetapi satu notch mouse wheel memindahkan
+        # kira-kira tiga baris; default 1 px pada mode per-pixel terasa lambat.
+        tabel.verticalScrollBar().setSingleStep(
+            BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT * 3
+        )
+
+        # Perubahan urutan dapat mengubah baris mana yang memiliki beberapa detail.
         tabel.model().layoutChanged.connect(
             lambda *_: self._setelah_urutan_berubah(tabel)
         )
@@ -970,12 +1549,7 @@ class TabBukuGudang(QWidget):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(*BUKU_GUDANG_TABLE_TAB_MARGINS)
 
-        tabel = FrozenTableWidget(frozen_cols=1)
-        win = self.window()
-        is_dark = bool(
-            win and hasattr(win, "current_theme") and win.current_theme == "dark"
-        )
-        self._pasang_status_delegate(tabel, is_dark)
+        tabel = BukuGudangTableView()
         self._konfigurasi_tabel_gudang(tabel)
 
         layout.addWidget(tabel)
@@ -1058,38 +1632,32 @@ class TabBukuGudang(QWidget):
         return styles
 
     def _terapkan_tema_ke_tabel(self, tabel, is_dark, styles):
-        frozen = getattr(tabel, "frozen_table", None)
         tabel.setUpdatesEnabled(False)
-        if frozen is not None:
-            frozen.setUpdatesEnabled(False)
-
         try:
-            for target in (tabel, frozen):
-                if target is None:
-                    continue
-                update_status_delegate_theme(target, is_dark)
-
             self._sinkronkan_editor_inline(tabel)
 
             zoom_helper.terapkan_zoom_tabel(
                 tabel,
                 is_dark=is_dark,
                 z=zoom_helper.dapatkan_zoom_level(self.__class__.__name__),
-                # Pergantian tema hanya perlu memperbarui warna/QSS. Jangan
-                # hitung ulang tinggi semua baris dan layout frozen table.
+                # Pergantian tema hanya perlu memperbarui warna/QSS.
                 update_geometry=False,
                 extra_stylesheet=self._tooltip_qss(is_dark),
             )
+            # Sinkronkan cache warna teks status tanpa mengubah jalur paint.
+            for target in (tabel, getattr(tabel, "frozen_table", None)):
+                if target is None:
+                    continue
+                delegate = target.itemDelegate()
+                if isinstance(delegate, BukuGudangFastPaintDelegate):
+                    delegate.set_theme(is_dark)
+
             # Cache tema tabel supaya perubahan tema berikutnya hanya perlu
             # memproses tabel wilayah aktif. Tabel tersembunyi akan diperbarui
             # sebelum ditampilkan melalui _on_wilayah_changed.
             tabel._buku_gudang_theme_dark = bool(is_dark)
         finally:
-            if frozen is not None:
-                frozen.setUpdatesEnabled(True)
             tabel.setUpdatesEnabled(True)
-            # Pergantian tema tidak mengubah geometri tabel; tidak perlu
-            # menjadwalkan sinkronisasi ulang frozen view pada setiap toggle.
 
     def _ubah_zoom_ctrl_scroll(self, tabel, arah):
         level = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
@@ -1102,6 +1670,7 @@ class TabBukuGudang(QWidget):
             is_dark=self._tema_gelap_aktif(),
             z=level,
         )
+        self._jadwalkan_tinggi_baris(tabel)
 
     def _on_wilayah_changed(self, _index):
         """Perbarui tema hanya untuk tabel wilayah yang akan ditampilkan."""
@@ -1406,15 +1975,19 @@ class TabBukuGudang(QWidget):
             return editor
         return QLineEdit()
 
-    def show_header_menu(self, pos, tabel):
-        col = tabel.horizontalHeader().logicalIndexAt(pos)
+    def show_header_menu(self, pos, tabel, *, forced_col=None, menu_global_pos=None):
+        col = (
+            int(forced_col)
+            if forced_col is not None
+            else tabel.horizontalHeader().logicalIndexAt(pos)
+        )
         if col < 0 or col >= tabel.columnCount():
             return
 
         menu = self._buat_menu_buku_gudang()
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.addWidget(QLabel(f"Filter {tabel.horizontalHeaderItem(col).text()}:"))
+        layout.addWidget(QLabel(f"Filter {self.HEADERS[col]}:"))
         editor = self._buat_editor_filter(self.get_editor_type(col))
         layout.addWidget(editor)
 
@@ -1427,7 +2000,12 @@ class TabBukuGudang(QWidget):
             lambda: self.apply_filter(tabel, col, editor, menu),
         )
         menu.addAction("Hapus Filter", lambda: self.reset_filter(tabel, col, menu))
-        menu.exec(tabel.horizontalHeader().viewport().mapToGlobal(pos))
+        global_pos = (
+            menu_global_pos
+            if menu_global_pos is not None
+            else tabel.horizontalHeader().viewport().mapToGlobal(pos)
+        )
+        menu.exec(global_pos)
 
     def apply_filter(self, tabel, col, editor, menu):
         tab_widget = self._ambil_tab_widget_dari_tabel(tabel)
@@ -1475,9 +2053,12 @@ class TabBukuGudang(QWidget):
         }
         return len(resi)
 
-    def _buat_action_context(self, menu, item, row, jumlah_resi):
+    def _buat_action_context(self, menu, item, item_resi, row, jumlah_resi):
         mode_normal = self.row_sedang_diedit == -1
-        no_invoice = str(item.data(self.ROLE_INVOICE_NO) or "").strip().upper() if item else ""
+        no_invoice = (
+            str(item_resi.data(self.ROLE_INVOICE_NO) or "").strip().upper()
+            if item_resi else ""
+        )
 
         if jumlah_resi > 1:
             return (
@@ -1505,14 +2086,14 @@ class TabBukuGudang(QWidget):
             action_lihat,  # Tambahkan ke tuple return
         )
 
-    def _actions_status_penagihan(self, menu, item):
-        if item is None or item.column() != self.KOL_STATUS_PENAGIHAN:
+    def _actions_status_penagihan(self, menu, item, item_resi):
+        if item is None or item.column() != self.KOL_STATUS_PENAGIHAN or item_resi is None:
             return {}
-        no_invoice = str(item.data(self.ROLE_INVOICE_NO) or "").strip().upper()
+        no_invoice = str(item_resi.data(self.ROLE_INVOICE_NO) or "").strip().upper()
         if not no_invoice:
             return {}
 
-        status = str(item.data(self.ROLE_INVOICE_STATUS) or "").strip().upper()
+        status = str(item_resi.data(self.ROLE_INVOICE_STATUS) or "").strip().upper()
         menu.addSeparator()
         action_lunas = menu.addAction("✓ Tandai LUNAS")
         action_macet = menu.addAction("⚠ Tandai MACET")
@@ -1626,21 +2207,28 @@ class TabBukuGudang(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Edit Data", str(exc))
 
-    def show_cell_context_menu(self, pos, tabel):
-        item = tabel.itemAt(pos)
-        if not item:
+    def show_cell_context_menu(self, pos, tabel, *, frozen_view=None):
+        if frozen_view is not None:
+            row = frozen_view.rowAt(pos.y())
+            item = tabel.item(row, self.KOL_RESI) if row >= 0 else None
+            menu_global_pos = frozen_view.viewport().mapToGlobal(pos)
+        else:
+            item = tabel.itemAt(pos)
+            row = item.row() if item is not None else -1
+            menu_global_pos = tabel.viewport().mapToGlobal(pos)
+        if item is None:
             return
 
-        row = item.row()
         if not item.isSelected():
             tabel.clearSelection()
             tabel.selectRow(row)
         menu = self._buat_menu_buku_gudang()
-        actions_penagihan = self._actions_status_penagihan(menu, item)
+        item_resi = tabel.item(row, self.KOL_RESI)
+        actions_penagihan = self._actions_status_penagihan(menu, item, item_resi)
         actions = self._buat_action_context(
-            menu, item, row, self._jumlah_resi_context(tabel, row)
+            menu, item, item_resi, row, self._jumlah_resi_context(tabel, row)
         )
-        action = menu.exec(tabel.viewport().mapToGlobal(pos))
+        action = menu.exec(menu_global_pos)
         if action is None:
             return
 
@@ -1653,7 +2241,10 @@ class TabBukuGudang(QWidget):
         buat_invoice, edit, simpan, batal, selesai, lihat_invoice = actions
 
         if action == lihat_invoice:
-            no_invoice = str(item.data(self.ROLE_INVOICE_NO) or "").strip()
+            no_invoice = (
+                str(item_resi.data(self.ROLE_INVOICE_NO) or "").strip()
+                if item_resi else ""
+            )
             if no_invoice:
                 self.buka_invoice_dari_buku_gudang(no_invoice)
         elif action == edit:
@@ -1762,7 +2353,8 @@ class TabBukuGudang(QWidget):
             self.buka_popup_edit_buku_gudang(tabel, row)
             return
         self.row_sedang_diedit = row
-        is_parent = bool(item_resi.data(self.ROLE_IS_PARENT)) if item_resi else True
+        # Setiap baris pada mode tampilan ini mewakili satu Resi induk.
+        is_parent = True
         pengirim_autocomplete, penerima_autocomplete = (
             self._ambil_autocomplete_nama_buku_gudang()
             if is_parent
@@ -1790,25 +2382,19 @@ class TabBukuGudang(QWidget):
             editor_awal.setFocus()
 
     @staticmethod
-    def _format_tanggal_status_penagihan(value):
-        teks = str(value or "").strip()
-        if not teks:
-            return ""
-        tanggal = teks[:10]
-        try:
-            return format_tanggal_ke_ui(tanggal)
-        except Exception:
-            return tanggal
-
-    def _teks_status_penagihan(self, no_invoice, status, tanggal):
-        invoice = str(no_invoice or "").strip().upper()
-        if not invoice:
-            return "-"
+    def _teks_status_penagihan(no_invoice, status):
+        """Tampilkan status tagihan saja, tanpa nomor invoice atau tanggal."""
         status_norm = str(status or "").strip().upper()
-        prefix = f"{status_norm} • " if status_norm in {"LUNAS", "MACET"} else ""
-        tanggal_ui = self._format_tanggal_status_penagihan(tanggal)
-        suffix = f" • {tanggal_ui}" if tanggal_ui else ""
-        return f"{prefix}{invoice}{suffix}"
+        if status_norm:
+            return status_norm
+
+        # Resi tanpa invoice belum masuk proses penagihan.
+        # Jika invoice sudah ada tetapi status kosong, gunakan status default.
+        return (
+            "BELUM INVOICE"
+            if not str(no_invoice or "").strip()
+            else "BELUM LUNAS"
+        )
 
     @staticmethod
     def _tooltip_qss(is_dark):
@@ -1837,16 +2423,20 @@ class TabBukuGudang(QWidget):
         return True
 
     def _format_cell_buku_gudang(self, data, col, wilayah):
-        display = str(data).upper() if data is not None else ""
+        # Konversi teks dilakukan hanya pada kolom yang membutuhkannya.
+        # Kolom angka/tanggal tidak perlu lebih dulu dibuat uppercase.
         if col == self.KOL_KOTA_TUJUAN:
+            display = str(data).upper() if data is not None else ""
             prefix = str(wilayah or "").strip().upper()
             if prefix and display.startswith(prefix):
                 sisa = display[len(prefix):].lstrip()
                 if not sisa or sisa.startswith("-"):
                     return sisa.removeprefix("-").strip()
             return display
-        if col in self.KOLOM_TANGGAL and data and "-" in display:
-            return format_tanggal_ke_ui(data)
+        if col in self.KOLOM_TANGGAL:
+            if data and "-" in str(data):
+                return format_tanggal_ke_ui(data)
+            return str(data).upper() if data is not None else ""
         if col == self.KOL_KOLI:
             teks = str(data).strip() if data is not None else ""
             return teks.upper() if teks and teks != "0" else "-"
@@ -1855,7 +2445,7 @@ class TabBukuGudang(QWidget):
             return format_ke_rupiah(data) if teks not in {"", "0", "0.0", "None"} else "-"
         if col in self.KOLOM_DESIMAL:
             return format_angka_indonesia(data, kosong_jika_nol=True, nilai_kosong="-")
-        return display
+        return str(data).upper() if data is not None else ""
 
     def _alignment_cell_buku_gudang(self, col):
         try:
@@ -1864,118 +2454,125 @@ class TabBukuGudang(QWidget):
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
 
     def _jadwalkan_tinggi_baris(self, tabel):
-        if not getattr(tabel, "_syncing_row_heights", False) and not getattr(
-            tabel, "_render_state", None
+        timer = getattr(tabel, "_buku_gudang_row_timer", None)
+        if (
+            timer is not None
+            and not getattr(tabel, "_syncing_row_heights", False)
+            and getattr(tabel, "_render_state", None) is None
         ):
-            tabel._buku_gudang_row_timer.start(0)
-
-    def _setelah_urutan_berubah(self, tabel):
-        self._jadwalkan_tinggi_baris(tabel)
-        if getattr(tabel, "_render_state", None) is None:
-            self._terapkan_pencarian_ke_tabel(tabel)
+            timer.start(0)
 
     def _sinkronkan_baris_resi(self, tabel):
+        """Atur tinggi baris sesuai jumlah detail dan sinkronkan Frozen Table."""
         if getattr(tabel, "_syncing_row_heights", False):
             return
-        tabel._buku_gudang_row_timer.stop()
-        base = tabel.verticalHeader().defaultSectionSize()
-        line_spacing = BukuGudangItemDelegate.jarak_baris(tabel.fontMetrics())
-        frozen = getattr(tabel, "frozen_table", None)
+        timer = getattr(tabel, "_buku_gudang_row_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        model = tabel.model()
+        if model is None or tabel.rowCount() <= 0:
+            return
+
+        base_height = max(1, tabel.verticalHeader().defaultSectionSize())
+        line_pitch = BukuGudangFastPaintDelegate.jarak_baris(tabel.fontMetrics())
         tabel._syncing_row_heights = True
         try:
+            detail_count_at = getattr(model, "detailCountAt", None)
             for row in range(tabel.rowCount()):
-                item = tabel.item(row, self.KOL_RESI)
-                count = item.data(self.ROLE_DETAIL_COUNT) if item else 1
-                height = base + (max(1, count or 1) - 1) * line_spacing
+                if detail_count_at is not None:
+                    count = detail_count_at(row)
+                else:
+                    index = model.index(row, self.KOL_RESI)
+                    count = model.data(index, self.ROLE_DETAIL_COUNT) or 1
+                try:
+                    count = max(1, int(count))
+                except (TypeError, ValueError):
+                    count = 1
+                height = base_height + (count - 1) * line_pitch
                 if tabel.rowHeight(row) != height:
+                    # FrozenTableView.setRowHeight also updates the frozen view.
                     tabel.setRowHeight(row, height)
-                if frozen is not None and frozen.rowHeight(row) != height:
-                    frozen.setRowHeight(row, height)
         finally:
             tabel._syncing_row_heights = False
 
-    @db_service.profile_performance("BukuGudang.populate_row", threshold=0.025)
+    def _setelah_urutan_berubah(self, tabel):
+        # Perubahan urutan mengubah indeks baris dan kandidat pencarian;
+        # tinggi baris juga perlu mengikuti urutan metadata detail yang baru.
+        self._jadwalkan_tinggi_baris(tabel)
+        if getattr(tabel, "_render_state", None) is None:
+            tabel._buku_gudang_search_keyword = ""
+            tabel._buku_gudang_hidden_rows = set()
+            self._terapkan_pencarian_ke_tabel(tabel)
+
     def _isi_baris_tabel(self, tabel, wilayah, detail_rows, target_row=None):
+        """Siapkan satu record model untuk satu resi, tanpa QTableWidgetItem per sel."""
         row = detail_rows[0]
+        pos = tabel.rowCount() if target_row is None else target_row
         if target_row is None:
-            pos = tabel.rowCount()
             tabel.insertRow(pos)
-        else:
-            pos = target_row
 
         def val(idx, default=""):
             return row[idx] if len(row) > idx and row[idx] is not None else default
 
         no_resi = str(val(DBIndex.RESI)).strip()
         detail_id = val(DBIndex.DETAIL_ID, None)
-        urutan = int(val(DBIndex.URUTAN, 1))
         revision = int(val(DBIndex.REVISION, 0))
         no_invoice = str(val(DBIndex.NO_INVOICE)).strip().upper()
         status_invoice = str(val(DBIndex.STATUS_INVOICE)).strip().upper()
-        tanggal_invoice = str(val(DBIndex.TANGGAL_INVOICE)).strip()
-        jumlah_invoice = int(val(DBIndex.JUMLAH_INVOICE, 0))
         status_resi = str(val(DBIndex.STATUS_RESI)).strip().upper()
+        status_penagihan = self._teks_status_penagihan(no_invoice, status_invoice)
 
-        status_penagihan = self._teks_status_penagihan(
-            no_invoice, status_invoice, tanggal_invoice
+        values = (
+            val(DBIndex.RESI), val(DBIndex.MASUK), val(DBIndex.KELUAR),
+            val(DBIndex.STATUS_RESI), status_penagihan, val(DBIndex.TRUK),
+            val(DBIndex.PENGIRIM), val(DBIndex.KOTA_ASAL), val(DBIndex.PENERIMA),
+            val(DBIndex.KOTA_TUJUAN), val(DBIndex.NAMA_BARANG), val(DBIndex.KOLI),
+            val(DBIndex.BERAT), val(DBIndex.CBM), val(DBIndex.ONGKIR),
+            val(DBIndex.PAYMENT), val(DBIndex.KETERANGAN),
         )
 
-        values = [
-            val(DBIndex.RESI), val(DBIndex.MASUK), val(DBIndex.KELUAR), val(DBIndex.STATUS_RESI),
-            status_penagihan,
-            val(DBIndex.TRUK), val(DBIndex.PENGIRIM), val(DBIndex.KOTA_ASAL), val(DBIndex.PENERIMA), val(DBIndex.KOTA_TUJUAN),
-            val(DBIndex.NAMA_BARANG), val(DBIndex.KOLI), val(DBIndex.BERAT), val(DBIndex.CBM), val(DBIndex.ONGKIR), val(DBIndex.PAYMENT), val(DBIndex.KETERANGAN)
-        ]
-
-        status_highlight = status_invoice if status_invoice in {"LUNAS", "MACET"} else ""
-        highlight_value = f"{status_highlight}|{status_resi}"
-
-        kolom_detail = {
-            self.KOL_NAMA_BARANG: DBIndex.NAMA_BARANG,
-            self.KOL_KOLI: DBIndex.KOLI,
-            self.KOL_BERAT: DBIndex.BERAT,
-            self.KOL_CBM: DBIndex.CBM,
-        }
         display_values = []
-
+        tooltips = {}
+        kolom_detail = self.KOLOM_DETAIL_DB
         for col, data in enumerate(values):
-            if col in kolom_detail:
-                idx = kolom_detail[col]
-                tampil = "\n".join(
-                    " ".join(self._format_cell_buku_gudang(
-                        detail[idx], col, wilayah
-                    ).split()) or "-"
+            idx = kolom_detail.get(col)
+            if idx is not None:
+                detail_values = [
+                    " ".join(
+                        self._format_cell_buku_gudang(detail[idx], col, wilayah).split()
+                    ) or "-"
                     for detail in detail_rows
-                )
+                ]
+                tampil = "\n".join(detail_values)
+                if len(detail_rows) > 1:
+                    tooltips[col] = " • ".join(detail_values)
             else:
                 tampil = self._format_cell_buku_gudang(data, col, wilayah)
+                if col == self.KOL_TRUK:
+                    nama_kapal = str(val(DBIndex.NAMA_KAPAL)).strip()
+                    if nama_kapal and nama_kapal.casefold() not in str(tampil).casefold():
+                        if str(tampil).strip() in ("", "-"):
+                            tampil = nama_kapal
+                        else:
+                            tampil = f"{tampil} | {nama_kapal}"
             display_values.append(tampil)
 
-            item = buat_tabel_item(
-                text=tampil,
-                editable=False,
-                alignment=self._alignment_cell_buku_gudang(col),
-            )
+        roles = {
+            self.ROLE_NO_RESI: no_resi,
+            self.ROLE_DETAIL_ID: detail_id,
+            self.ROLE_REVISION: revision,
+            self.ROLE_INVOICE_NO: no_invoice,
+            self.ROLE_INVOICE_STATUS: status_invoice,
+            # Format gabungan ini mengikuti input provider warna lama:
+            # STATUS PENAGIHAN | STATUS RESI.
+            self.ROLE_STATUS_HIGHLIGHT: f"{status_invoice}|{status_resi}",
+            self.ROLE_SEARCH_TEXT: " ".join(display_values).replace("\n", " ").casefold(),
+        }
+        if len(detail_rows) > 1:
+            roles[self.ROLE_DETAIL_ROWS] = detail_rows
 
-            item.setData(self.ROLE_NO_RESI, no_resi)
-            item.setData(self.ROLE_DETAIL_ID, detail_id)
-            item.setData(self.ROLE_IS_PARENT, True)
-            item.setData(self.ROLE_URUTAN_DETAIL, urutan)
-            item.setData(self.ROLE_REVISION, revision)
-            item.setData(self.ROLE_INVOICE_NO, no_invoice)
-            item.setData(self.ROLE_INVOICE_DATE, tanggal_invoice)
-            item.setData(self.ROLE_INVOICE_STATUS, status_invoice)
-            item.setData(self.ROLE_INVOICE_COUNT, jumlah_invoice)
-
-            if col in (self.KOL_STATUS_RESI, self.KOL_STATUS_PENAGIHAN):
-                item.setData(self.ROLE_STATUS_HIGHLIGHT, highlight_value)
-
-            tabel.setItem(pos, col, item)
-
-        item_resi = tabel.item(pos, self.KOL_RESI)
-        item_resi.setData(self.ROLE_DETAIL_ROWS, [list(detail) for detail in detail_rows])
-        item_resi.setData(self.ROLE_DETAIL_COUNT, len(detail_rows))
-        item_resi.setData(self.ROLE_SEARCH_TEXT, " ".join(display_values).casefold())
+        tabel.setRowData(pos, display_values, roles, tooltips)
 
     @db_service.profile_performance("BukuGudang.save_table_state", threshold=0.025)
     def _simpan_state_tabel(self, tabel):
@@ -1996,23 +2593,29 @@ class TabBukuGudang(QWidget):
         if not state:
             return
         selection_model = tabel.selectionModel()
-        if selection_model is not None:
+        wanted = state.get("selected_resi", set()) or set()
+        current_resi = state.get("current_resi")
+        # Biasanya tidak ada baris terpilih. Dalam kasus itu tidak perlu
+        # memindai seluruh tabel hanya untuk memulihkan seleksi yang kosong.
+        if selection_model is not None and (wanted or current_resi):
             selection = QItemSelection()
-            wanted = state.get("selected_resi", set())
             model = tabel.model()
             current_index = None
+            current_column = state.get("current_column", 0)
+            last_column = tabel.columnCount() - 1
             for row in range(tabel.rowCount()):
                 no_resi = self._no_resi_dari_baris(tabel, row)
-                if no_resi == state.get("current_resi"):
-                    current_index = model.index(row, state.get("current_column", 0))
+                if current_resi and no_resi == current_resi:
+                    current_index = model.index(row, current_column)
                 if no_resi in wanted and not tabel.isRowHidden(row):
-                    selection.select(model.index(row, 0), model.index(row, tabel.columnCount() - 1))
+                    selection.select(model.index(row, 0), model.index(row, last_column))
             selection_model.clearSelection()
             if current_index is not None:
                 selection_model.setCurrentIndex(
                     current_index, QItemSelectionModel.SelectionFlag.NoUpdate
                 )
-            selection_model.select(selection, QItemSelectionModel.SelectionFlag.Select)
+            if not selection.isEmpty():
+                selection_model.select(selection, QItemSelectionModel.SelectionFlag.Select)
         tabel.verticalScrollBar().setValue(state.get("vertical", 0))
         tabel.horizontalScrollBar().setValue(state.get("horizontal", 0))
 
@@ -2040,8 +2643,13 @@ class TabBukuGudang(QWidget):
             return
 
         total = tabel.rowCount()
-        visible = sum(1 for row in range(total) if not tabel.isRowHidden(row))
         keyword = self.txt_cari.text().strip()
+        # Tanpa keyword, semua baris yang berasal dari query memang terlihat.
+        # Saat keyword aktif, hitung dari cache baris tersembunyi hasil filter.
+        visible = (
+            total - len(getattr(tabel, "_buku_gudang_hidden_rows", ()))
+            if keyword else total
+        )
         if keyword:
             tahun_cakupan = getattr(
                 tab_widget, "_buku_gudang_query_year", str(datetime.now().year)
@@ -2147,27 +2755,24 @@ class TabBukuGudang(QWidget):
             for row in rows or []:
                 no_resi = str(row[DBIndex.RESI] or "").strip()
                 grouped.setdefault(no_resi, []).append(row)
-            for details in grouped.values():
-                if len(details) > 1:
-                    details.sort(key=lambda detail: int(detail[DBIndex.URUTAN] or 1))
+            # ambil_data_buku_gudang mengurutkan hasil berdasarkan rowid resi,
+            # lalu urutan/id_detail. Detail per resi sudah tersusun dari query,
+            # jadi pengurutan ulang setiap grup hanya menambah biaya CPU.
             targets = [tabel]
-            frozen = getattr(tabel, "frozen_table", None)
-            if frozen is not None:
-                targets.append(frozen)
             tabel._loading_view_state = (
                 tabel.isSortingEnabled(),
                 [(target, target.signalsBlocked(), target.updatesEnabled()) for target in targets],
             )
+            tabel._buku_gudang_hidden_rows = set()
+            tabel._buku_gudang_search_keyword = ""
             tabel._render_state = {
                 "generation": tab_widget._load_generation,
                 "groups": list(grouped.values()), "position": 0,
             }
-            tabel._buku_gudang_row_timer.stop()
             for target in targets:
                 target.blockSignals(True)
                 target.setUpdatesEnabled(False)
             tabel.setSortingEnabled(False)
-            tabel.setRowCount(0)
             tabel.setRowCount(len(grouped))
             tab_widget._render_timer.start(0)
         except Exception as error:
@@ -2181,13 +2786,20 @@ class TabBukuGudang(QWidget):
             return
         try:
             started = perf_counter()
-            stop = min(state["position"] + self.RENDER_BATCH_SIZE, len(state["groups"]))
+            batch_start = state["position"]
+            stop = min(batch_start + self.RENDER_BATCH_SIZE, len(state["groups"]))
             while state["position"] < stop:
                 pos = state["position"]
                 self._isi_baris_tabel(tabel, tab_widget.wilayah, state["groups"][pos], pos)
                 state["position"] += 1
-                if perf_counter() - started >= self.RENDER_TIME_BUDGET:
+                # Pembacaan clock tiap baris menambah overhead pada ribuan resi.
+                # Cek tiap 8 baris menjaga batching tetap responsif dengan biaya lebih kecil.
+                if (
+                    (state["position"] - batch_start) % 8 == 0
+                    and perf_counter() - started >= self.RENDER_TIME_BUDGET
+                ):
                     break
+            tabel._buku_gudang_model.flushPendingChanges()
             if state["position"] < len(state["groups"]):
                 tab_widget._render_timer.start(0)
                 return
@@ -2200,7 +2812,7 @@ class TabBukuGudang(QWidget):
         tabel = tab_widget.tabel
         self._pulihkan_tabel_setelah_loading(tabel)
         tabel._render_state = None
-        self._sinkronkan_baris_resi(tabel)
+        self._jadwalkan_tinggi_baris(tabel)
         self._terapkan_pencarian_ke_tabel(tabel)
         tab_widget._loading = False
         tabel.setEnabled(getattr(tab_widget, "_table_was_enabled", True))
@@ -2394,7 +3006,9 @@ class TabBukuGudang(QWidget):
             return
 
         item_resi = tabel.item(row, self.KOL_RESI)
-        is_parent = bool(item_resi.data(self.ROLE_IS_PARENT)) if item_resi else True
+        # Setiap baris tabel mewakili satu Resi induk; detail anak berada
+        # di popup edit dan tidak menjadi baris terpisah.
+        is_parent = True
         detail_id = self._detail_id_dari_baris(tabel, row)
 
         try:

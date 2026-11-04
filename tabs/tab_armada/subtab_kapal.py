@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTableWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -29,7 +28,7 @@ from utils.input_style_helper import (
 )
 from utils.typography import get_master_font, get_fixed_font_sizes_pt
 from utils.mixins import ZoomTableMixin
-from utils.table_helper import buat_tabel_item
+from utils.table_helper import ModelTableView
 import utils.zoom as zoom_helper
 
 
@@ -157,7 +156,7 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         header_layout.addWidget(self.input_cari)
         layout.addLayout(header_layout)
 
-        self.tabel_kapal = QTableWidget()
+        self.tabel_kapal = ModelTableView(parent=self)
         tabel = self.tabel_kapal
         tabel.setColumnCount(len(self.HEADERS))
         tabel.setHorizontalHeaderLabels(self.HEADERS)
@@ -168,7 +167,9 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        tabel.cellClicked.connect(self.pilih_data_dari_tabel)
+        tabel.clicked.connect(
+            lambda index: self.pilih_data_dari_tabel(index.row(), index.column())
+        )
 
         header = tabel.horizontalHeader()
         header.setMinimumHeight(ARMADA_TABLE_HEADER_MIN_HEIGHT)
@@ -511,18 +512,29 @@ class SubTabKapal(QWidget, ZoomTableMixin):
     def refresh_tabel(self):
         tabel = self.tabel_kapal
         tabel.setUpdatesEnabled(False)
-        tabel.blockSignals(True)
-        tabel.setRowCount(0)
-        self._kapal_master_by_key = {}
         try:
-            for index, row in enumerate(db_service.ambil_semua_kapal_full()):
+            self._kapal_master_by_key = {}
+            rows = db_service.ambil_semua_kapal_full() or []
+            display_rows = [
                 self._tambahkan_baris_kapal(index, row)
+                for index, row in enumerate(rows)
+            ]
+            tabel.setRows(
+                display_rows,
+                alignments=(
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                ),
+            )
             self.setup_autocomplete_kapal_editor()
             self.filter_tabel_kapal(self.input_cari.text())
         except Exception as exc:
             print(f"Error Load Tabel Kapal: {exc}")
+            tabel.setRows([])
         finally:
-            tabel.blockSignals(False)
             tabel.setUpdatesEnabled(True)
 
     def _data_baris_kapal(self, row):
@@ -534,48 +546,29 @@ class SubTabKapal(QWidget, ZoomTableMixin):
         }
 
     def _tambahkan_baris_kapal(self, index, row):
-        tabel = self.tabel_kapal
-        baris = tabel.rowCount()
-        tabel.insertRow(baris)
-
         data = self._data_baris_kapal(row)
         key = self._normalisasi_kunci_kapal(data["nama"])
         if key and key not in self._kapal_master_by_key:
             self._kapal_master_by_key[key] = dict(data)
 
-        values = (
+        return (
             str(index + 1),
             data["nama"],
             data["tujuan"],
             data["keterangan"],
             data["foto"],
         )
-        alignments = (
-            Qt.AlignmentFlag.AlignCenter,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            None,
-        )
-        for column, (value, alignment) in enumerate(zip(values, alignments)):
-            kwargs = {"editable": False}
-            if alignment is not None:
-                kwargs["alignment"] = alignment
-            tabel.setItem(baris, column, buat_tabel_item(value, **kwargs))
 
     @db_service.profile_performance("ArmadaKapal.search_filter", threshold=0.025)
     def filter_tabel_kapal(self, text):
         kata_kunci = text.lower().strip()
         nomor_baru = 1
-        for row in range(self.tabel_kapal.rowCount()):
-            muncul = any(
-                (item := self.tabel_kapal.item(row, col))
-                and kata_kunci in item.text().lower()
-                for col in self.FILTER_COLUMNS
-            )
-            self.tabel_kapal.setRowHidden(row, not muncul)
+        tabel = self.tabel_kapal
+        for row in range(tabel.rowCount()):
+            muncul = kata_kunci in tabel.searchText(row, self.FILTER_COLUMNS)
+            tabel.setRowHidden(row, not muncul)
             if muncul:
-                self.tabel_kapal.item(row, self.KOL_NO).setText(str(nomor_baru))
+                tabel.model().setCell(row, self.KOL_NO, str(nomor_baru))
                 nomor_baru += 1
 
     def _ambil_input_simpan_kapal(self):

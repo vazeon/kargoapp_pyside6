@@ -10,7 +10,7 @@ from audit_context import install_sqlite_audit_functions
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_NAME = "database_cargo.db"
-DB_SCHEMA_VERSION = 18
+DB_SCHEMA_VERSION = 20
 
 _SCHEMA_STATEMENTS = (
     """
@@ -2421,6 +2421,92 @@ def _migration_v18(cursor) -> None:
     cursor.execute("DROP TABLE IF EXISTS master_option")
 
 
+def _migration_v19(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS manifest_kantor_detail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kode_cabang TEXT NOT NULL,
+            no_resi TEXT NOT NULL,
+            kode_tagihan TEXT NOT NULL DEFAULT '',
+            kg_m3_manual TEXT NOT NULL DEFAULT '',
+            nomor_invoice_manual TEXT NOT NULL DEFAULT '',
+            payment_mandiri TEXT NOT NULL DEFAULT '',
+            payment_bca TEXT NOT NULL DEFAULT '',
+            sjb TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (kode_cabang, no_resi),
+            FOREIGN KEY (kode_cabang) REFERENCES data_cabang (kode_cabang),
+            FOREIGN KEY (no_resi) REFERENCES data_resi (no_resi)
+                ON UPDATE CASCADE ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _migration_v20(cursor) -> None:
+    """Rename rekap-detail table while retaining data from schema v19."""
+    tables = {
+        row[0]
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    nama_lama = "manifest_kantor_detail"
+    nama_baru = "manifest_penagihan_detail"
+
+    if nama_lama in tables and nama_baru not in tables:
+        cursor.execute(
+            f"ALTER TABLE {nama_lama} RENAME TO {nama_baru}"
+        )
+        return
+
+    if nama_lama in tables and nama_baru in tables:
+        # If both names exist (e.g. from a partial manual migration), retain
+        # all rows not already represented by the new table, then remove old.
+        cursor.execute(
+            f"""
+            INSERT OR IGNORE INTO {nama_baru} (
+                kode_cabang, no_resi, kode_tagihan, kg_m3_manual,
+                nomor_invoice_manual, payment_mandiri, payment_bca, sjb,
+                created_at, updated_at
+            )
+            SELECT
+                kode_cabang, no_resi, kode_tagihan, kg_m3_manual,
+                nomor_invoice_manual, payment_mandiri, payment_bca, sjb,
+                created_at, updated_at
+            FROM {nama_lama}
+            """
+        )
+        cursor.execute(f"DROP TABLE {nama_lama}")
+        return
+
+    if nama_baru not in tables:
+        # Defensive path for a database whose v19 table was manually removed.
+        cursor.execute(
+            """
+            CREATE TABLE manifest_penagihan_detail (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kode_cabang TEXT NOT NULL,
+                no_resi TEXT NOT NULL,
+                kode_tagihan TEXT NOT NULL DEFAULT '',
+                kg_m3_manual TEXT NOT NULL DEFAULT '',
+                nomor_invoice_manual TEXT NOT NULL DEFAULT '',
+                payment_mandiri TEXT NOT NULL DEFAULT '',
+                payment_bca TEXT NOT NULL DEFAULT '',
+                sjb TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (kode_cabang, no_resi),
+                FOREIGN KEY (kode_cabang) REFERENCES data_cabang (kode_cabang),
+                FOREIGN KEY (no_resi) REFERENCES data_resi (no_resi)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """
+        )
+
+
 _SCHEMA_MIGRATIONS = {
     1: _migration_v1,
     2: _migration_v2,
@@ -2440,6 +2526,8 @@ _SCHEMA_MIGRATIONS = {
     16: _migration_v16,
     17: _migration_v17,
     18: _migration_v18,
+    19: _migration_v19,
+    20: _migration_v20,
 }
 
 

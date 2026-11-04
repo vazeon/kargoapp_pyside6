@@ -1847,7 +1847,7 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
             SELECT h.no_invoice, h.status, h.tanggal, h.created_at, ir.no_resi
             FROM invoice_resi ir
             INNER JOIN invoice_header h ON h.no_invoice = ir.no_invoice
-            WHERE UPPER(ir.no_resi) IN ({placeholders})
+            WHERE ir.no_resi COLLATE NOCASE IN ({placeholders})
             ORDER BY h.updated_at DESC, h.id DESC
             """,
             daftar,
@@ -1922,9 +1922,21 @@ def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
           ON d.no_resi = r.no_resi AND d.deleted_at IS NULL
         WHERE r.kode_cabang = ?
           AND r.kota_tujuan LIKE ?
-          AND r.tanggal_masuk LIKE ?
     """
-    params = [kode_cabang, f"%{wilayah}%", f"{tahun_terpilih}%"]
+    params = [kode_cabang, f"%{wilayah}%"]
+
+    # Bentuk rentang tanggal ISO memungkinkan SQLite memakai kedua kolom
+    # index (kode_cabang, tanggal_masuk). LIKE 'YYYY%' pada kolom BINARY
+    # cenderung hanya memakai bagian kode_cabang dari index.
+    tahun_teks = str(tahun_terpilih or "").strip()
+    if len(tahun_teks) == 4 and tahun_teks.isdigit():
+        tahun_int = int(tahun_teks)
+        query += " AND r.tanggal_masuk >= ? AND r.tanggal_masuk < ?"
+        params.extend((f"{tahun_int:04d}-01-01", f"{tahun_int + 1:04d}-01-01"))
+    else:
+        # Pertahankan perilaku lama untuk input tahun non-standar.
+        query += " AND r.tanggal_masuk LIKE ?"
+        params.append(f"{tahun_terpilih}%")
 
     if bulan_pilihan and len(bulan_pilihan) < 12:
         placeholders = ", ".join("?" for _ in bulan_pilihan)
@@ -2410,6 +2422,55 @@ def tandai_resi_selesai_massal(resi_terpilih, kode_cabang):
 # 05. MANIFEST — PEMBERANGKATAN & TRACKING
 # ==============================================================================
 
+# Pilihan awal disimpan di satu tempat. Jenis tambahan berasal dari data truk
+# yang benar-benar tersimpan, sehingga Manifest dan Subtab Truk selalu memakai
+# daftar yang sama tanpa menambah tabel lokal/remote baru.
+JENIS_TRUK_DEFAULT = ("TB", "TR", "CDD", "Pick-up")
+
+
+def ambil_daftar_jenis_truk(kode_cabang=None):
+    """Ambil jenis truk baku dan jenis tambahan yang sudah dipakai cabang aktif."""
+    cabang = _kode_cabang_aktif(kode_cabang)
+    try:
+        rows = _fetchall(
+            """
+            SELECT DISTINCT TRIM(jenis_truk)
+            FROM truk
+            WHERE kode_cabang = ?
+              AND TRIM(COALESCE(jenis_truk, '')) <> ''
+            ORDER BY UPPER(TRIM(jenis_truk)) ASC
+            """,
+            (cabang,),
+        )
+    except sqlite3.Error as exc:
+        logger.warning("[Truk] Gagal memuat daftar jenis truk cabang %s: %s", cabang, exc)
+        rows = []
+
+    hasil = []
+    seen = set()
+
+    def tambah(nilai):
+        teks = str(nilai or "").strip()
+        kunci = teks.casefold()
+        if not teks or kunci in {"- pilih jenis -", "lainnya..."} or kunci in seen:
+            return
+        seen.add(kunci)
+        hasil.append(teks)
+
+    for jenis in JENIS_TRUK_DEFAULT:
+        tambah(jenis)
+
+    tambahan = []
+    for row in rows:
+        jenis = str(row[0] or "").strip() if row else ""
+        if jenis and jenis.casefold() not in seen and jenis.casefold() != "lainnya...":
+            tambahan.append(jenis)
+    for jenis in sorted(tambahan, key=str.casefold):
+        tambah(jenis)
+
+    return hasil
+
+
 def ambil_truk_list(kode_cabang=None):
     """Daftar nomor polisi dan sopir milik cabang aktif."""
     return _fetchall(
@@ -2523,8 +2584,8 @@ def _upsert_truk_manifest(cursor, kode_cabang, nopol, sopir, jenis, ket_truk):
         """
         INSERT INTO truk (
             kode_cabang, no_polisi, jenis_truk, nama_sopir,
-            ket_truk, is_synced, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+            ket_truk, sync_id, is_synced, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
         ON CONFLICT(kode_cabang, no_polisi) DO UPDATE SET
             jenis_truk = CASE WHEN TRIM(excluded.jenis_truk) <> ''
                               THEN excluded.jenis_truk ELSE truk.jenis_truk END,
@@ -2535,7 +2596,14 @@ def _upsert_truk_manifest(cursor, kode_cabang, nopol, sopir, jenis, ket_truk):
             is_synced = 0,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (kode_cabang, nopol, jenis or "BELUM DIKETAHUI", sopir, ket_truk),
+        (
+            kode_cabang,
+            nopol,
+            jenis or "BELUM DIKETAHUI",
+            sopir,
+            ket_truk,
+            str(uuid.uuid4()),
+        ),
     )
 
 def _reset_manifest_lama(cursor, manifest_id, kode_cabang, resi_list=None):

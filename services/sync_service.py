@@ -31,6 +31,15 @@ class SyncOfflineError(RuntimeError):
     """Sinkronisasi tidak dapat dilakukan karena koneksi jaringan tidak tersedia."""
 
 
+class SyncCancelledError(RuntimeError):
+    """Siklus sinkronisasi dihentikan secara kooperatif saat aplikasi ditutup."""
+
+
+def _check_sync_cancelled(cancel_event=None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise SyncCancelledError("Sinkronisasi dihentikan karena aplikasi sedang ditutup.")
+
+
 # Kolom yang benar-benar boleh keluar dari SQLite menuju Supabase.
 # Jangan memakai TABLES sebagai penentu bentuk payload: kehadiran tabel di
 # aplikasi bukan berarti setiap kolom tabel tersebut berlaku untuk payload lain.
@@ -224,7 +233,7 @@ def _session_ready() -> bool:
         return False
 
 
-def _ensure_online_session() -> bool:
+def _ensure_online_session(cancel_event=None) -> bool:
     """Pulihkan sesi Supabase secara silent setelah aplikasi masuk mode offline.
 
     Offline-first tetap dipertahankan: user tidak dikeluarkan dari aplikasi dan
@@ -233,6 +242,7 @@ def _ensure_online_session() -> bool:
     untuk autentikasi ulang ke Supabase. Password tidak ditulis ulang ke file
     database atau log.
     """
+    _check_sync_cancelled(cancel_event)
     if _is_local_only_session():
         return False
 
@@ -252,26 +262,34 @@ def _ensure_online_session() -> bool:
         if not identifier or not password:
             return False
 
-        hasil = verifikasi_login_sistem(identifier, password)
+        hasil = verifikasi_login_sistem(
+            identifier,
+            password,
+            preserve_session_on_network_failure=True,
+            allow_offline_fallback=False,
+            cancel_event=cancel_event,
+        )
+        _check_sync_cancelled(cancel_event)
         if not isinstance(hasil, (tuple, list)) or len(hasil) < 1 or not bool(hasil[0]):
             return False
 
-        # verifikasi_login_sistem bertanggung jawab mengisi CURRENT_SESSION dan
-        # membuat auth session Supabase. Pastikan flag offline lama tidak
-        # menghambat sync setelah sesi berhasil pulih.
-        CURRENT_SESSION["is_offline_session"] = False
-
-        if not str(CURRENT_SESSION.get("auth_email") or "").strip():
-            CURRENT_SESSION["auth_email"] = identifier
+        # verifikasi_login_sistem juga dapat berhasil melalui cache offline.
+        # Keberhasilan cache lokal bukan bukti bahwa token Supabase aktif;
+        # jangan mengubah sesi offline menjadi seolah-olah sesi online.
+        if bool(CURRENT_SESSION.get("is_offline_session")):
+            return False
 
         ready = _session_ready()
         if ready:
+            CURRENT_SESSION["is_offline_session"] = False
             print(
                 "[SESSION] Koneksi Supabase pulih — sesi online berhasil dipulihkan.",
                 flush=True,
             )
         return ready
     except Exception as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise SyncCancelledError("Pemulihan session dibatalkan saat shutdown.") from exc
         # Gangguan jaringan saat reconnect bukan error fatal. Worker berikutnya
         # akan mencoba lagi tanpa logout dan tanpa menghapus last-session.
         logger.debug("[SESSION] Reconnect Supabase tertunda: %s", exc)
@@ -1572,9 +1590,13 @@ def _is_offline_network_error(error: BaseException) -> bool:
     network_markers = (
         "connecterror",
         "connecttimeout",
+        "connectionerror",
+        "readerror",
+        "writeerror",
         "readtimeout",
         "writetimeout",
         "pooltimeout",
+        "proxyerror",
         "getaddrinfo failed",
         "name or service not known",
         "temporary failure in name resolution",
@@ -1609,6 +1631,12 @@ def _is_offline_network_error(error: BaseException) -> bool:
         name = type(current).__name__.lower()
         text = str(current).lower()
         if any(marker in name or marker in text for marker in network_markers):
+            return True
+        try:
+            status = int(getattr(current, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status in {408, 425, 429, 500, 502, 503, 504, 522, 523, 524}:
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -2842,6 +2870,23 @@ def _apply_remote_buku_gudang(conn, payload: Dict[str, Any], *, force: bool = Fa
             conn.execute("DELETE FROM buku_gudang WHERE sync_id=?", (sid,))
         # Tombstone yang sudah tidak ada di cache tetap dianggap telah diterapkan.
         return True
+
+    # Buku Gudang mempunyai relasi ke data_resi pada SQLite. Snapshot master
+    # generik berjalan sebelum pull_server_changes(), sehingga row Buku Gudang
+    # yang baru dibuat langsung di Supabase dapat tiba lebih dahulu daripada
+    # parent Resinya. Tunda row ini tanpa memajukan cursor atau mematikan FK;
+    # pull incremental akan menerapkannya setelah event data_resi masuk.
+    parent_no_resi = str(payload.get("no_resi") or "").strip().upper()
+    if parent_no_resi and not conn.execute(
+        "SELECT 1 FROM data_resi WHERE no_resi=? LIMIT 1",
+        (parent_no_resi,),
+    ).fetchone():
+        logger.debug(
+            "[SYNC] buku_gudang/%s ditunda: parent data_resi/%s belum tersedia lokal.",
+            sid,
+            parent_no_resi,
+        )
+        return False
 
     identity_changed = bool(
         local_by_sid and str(local_by_sid[0] or "").strip().upper() != gid
@@ -5161,12 +5206,14 @@ def _preflight_repair_legacy_outbox() -> Dict[str, int]:
         conn.close()
 
 
-def sync_once() -> Dict[str, int]:
-    if not _ensure_online_session():
+def sync_once(cancel_event=None) -> Dict[str, int]:
+    _check_sync_cancelled(cancel_event)
+    if not _ensure_online_session(cancel_event=cancel_event):
+        _check_sync_cancelled(cancel_event)
         return {"pushed": 0, "pulled": 0}
 
     try:
-
+        _check_sync_cancelled(cancel_event)
         try:
             _preflight_repair_legacy_outbox()
         except Exception as exc:
@@ -5176,7 +5223,9 @@ def sync_once() -> Dict[str, int]:
                 f"legacy_outbox_preflight: {type(exc).__name__}: {exc}"
             ) from exc
 
+        _check_sync_cancelled(cancel_event)
         bootstrap = initial_sync()
+        _check_sync_cancelled(cancel_event)
 
         try:
             pushed = push_pending()
@@ -5185,18 +5234,21 @@ def sync_once() -> Dict[str, int]:
                 raise SyncOfflineError(str(exc)) from exc
             raise RuntimeError(f"push_pending: {type(exc).__name__}: {exc}") from exc
 
+        _check_sync_cancelled(cancel_event)
         try:
             branches = sync_all_branches()
         except Exception as exc:
             if _is_offline_network_error(exc):
                 raise SyncOfflineError(str(exc)) from exc
             raise RuntimeError(f"sync_all_branches: {type(exc).__name__}: {exc}") from exc
+        _check_sync_cancelled(cancel_event)
         try:
             wilayah = sync_cabang_wilayah()
         except Exception as exc:
             if _is_offline_network_error(exc):
                 raise SyncOfflineError(str(exc)) from exc
             raise RuntimeError(f"sync_cabang_wilayah: {type(exc).__name__}: {exc}") from exc
+        _check_sync_cancelled(cancel_event)
         try:
             generic = sync_generic_masters()
         except Exception as exc:
@@ -5204,6 +5256,7 @@ def sync_once() -> Dict[str, int]:
                 raise SyncOfflineError(str(exc)) from exc
             raise RuntimeError(f"sync_generic_masters: {type(exc).__name__}: {exc}") from exc
 
+        _check_sync_cancelled(cancel_event)
         try:
             pulled = pull_server_changes()
         except Exception as exc:
@@ -5211,6 +5264,7 @@ def sync_once() -> Dict[str, int]:
                 raise SyncOfflineError(str(exc)) from exc
             raise RuntimeError(f"pull_server_changes: {type(exc).__name__}: {exc}") from exc
 
+        _check_sync_cancelled(cancel_event)
         try:
             conn = _connect()
             try:
@@ -5223,6 +5277,8 @@ def sync_once() -> Dict[str, int]:
             if _is_offline_network_error(exc):
                 raise SyncOfflineError(str(exc)) from exc
             raise RuntimeError(f"authoritative_reconcile: {type(exc).__name__}: {exc}") from exc
+    except SyncCancelledError:
+        raise
     except SyncOfflineError:
         raise
     except Exception as exc:
@@ -5233,6 +5289,7 @@ def sync_once() -> Dict[str, int]:
     # Siapkan cadangan kecil untuk Resi/Manifest agar perangkat yang baru saja
     # online tetap dapat membuat beberapa dokumen jika Wi-Fi putus sesaat. Invoice
     # sengaja tidak diprefetch karena sinkronisasi invoice belum termasuk scope.
+    _check_sync_cancelled(cancel_event)
     try:
         reserved_ranges = numbering_service.prefetch_local_reservations()
         if reserved_ranges:
@@ -5269,7 +5326,7 @@ def sync_once() -> Dict[str, int]:
 _SYNC_RETRY_DELAYS_SECONDS = (0.8, 1.8)
 
 
-def _sync_once_with_network_retry() -> Dict[str, int]:
+def _sync_once_with_network_retry(cancel_event=None) -> Dict[str, int]:
     """Jalankan satu siklus sync dengan retry terbatas untuk error jaringan.
 
     sync_once dirancang agar dapat dilanjutkan: event outbox yang sudah berhasil
@@ -5277,8 +5334,11 @@ def _sync_once_with_network_retry() -> Dict[str, int]:
     pada level siklus hanya dilakukan untuk SyncOfflineError, bukan error umum.
     """
     for attempt in range(len(_SYNC_RETRY_DELAYS_SECONDS) + 1):
+        _check_sync_cancelled(cancel_event)
         try:
-            return sync_once()
+            return sync_once(cancel_event=cancel_event)
+        except SyncCancelledError:
+            raise
         except SyncOfflineError:
             if attempt >= len(_SYNC_RETRY_DELAYS_SECONDS):
                 raise
@@ -5289,7 +5349,11 @@ def _sync_once_with_network_retry() -> Dict[str, int]:
                 len(_SYNC_RETRY_DELAYS_SECONDS) + 1,
                 delay,
             )
-            time.sleep(delay)
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise SyncCancelledError("Retry sinkronisasi dibatalkan saat shutdown.")
+            else:
+                time.sleep(delay)
 
     # Defensive fallback: loop selalu return atau raise.
     raise SyncOfflineError("Sync gagal setelah percobaan ulang jaringan.")
@@ -5307,6 +5371,7 @@ class AutoSyncController:
 
         self._worker_lock = threading.Lock()
         self._worker_thread = None
+        self._cancel_event = threading.Event()
         self._stopping = False
         self._offline_logged = False
 
@@ -5315,9 +5380,22 @@ class AutoSyncController:
 
     def _run_worker(self):
         try:
-            result = _sync_once_with_network_retry()
+            result = _sync_once_with_network_retry(cancel_event=self._cancel_event)
+            # sync_once() mengembalikan dua counter saja bila sesi Supabase
+            # belum dapat dipulihkan. Perlakukan ini sebagai offline, bukan
+            # siklus sync sukses. Pemeriksaan sesi berlangsung di worker ini.
+            if set(result) == {"pushed", "pulled"}:
+                if not self._offline_logged:
+                    print(
+                        "[SYNC] Offline — perubahan disimpan lokal, akan disinkronkan saat online.",
+                        flush=True,
+                    )
+                    self._offline_logged = True
+                return
             self._offline_logged = False
             print(f"[SYNC] {result}", flush=True)
+        except SyncCancelledError:
+            logger.debug("[SYNC] Worker dihentikan secara terkoordinasi.")
         except SyncOfflineError:
             if not self._offline_logged:
                 print(
@@ -5348,11 +5426,9 @@ class AutoSyncController:
 
         worker_started = False
         try:
-            # Pastikan lock tetap dilepas jika pemulihan sesi gagal atau
-            # melempar exception sebelum thread worker berhasil dijalankan.
-            if not _ensure_online_session():
-                return
-
+            # Jangan melakukan request Supabase di callback QTimer/GUI thread.
+            # sync_once() menjalankan pemulihan sesi di dalam worker,
+            # sehingga timeout jaringan tidak membekukan event loop Qt.
             worker = threading.Thread(
                 target=self._run_worker,
                 name="KargoSyncWorker",
@@ -5385,6 +5461,7 @@ class AutoSyncController:
     def stop(self, *, wait: bool = False, timeout: float = 5.0):
         self._stopping = True
         self.timer.stop()
+        self._cancel_event.set()
 
         worker = self._worker_thread
         if wait and worker is not None and worker.is_alive():

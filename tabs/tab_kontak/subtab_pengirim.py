@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QTableWidget,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -30,7 +30,7 @@ from utils.input_style_helper import (
 from utils.typography import get_fixed_font_sizes_pt, get_master_font
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
-from utils.table_helper import buat_tabel_item
+from utils.table_helper import ModelTableView
 from utils.date_ind_format import format_tanggal_ke_ui
 
 
@@ -147,15 +147,20 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         header.insertWidget(2, self.btn_tambah_pengirim)
         layout.addLayout(header)
 
-        self.tabel_pengirim = QTableWidget()
+        self.tabel_pengirim = ModelTableView(parent=self)
         self._konfigurasi_tabel(
             self.tabel_pengirim,
             self.HEADER_PENGIRIM,
             editable=True,
         )
         self.tabel_pengirim.setColumnHidden(self.KOL_ID, True)
-        self.tabel_pengirim.itemChanged.connect(self.simpan_edit_pengirim_dari_tabel)
-        self.tabel_pengirim.cellClicked.connect(self.pilih_pengirim_tampilkan_histori)
+        self.tabel_pengirim.clicked.connect(
+            lambda index: self.pilih_pengirim_tampilkan_histori(
+                index.row(), index.column()
+            )
+        )
+        self.tabel_pengirim.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabel_pengirim.customContextMenuRequested.connect(self.show_context_menu)
         self.load_lebar_kolom(self.tabel_pengirim)
         self.tabel_pengirim.horizontalHeader().sectionResized.connect(
             lambda _index, _old, _new: self.simpan_lebar_kolom(self.tabel_pengirim)
@@ -181,7 +186,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         )
         layout.addLayout(self._buat_header(self.lbl_judul_histori, self.txt_cari_histori))
 
-        self.tabel_histori = QTableWidget()
+        self.tabel_histori = ModelTableView(parent=self)
         self._konfigurasi_tabel(self.tabel_histori, self.HEADER_HISTORI)
         self.load_lebar_kolom_histori(self.tabel_histori)
         self.tabel_histori.horizontalHeader().sectionResized.connect(
@@ -217,13 +222,8 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         tabel.setHorizontalHeaderLabels(list(headers))
         tabel.verticalHeader().setVisible(False)
         tabel.setAlternatingRowColors(True)
-        tabel.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.EditKeyPressed
-            | QAbstractItemView.EditTrigger.SelectedClicked
-            if editable
-            else QAbstractItemView.EditTrigger.NoEditTriggers
-        )
+        # Data master diedit dari popup klik-kanan, bukan inline.
+        tabel.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         if editable:
             tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -251,11 +251,14 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
     def _filter_tabel(tabel, keyword, columns):
         keyword = keyword.lower().strip()
         for row in range(tabel.rowCount()):
-            match = any(
-                (item := tabel.item(row, col))
-                and keyword in item.text().lower()
-                for col in columns
-            )
+            if hasattr(tabel, "searchText"):
+                match = keyword in tabel.searchText(row, columns)
+            else:
+                match = any(
+                    (item := tabel.item(row, col))
+                    and keyword in item.text().casefold()
+                    for col in columns
+                )
             tabel.setRowHidden(row, not match)
 
     @db_service.profile_performance("KontakPengirim.search_filter", threshold=0.025)
@@ -275,35 +278,19 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         )
 
     def _isi_baris_pengirim(self, baris, data):
-        nilai = (
-            (self.KOL_NO, baris + 1, False, Qt.AlignmentFlag.AlignCenter),
-            (self.KOL_ID, data[0], False, Qt.AlignmentFlag.AlignCenter),
-            (
-                self.KOL_NAMA_PENGIRIM,
-                data[2],
-                True,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            ),
-            (self.KOL_TELEPON, data[3], True, Qt.AlignmentFlag.AlignCenter),
-            (
-                self.KOL_ALAMAT,
-                data[4],
-                True,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            ),
-            (self.KOL_KOTA, data[5], True, Qt.AlignmentFlag.AlignLeft),
+        return (
+            str(baris + 1),
+            str(data[0] or ""),
+            str(data[2] or ""),
+            str(data[3] or ""),
+            str(data[4] or ""),
+            str(data[5] or ""),
         )
-        for kolom, teks, editable, alignment in nilai:
-            self.tabel_pengirim.setItem(
-                baris,
-                kolom,
-                buat_tabel_item(teks, editable=editable, alignment=alignment),
-            )
 
-    def _buat_form_tambah_pengirim(self):
+    def _buat_form_tambah_pengirim(self, initial_data=None, title="Tambah Pengirim"):
         dialog = QDialog(self)
         terapkan_style_input_global(dialog, self._tema_gelap_aktif())
-        dialog.setWindowTitle("Tambah Pengirim")
+        dialog.setWindowTitle(title)
         dialog.setModal(True)
         dialog.setMinimumWidth(KONTAK_ADD_DIALOG_MIN_WIDTH)
         layout = QVBoxLayout(dialog)
@@ -321,6 +308,9 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         ):
             fields[key].setPlaceholderText(placeholder)
             fields[key].setMinimumWidth(KONTAK_ADD_FIELD_MIN_WIDTH)
+        if initial_data:
+            for key in fields:
+                fields[key].setText(str(initial_data.get(key, "") or ""))
         atur_tinggi_input(tuple(fields.values()))
         for key in ("nama", "alamat", "kota"):
             fields[key].textChanged.connect(
@@ -373,82 +363,117 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
         dialog.adjustSize()
         dialog.exec()
 
-    @db_service.profile_performance("KontakPengirim.load_data", threshold=0.05)
-    def load_data_pengirim(self):
-        self.tabel_pengirim.setUpdatesEnabled(False)
-        self.tabel_pengirim.blockSignals(True)
-        self.tabel_pengirim.setRowCount(0)
-        self.tabel_histori.setRowCount(0)
-        try:
-            rows = db_service.ambil_semua_master_pengirim(
-                CURRENT_SESSION.get("kode_cabang", "PUSAT")
-            )
-            for baris, data in enumerate(rows):
-                self.tabel_pengirim.insertRow(baris)
-                self._isi_baris_pengirim(baris, data)
-        except Exception as e:
-            print(f"Error Load Pengirim: {e}")
-        finally:
-            self.tabel_pengirim.blockSignals(False)
-            self.tabel_pengirim.setUpdatesEnabled(True)
-
-    def _ambil_data_edit_pengirim(self, row):
-        tabel = self.tabel_pengirim
-        return (
-            tabel.item(row, self.KOL_ID).text().strip(),
-            tabel.item(row, self.KOL_NAMA_PENGIRIM).text().strip().upper(),
-            tabel.item(row, self.KOL_TELEPON).text().strip(),
-            tabel.item(row, self.KOL_ALAMAT).text().strip().upper(),
-            tabel.item(row, self.KOL_KOTA).text().strip().upper(),
-        )
-
-    def _terapkan_data_edit_pengirim(self, row, nama, alamat, kota):
-        self.tabel_pengirim.blockSignals(True)
-        try:
-            for kolom, nilai in (
-                (self.KOL_NAMA_PENGIRIM, nama),
-                (self.KOL_ALAMAT, alamat),
-                (self.KOL_KOTA, kota),
-            ):
-                self.tabel_pengirim.item(row, kolom).setText(nilai)
-        finally:
-            self.tabel_pengirim.blockSignals(False)
-
-    def simpan_edit_pengirim_dari_tabel(self, item):
-        if not item or item.column() in [self.KOL_NO, self.KOL_ID]:
+    def show_context_menu(self, pos):
+        item = self.tabel_pengirim.itemAt(pos)
+        if item is None:
             return
-        row = item.row()
+        self.tabel_pengirim.selectRow(item.row())
+        menu = QMenu(self)
+        action_edit = menu.addAction("Edit Pengirim...")
+        action = menu.exec(self.tabel_pengirim.viewport().mapToGlobal(pos))
+        if action == action_edit:
+            self.tampilkan_dialog_edit_pengirim(item.row())
+
+    def tampilkan_dialog_edit_pengirim(self, row):
+        current = self.tabel_pengirim.model().rowValues(row)
+        if not current:
+            return
+        initial = {
+            "nama": current[self.KOL_NAMA_PENGIRIM],
+            "no_hp": current[self.KOL_TELEPON],
+            "alamat": current[self.KOL_ALAMAT],
+            "kota": current[self.KOL_KOTA],
+        }
+        dialog, fields, tombol = self._buat_form_tambah_pengirim(
+            initial_data=initial,
+            title="Edit Pengirim",
+        )
+        tombol.accepted.connect(
+            lambda: self._simpan_edit_pengirim_popup(row, dialog, fields)
+        )
+        fields["nama"].setFocus()
+        dialog.adjustSize()
+        dialog.exec()
+
+    def _simpan_edit_pengirim_popup(self, row, dialog, fields):
+        current = self.tabel_pengirim.model().rowValues(row)
+        if not current:
+            return
+        nama = fields["nama"].text().strip().upper()
+        no_hp = fields["no_hp"].text().strip()
+        alamat = fields["alamat"].text().strip().upper()
+        kota = fields["kota"].text().strip().upper()
+        if not nama:
+            QMessageBox.warning(dialog, "Data Belum Lengkap", "Nama pengirim wajib diisi.")
+            fields["nama"].setFocus()
+            return
         try:
-            id_pengirim, nama, no_hp, alamat, kota = self._ambil_data_edit_pengirim(row)
-            sukses, _pesan = db_service.update_master_pengirim_dari_tabel(
-                id_pengirim, CURRENT_SESSION.get("kode_cabang", "PUSAT"),
+            sukses, pesan = db_service.update_master_pengirim_dari_tabel(
+                str(current[self.KOL_ID]).strip(),
+                CURRENT_SESSION.get("kode_cabang", "PUSAT"),
                 nama, no_hp, kota, alamat,
             )
             if not sukses:
-                self.refresh_session_ui()
+                QMessageBox.warning(
+                    dialog,
+                    "Gagal Mengubah Pengirim",
+                    pesan or "Data pengirim tidak dapat diperbarui.",
+                )
                 return
-            self._terapkan_data_edit_pengirim(row, nama, alamat, kota)
+            updated = list(current)
+            updated[self.KOL_NAMA_PENGIRIM] = nama
+            updated[self.KOL_TELEPON] = no_hp
+            updated[self.KOL_ALAMAT] = alamat
+            updated[self.KOL_KOTA] = kota
+            self.tabel_pengirim.setRowValues(row, updated)
+            self.filter_pencarian_tabel()
+            dialog.accept()
+            if self.tabel_pengirim.currentRow() == row:
+                self.pilih_pengirim_tampilkan_histori(row, self.KOL_NAMA_PENGIRIM)
+        except Exception as error:
+            QMessageBox.critical(dialog, "Error", f"Gagal memperbarui pengirim: {error}")
+
+    @db_service.profile_performance("KontakPengirim.load_data", threshold=0.05)
+    def load_data_pengirim(self):
+        tabel = self.tabel_pengirim
+        tabel.setUpdatesEnabled(False)
+        try:
+            rows = db_service.ambil_semua_master_pengirim(
+                CURRENT_SESSION.get("kode_cabang", "PUSAT")
+            ) or []
+            display_rows = [
+                self._isi_baris_pengirim(baris, data)
+                for baris, data in enumerate(rows)
+            ]
+            tabel.setRows(
+                display_rows,
+                alignments=(
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                ),
+            )
+            self.tabel_histori.setRows([])
+            self.lbl_judul_histori.setText("Riwayat Pengiriman")
         except Exception as e:
-            print(f"Error simpan edit pengirim: {e}")
-            self.refresh_session_ui()
+            print(f"Error Load Pengirim: {e}")
+        finally:
+            tabel.setUpdatesEnabled(True)
 
     def _isi_baris_histori(self, baris, h):
         ongkir = f"{int(h[6]):,}".replace(",", ".") if h[6] else "0"
-        nilai = (
-            (format_tanggal_ke_ui(h[0]), Qt.AlignmentFlag.AlignCenter),
-            (h[1], Qt.AlignmentFlag.AlignCenter),
-            (h[2], Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            (h[3] if h[3] else "-", Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-            (h[4] if h[4] else "-", Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-            (h[5] if h[5] else "-", Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-            (ongkir, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+        return (
+            format_tanggal_ke_ui(h[0]),
+            str(h[1]),
+            str(h[2]),
+            str(h[3]) if h[3] else "-",
+            str(h[4]) if h[4] else "-",
+            str(h[5]) if h[5] else "-",
+            ongkir,
         )
-        for kolom, (teks, alignment) in enumerate(nilai):
-            self.tabel_histori.setItem(
-                baris,
-                kolom,
-                buat_tabel_item(teks, editable=False, alignment=alignment),
-            )
 
     def pilih_pengirim_tampilkan_histori(self, row, column):
         item_nama = self.tabel_pengirim.item(row, self.KOL_NAMA_PENGIRIM)
@@ -456,25 +481,35 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
             return
 
         nama_pengirim = item_nama.text()
-        self.tabel_histori.setUpdatesEnabled(False)
-        self.tabel_histori.blockSignals(True)
-        self.tabel_histori.setRowCount(0)
-
+        tabel = self.tabel_histori
+        tabel.setUpdatesEnabled(False)
         try:
             histori_rows = db_service.ambil_histori_transaksi_by_pengirim(
                 nama_pengirim,
                 CURRENT_SESSION.get("kode_cabang", "PUSAT"),
-            )
+            ) or []
             self.lbl_judul_histori.setText(f"Riwayat Pengiriman: {nama_pengirim}")
-            for baris, histori in enumerate(histori_rows):
-                self.tabel_histori.insertRow(baris)
+            display_rows = [
                 self._isi_baris_histori(baris, histori)
+                for baris, histori in enumerate(histori_rows)
+            ]
+            tabel.setRows(
+                display_rows,
+                alignments=(
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                ),
+            )
             self.filter_pencarian_histori()
         except Exception as e:
             print(f"Error Load Histori Pengirim: {e}")
         finally:
-            self.tabel_histori.blockSignals(False)
-            self.tabel_histori.setUpdatesEnabled(True)
+            tabel.setUpdatesEnabled(True)
 
     def _settings_kolom(self):
         return QSettings(self.SETTINGS_ORGANIZATION, self.SETTINGS_APPLICATION)

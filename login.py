@@ -449,34 +449,31 @@ class LoginWindow(QWidget):
         """Bedakan gangguan jaringan dari kredensial/akun yang benar-benar invalid."""
         if error is None:
             return False
+        try:
+            from config import _is_network_error as _is_config_network_error
+            if _is_config_network_error(error):
+                return True
+        except Exception:
+            pass
         text = str(error).lower()
         network_terms = (
-            "winerror 10054",
-            "connectionreseterror",
-            "connection reset",
-            "forcibly closed",
-            "remotedisconnected",
-            "remote end closed",
-            "timed out",
-            "timeout",
-            "urlerror",
-            "name or service not known",
-            "temporary failure in name resolution",
-            "getaddrinfo failed",
-            "network is unreachable",
-            "connection aborted",
-            "connection refused",
-            "ssl",
+            "winerror 10054", "connectionreseterror", "connection reset",
+            "forcibly closed", "remotedisconnected", "remote end closed",
+            "timed out", "timeout", "urlerror", "name or service not known",
+            "temporary failure in name resolution", "getaddrinfo failed",
+            "network is unreachable", "connection aborted", "connection refused",
+            "connecterror", "readerror", "remoteprotocolerror", "proxyerror",
         )
-        return any(term in text for term in network_terms)
+        return any(term in text or term in type(error).__name__.lower() for term in network_terms)
 
-    def _try_offline_restore(self, identifier, error=None) -> bool:
-        """Masuk memakai cache lokal bila restore Supabase gagal karena jaringan."""
+    def _try_offline_restore(self, identifier, password, error=None) -> bool:
+        """Restore cache offline setelah autentikasi gagal akibat gangguan jaringan."""
         if not self._is_network_error(error):
             return False
         try:
             from config import _verifikasi_login_offline_cache
-            hasil = _verifikasi_login_offline_cache(identifier)
+            # Password wajib diteruskan untuk memverifikasi verifier PBKDF2.
+            hasil = _verifikasi_login_offline_cache(identifier, password)
             return bool(hasil and hasil[0])
         except Exception as exc:
             print(f"[SESSION] Offline restore gagal: {type(exc).__name__}: {exc}", flush=True)
@@ -515,6 +512,7 @@ class LoginWindow(QWidget):
                         identifier,
                         password,
                         progress_callback=self.auth_progress.emit,
+                        preserve_session_on_network_failure=(mode == "restore"),
                     )
                 )
             sukses, role_user, nama_lengkap = hasil
@@ -549,7 +547,7 @@ class LoginWindow(QWidget):
             offline_ok = False
             if mode == "restore":
                 with _phase_timer("Auth.offline_restore_cache"):
-                    offline_ok = self._try_offline_restore(identifier, exc)
+                    offline_ok = self._try_offline_restore(identifier, password, exc)
             if offline_ok:
                 self._auth_error = None
                 self._auth_result = {

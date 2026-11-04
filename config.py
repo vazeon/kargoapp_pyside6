@@ -6,21 +6,43 @@ import os
 import sqlite3
 import time
 from contextlib import nullcontext
-from supabase_client import supabase
-
-def _is_network_error(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    name = type(exc).__name__.lower()
-    markers = (
-        "connecterror", "connecttimeout", "getaddrinfo failed",
-        "network is unreachable", "connection reset", "connection refused",
-        "connection aborted", "winerror 10054", "winerror 10060",
-        "errno 11001", "errno 10054", "errno 10060", "timed out",
-    )
-    return any(marker in text or marker in name for marker in markers)
-
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from supabase_client import supabase
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Kenali kegagalan jaringan sementara, termasuk exception yang dibungkus SDK."""
+    current = exc
+    visited = set()
+    markers = (
+        "connecterror", "connecttimeout", "connectionerror", "readerror",
+        "writeerror", "pooltimeout", "proxyerror", "remoteprotocolerror",
+        "networkerror", "getaddrinfo failed", "name or service not known",
+        "temporary failure in name resolution", "network is unreachable",
+        "connection reset", "connection refused", "connection aborted",
+        "remote end closed", "winerror 10054", "winerror 10060",
+        "errno 11001", "errno 10054", "errno 10060", "timed out",
+        "timeout", "forcibly closed",
+    )
+    transient_http_statuses = {408, 425, 429, 500, 502, 503, 504, 522, 523, 524}
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        text = str(current).lower()
+        name = type(current).__name__.lower()
+        if any(marker in text or marker in name for marker in markers):
+            return True
+        try:
+            status = int(getattr(current, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status in transient_http_statuses:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE_NAME = "database_cargo.db"
@@ -149,18 +171,31 @@ def _verifikasi_login_supabase(
     email: str,
     password: str,
     progress_callback=None,
+    *,
+    preserve_session_on_network_failure: bool = False,
+    allow_offline_fallback: bool = True,
+    cancel_event=None,
 ) -> Optional[Tuple[bool, str, str]]:
     """
     Login melalui Supabase Auth.
 
-    Login dianggap sukses hanya bila Auth + profile + cabang berhasil dimuat
-    seluruhnya. Bila tahap lanjutan gagal setelah Auth berhasil, sesi Supabase
-    dibatalkan dan CURRENT_SESSION dikembalikan ke keadaan kosong.
+    Pada login interaktif, kegagalan setelah Auth dibersihkan seperti biasa.
+    Pada pemulihan session background, kegagalan jaringan sementara tidak boleh
+    menghapus CURRENT_SESSION atau membatalkan session yang sedang dipakai.
     """
     CURRENT_SESSION["db_name"] = db_aktif
     authenticated = False
     login_complete = False
+    failure_exc = None
+
+    def _check_cancelled():
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError(
+                "Pemulihan session dibatalkan karena aplikasi sedang ditutup."
+            )
+
     try:
+        _check_cancelled()
         _emit_login_progress(progress_callback, "MENGHUBUNGI SERVER...")
         with _performance_phase("Auth.supabase_sign_in"):
             response = supabase.auth.sign_in_with_password({
@@ -176,6 +211,7 @@ def _verifikasi_login_supabase(
         if not user_id:
             return False, None, None
         authenticated = True
+        _check_cancelled()
 
         # Query baca dijalankan berurutan secara konservatif. Ini menghindari
         # permintaan paralel tepat setelah token baru diterbitkan, yang pada
@@ -203,11 +239,18 @@ def _verifikasi_login_supabase(
                         )
                         # Retry terbatas untuk error timestamp yang sporadis.
                         # Tidak mengubah token maupun melemahkan validasi JWT.
-                        time.sleep(1.0)
+                        if cancel_event is not None:
+                            if cancel_event.wait(1.0):
+                                raise InterruptedError(
+                                    "Pemulihan session dibatalkan karena aplikasi sedang ditutup."
+                                )
+                        else:
+                            time.sleep(1.0)
                         continue
                     raise
             raise RuntimeError("Permintaan baca Supabase gagal setelah retry.")
 
+        _check_cancelled()
         profile_response = _execute_read_with_one_retry(
             lambda: (
                 supabase
@@ -222,6 +265,7 @@ def _verifikasi_login_supabase(
             "Auth.supabase_profile_query",
         )
 
+        _check_cancelled()
         _emit_login_progress(progress_callback, "MEMUAT DAFTAR CABANG...")
         cabang_response = _execute_read_with_one_retry(
             lambda: (
@@ -235,6 +279,7 @@ def _verifikasi_login_supabase(
             ),
             "Auth.supabase_branch_list_query",
         )
+        _check_cancelled()
 
         profile = profile_response.data
         if not isinstance(profile, dict):
@@ -318,27 +363,49 @@ def _verifikasi_login_supabase(
         return True, role, nama_lengkap
 
     except Exception as exc:
-        if _is_network_error(exc) and not authenticated:
-            cached = _verifikasi_login_offline_cache(email, password)
-            if cached:
+        failure_exc = exc
+        if cancel_event is not None and cancel_event.is_set():
+            raise
+
+        if _is_network_error(exc):
+            if not authenticated and allow_offline_fallback:
+                cached = _verifikasi_login_offline_cache(email, password)
+                if cached:
+                    print(
+                        "INFO: Offline login aktif — memakai cache akun lokal "
+                        f"({str(email).strip()}).",
+                        flush=True,
+                    )
+                    return cached
                 print(
-                    "INFO: Offline login aktif — memakai cache akun lokal "
-                    f"({str(email).strip()}).",
+                    "INFO: Supabase offline dan akun ini belum pernah login online "
+                    "di komputer ini.",
                     flush=True,
                 )
-                return cached
-            print(
-                "INFO: Supabase offline dan akun ini belum pernah login online "
-                "di komputer ini.",
-                flush=True,
-            )
+
+            # Dalam proses pemulihan background, pertahankan session aplikasi
+            # dan token yang baru diterbitkan. Worker berikutnya dapat mencoba
+            # lagi setelah jaringan pulih; jangan sign_out/reset pada timeout.
+            if authenticated and preserve_session_on_network_failure:
+                raise
         else:
             print(f"WARNING: Login Supabase gagal: {exc}", flush=True)
         return False, None, None
     finally:
-        # Jangan pernah meninggalkan access token valid ketika login tidak
-        # selesai sampai tahap pembentukan session aplikasi.
-        if authenticated and not login_complete:
+        # Kegagalan definitif dibersihkan; timeout atau pembatalan worker
+        # bukan alasan untuk logout dari aplikasi.
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        transient_recovery_failure = (
+            preserve_session_on_network_failure
+            and failure_exc is not None
+            and _is_network_error(failure_exc)
+        )
+        if (
+            authenticated
+            and not login_complete
+            and not cancelled
+            and not transient_recovery_failure
+        ):
             try:
                 supabase.auth.sign_out()
             except Exception:
@@ -892,6 +959,10 @@ def verifikasi_login_sistem(
     username_input: Any,
     password_input: Any,
     progress_callback=None,
+    *,
+    preserve_session_on_network_failure: bool = False,
+    allow_offline_fallback: bool = True,
+    cancel_event=None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """Memverifikasi login dan memilih database sesuai mode akun.
 
@@ -912,6 +983,9 @@ def verifikasi_login_sistem(
             login_identifier,
             password,
             progress_callback=progress_callback,
+            preserve_session_on_network_failure=preserve_session_on_network_failure,
+            allow_offline_fallback=allow_offline_fallback,
+            cancel_event=cancel_event,
         )
 
     # DEV_SUPER adalah username lokal yang dicadangkan. Kredensial yang salah

@@ -1,6 +1,13 @@
 #tabs/tab_manifest.py
 import re
-from PySide6.QtCore import QDate, QSettings, QStringListModel, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QDate,
+    QModelIndex,
+    QSettings,
+    QStringListModel,
+    Qt,
+)
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -17,7 +24,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -27,7 +33,7 @@ from PySide6.QtWidgets import (
 from config import CURRENT_SESSION, DATA_CLIENT
 
 from delegates.status_delegate import (
-    attach_status_delegate,
+    StatusColorDelegate,
     update_status_delegate_theme,
 )
 
@@ -45,7 +51,7 @@ from themes.modules.manifest import (
 )
 
 from utils.printer.print_manifest import cetak_manifest_ke_printer
-from utils.frozen_table_helper import FrozenTableWidget
+from utils.frozen_table_helper import FrozenTableView
 from utils.typography import (
     get_fixed_font_sizes,
     konversi_style_font_ke_point,
@@ -56,7 +62,7 @@ from utils.number_formatters import (
     format_angka_indonesia,
     format_ke_rupiah,
 )
-from utils.table_helper import atur_editor_sel, buat_tabel_item
+from utils.table_helper import atur_editor_sel
 from utils.date_ind_format import format_tanggal_ke_ui
 
 
@@ -112,22 +118,229 @@ def _get_manifest_delegate_colors(
     belong = str(status or "").strip().upper() == "BELONG"
     return get_manifest_row_highlight(is_dark, belong), None
 
-class EditableOnDoubleClickLineEdit(QLineEdit):
-    """QLineEdit yang tidak mengambil fokus saat hover/klik tunggal,
-    tetapi aktif untuk diedit saat double click."""
+
+MANIFEST_TABLE_COLUMN_COUNT = 13
+MANIFEST_KOL_CHECK = 0
+MANIFEST_KOL_KET = 12
+
+
+class _ManifestTableRow:
+    """Record ringan satu baris Manifest untuk model tabel."""
+
+    __slots__ = ("values", "checked", "status_tag")
+
+    def __init__(self, values, checked=False, status_tag=""):
+        self.values = tuple(values)
+        self.checked = bool(checked)
+        self.status_tag = str(status_tag or "")
+
+
+class ManifestTableModel(QAbstractTableModel):
+    """Model Manifest dengan penyimpanan data ringan tanpa widget permanen per sel."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._headers = []
+        self._rows = []
+        self._column_count = 0
+        self._alignments = ()
 
-    def mouseDoubleClickEvent(self, event):
-        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.setFocus()
-        self.selectAll()
-        super().mouseDoubleClickEvent(event)
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
 
-    def focusOutEvent(self, event):
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        super().focusOutEvent(event)
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else self._column_count
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+
+        row_number = index.row()
+        column = index.column()
+        if not (0 <= row_number < len(self._rows)):
+            return None
+        if not (0 <= column < self._column_count):
+            return None
+
+        row = self._rows[row_number]
+
+        if role == Qt.ItemDataRole.CheckStateRole and column == MANIFEST_KOL_CHECK:
+            return Qt.CheckState.Checked if row.checked else Qt.CheckState.Unchecked
+
+        if role == Qt.ItemDataRole.UserRole and column == MANIFEST_KOL_CHECK:
+            return row.status_tag
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if column < len(self._alignments):
+                return self._alignments[column]
+            return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+        if role == Qt.ItemDataRole.ToolTipRole and column == MANIFEST_KOL_KET:
+            return "Klik dua kali untuk mengisi atau mengubah keterangan resi."
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            value = row.values[column]
+            # Meniru placeholder QLineEdit lama tanpa membuat widget per baris.
+            if column == MANIFEST_KOL_KET and not value:
+                return "Ket..."
+            return value
+
+        if role == Qt.ItemDataRole.EditRole:
+            return row.values[column]
+
+        return None
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if not index.isValid():
+            return False
+
+        row_number = index.row()
+        column = index.column()
+        if not (0 <= row_number < len(self._rows)):
+            return False
+        if not (0 <= column < self._column_count):
+            return False
+
+        row = self._rows[row_number]
+
+        if column == MANIFEST_KOL_CHECK and role == Qt.ItemDataRole.CheckStateRole:
+            try:
+                checked = int(value) == int(Qt.CheckState.Checked)
+            except (TypeError, ValueError):
+                checked = value == Qt.CheckState.Checked
+            if row.checked == checked:
+                return True
+            row.checked = checked
+            self.dataChanged.emit(index, index, [int(Qt.ItemDataRole.CheckStateRole)])
+            return True
+
+        if column == MANIFEST_KOL_KET and role in (
+            Qt.ItemDataRole.EditRole,
+            Qt.ItemDataRole.DisplayRole,
+        ):
+            text = str(value or "").strip().upper()
+            if row.values[column] == text:
+                return True
+            values = list(row.values)
+            values[column] = text
+            row.values = tuple(values)
+            self.dataChanged.emit(
+                index,
+                index,
+                [int(Qt.ItemDataRole.DisplayRole), int(Qt.ItemDataRole.EditRole)],
+            )
+            return True
+
+        return False
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+
+        flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if index.column() == MANIFEST_KOL_CHECK:
+            flags |= Qt.ItemFlag.ItemIsUserCheckable
+        elif index.column() == MANIFEST_KOL_KET:
+            flags |= Qt.ItemFlag.ItemIsEditable
+        return flags
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role != Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self._headers):
+            return self._headers[section]
+        return None
+
+    def setColumnCount(self, count):
+        count = max(0, int(count))
+        self.beginResetModel()
+        self._column_count = count
+        self._headers = (
+            self._headers[:count]
+            + [""] * max(0, count - len(self._headers))
+        )
+        self._rows = []
+        self.endResetModel()
+
+    def setHeaders(self, labels):
+        self._headers = list(labels or [])[:self._column_count]
+        if self._headers:
+            self.headerDataChanged.emit(
+                Qt.Orientation.Horizontal, 0, len(self._headers) - 1
+            )
+
+    def setAlignments(self, alignments):
+        self._alignments = tuple(alignments or ())
+
+    def setRows(self, rows):
+        prepared = list(rows or [])
+        self.beginResetModel()
+        self._rows = prepared
+        self.endResetModel()
+
+
+class ManifestTableView(FrozenTableView):
+    """QTableView Manifest dengan tiga kolom kiri beku."""
+
+    def __init__(self, parent=None):
+        super().__init__(
+            parent,
+            frozen_cols=3,
+            fixed_cols=(MANIFEST_KOL_CHECK,),
+            fixed_widths={MANIFEST_KOL_CHECK: MANIFEST_DEFAULT_COLUMN_WIDTHS[0]},
+        )
+        self._manifest_model = ManifestTableModel(self)
+        self.setModel(self._manifest_model)
+
+    def setColumnCount(self, count):
+        self._manifest_model.setColumnCount(count)
+        self.sync_frozen_columns()
+
+    def setHorizontalHeaderLabels(self, labels):
+        self._manifest_model.setHeaders(labels)
+
+    def rowCount(self):
+        return self._manifest_model.rowCount()
+
+    def columnCount(self):
+        return self._manifest_model.columnCount()
+
+
+class ManifestStatusDelegate(StatusColorDelegate):
+    """Delegate highlight Manifest sekaligus editor on-demand untuk Keterangan."""
+
+    def createEditor(self, parent, option, index):
+        if index.column() != MANIFEST_KOL_KET:
+            return None
+
+        editor = QLineEdit(parent)
+        editor.setObjectName("manifestKetCell")
+        editor.setFrame(False)
+        editor.setPlaceholderText("Ket...")
+        editor.textChanged.connect(
+            lambda _text, widget=editor: paksa_kapital_lineedit(widget)
+        )
+        atur_editor_sel(editor)
+        return editor
+
+    def setEditorData(self, editor, index):
+        if not isinstance(editor, QLineEdit):
+            return super().setEditorData(editor, index)
+        editor.setText(str(index.data(Qt.ItemDataRole.EditRole) or ""))
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        if not isinstance(editor, QLineEdit):
+            return super().setModelData(editor, model, index)
+        model.setData(
+            index,
+            editor.text().strip().upper(),
+            Qt.ItemDataRole.EditRole,
+        )
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
 
 class TabManifest(QWidget):
     KOL_CHECK = 0
@@ -398,8 +611,6 @@ class TabManifest(QWidget):
         self.lbl_input_keterangan = self._buat_label_input_manifest("Ket:")
 
         self.cb_jenis_truk = QComboBox()
-        self.cb_jenis_truk.addItem("- Pilih jenis -")
-        self.cb_jenis_truk.addItems(["TB", "Tronton", "CDD", "Pick-up", "Lainnya..."])
         self._konfigurasi_widget_expanding(self.cb_jenis_truk, MANIFEST_TRUCK_TYPE_MIN_WIDTH)
         self.cb_jenis_truk.currentIndexChanged.connect(
             self.on_jenis_truk_manifest_changed
@@ -412,6 +623,7 @@ class TabManifest(QWidget):
             MANIFEST_TRUCK_DETAIL_MIN_WIDTH,
         )
         self.txt_jenis_truk_lain.hide()
+        self._muat_opsi_jenis_truk_manifest()
 
         self.txt_no_pol = QLineEdit()
         self._konfigurasi_lineedit_kapital(self.txt_no_pol, "No. Pol", MANIFEST_TRUCK_DETAIL_MIN_WIDTH)
@@ -488,29 +700,47 @@ class TabManifest(QWidget):
         )
 
     def _pasang_delegate_manifest(self, tabel, is_dark):
-        attach_status_delegate(
-            tabel,
+        delegate = ManifestStatusDelegate(
             status_column=self.KOL_CHECK,
             status_role=Qt.ItemDataRole.UserRole,
             color_provider=_get_manifest_delegate_colors,
             is_dark=is_dark,
             selected_checkbox_color="#ffffff",
+            parent=tabel,
         )
+        tabel.setItemDelegate(delegate)
+        # Dipakai oleh update_status_delegate_theme() saat tema berubah.
+        setattr(tabel, "_status_color_delegate", delegate)
 
     def _bangun_tabel_manifest(self, layout_kiri):
-        lebar_ceklis = self.DEFAULT_COLUMN_WIDTHS[0]  # Ambil langsung dari tuple index 0
-
-        self.tabel_manifest = FrozenTableWidget(
-            frozen_cols=3,
-            fixed_cols=[0],
-            fixed_widths={0: lebar_ceklis},
-        )
-        self.tabel_manifest.setColumnCount(13)
+        self.tabel_manifest = ManifestTableView(self)
+        self.tabel_manifest.setColumnCount(MANIFEST_TABLE_COLUMN_COUNT)
         self.tabel_manifest.setHorizontalHeaderLabels([
             "✔", "NO.", "RESI", "TGL MASUK", "PENGIRIM", "PENERIMA",
             "TUJUAN", "NAMA BARANG", "KOLI", "BERAT (kg)", "KUBIK (m3)",
             "ONGKIR (Rp)", "KETERANGAN",
         ])
+        self.tabel_manifest.model().setAlignments((
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+            *(
+                self._alignment_cell_resi_manifest(column)
+                for column in range(self.KOL_RESI, self.KOL_CBM + 1)
+            ),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        ))
+        self.tabel_manifest.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked,
+        )
+        self.tabel_manifest.setWordWrap(False)
+        self.tabel_manifest.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.tabel_manifest.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel,
+        )
+        self.tabel_manifest.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel,
+        )
         self.tabel_manifest.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows,
         )
@@ -598,6 +828,60 @@ class TabManifest(QWidget):
         if not pilih_lainnya:
             self.txt_jenis_truk_lain.clear()
 
+    def _muat_opsi_jenis_truk_manifest(self, jenis_terpilih=None):
+        """Muat opsi jenis dari sumber data yang sama dengan Subtab Truk."""
+        combo = getattr(self, "cb_jenis_truk", None)
+        if combo is None:
+            return
+
+        if jenis_terpilih is None:
+            sedang_lainnya = combo.currentText().strip() == "Lainnya..."
+            if sedang_lainnya:
+                pilihan = self.txt_jenis_truk_lain.text().strip()
+            elif combo.currentIndex() > 0:
+                pilihan = combo.currentText().strip()
+            else:
+                pilihan = ""
+        else:
+            pilihan = str(jenis_terpilih or "").strip()
+            sedang_lainnya = False
+
+        try:
+            daftar = db_service.ambil_daftar_jenis_truk() or []
+        except Exception as exc:
+            print(f"[Manifest] Gagal memuat pilihan jenis truk: {exc}")
+            daftar = list(getattr(db_service, "JENIS_TRUK_DEFAULT", ()))
+
+        daftar = [str(jenis).strip() for jenis in daftar if str(jenis or "").strip()]
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("- Pilih jenis -")
+            combo.addItems(daftar)
+            combo.addItem("Lainnya...")
+
+            idx_ditemukan = next(
+                (idx + 1 for idx, nama in enumerate(daftar)
+                 if nama.casefold() == pilihan.casefold()),
+                -1,
+            ) if pilihan else -1
+
+            if idx_ditemukan >= 1:
+                combo.setCurrentIndex(idx_ditemukan)
+                self.txt_jenis_truk_lain.clear()
+            elif pilihan:
+                combo.setCurrentIndex(combo.count() - 1)
+                self.txt_jenis_truk_lain.setText(pilihan.upper())
+            elif sedang_lainnya:
+                combo.setCurrentIndex(combo.count() - 1)
+            else:
+                combo.setCurrentIndex(0)
+                self.txt_jenis_truk_lain.clear()
+        finally:
+            combo.blockSignals(False)
+
+        self.on_jenis_truk_manifest_changed(combo.currentIndex())
+
     def ambil_jenis_truk_manifest(self):
         """Menghasilkan jenis truk baku untuk payload Manifest."""
         pilihan = self.cb_jenis_truk.currentText().strip()
@@ -608,26 +892,8 @@ class TabManifest(QWidget):
         return pilihan
 
     def set_jenis_truk_manifest(self, jenis):
-        """Memilih jenis umum atau mengisi kolom Lainnya untuk jenis khusus."""
-        jenis_bersih = str(jenis or "").strip()
-        if not jenis_bersih:
-            self.cb_jenis_truk.setCurrentIndex(0)
-            return
-
-        for index in range(1, self.cb_jenis_truk.count()):
-            item_text = self.cb_jenis_truk.itemText(index)
-            if item_text == "Lainnya...":
-                continue
-            if item_text.casefold() == jenis_bersih.casefold():
-                self.cb_jenis_truk.setCurrentIndex(index)
-                return
-
-        idx_lainnya = self.cb_jenis_truk.findText(
-            "Lainnya...",
-            Qt.MatchFlag.MatchFixedString,
-        )
-        self.cb_jenis_truk.setCurrentIndex(idx_lainnya)
-        self.txt_jenis_truk_lain.setText(jenis_bersih.upper())
+        """Memilih jenis dari daftar bersama atau memakai input Lainnya."""
+        self._muat_opsi_jenis_truk_manifest(str(jenis or "").strip())
 
     def _pastikan_completer_sopir(self):
         """Membuat completer sopir satu kali agar lifetime object Qt tetap stabil."""
@@ -641,6 +907,8 @@ class TabManifest(QWidget):
         self.completer_sopir.activated.connect(self.on_sopir_selected)
 
     def setup_autocomplete_truk(self):
+        # Segarkan pilihan jenis dari data Truk tiap kali autocomplete diperbarui.
+        self._muat_opsi_jenis_truk_manifest()
         try:
             rows = db_service.ambil_truk_list() or []
             sopirs = sorted(
@@ -931,22 +1199,6 @@ class TabManifest(QWidget):
         finally:
             self.cb_tahun_filter.blockSignals(False)
 
-    def _buat_item_check_manifest(self, belong):
-        item = QTableWidgetItem()
-        item.setFlags(
-            Qt.ItemFlag.ItemIsUserCheckable
-            | Qt.ItemFlag.ItemIsEnabled
-            | Qt.ItemFlag.ItemIsSelectable
-        )
-        item.setCheckState(
-            Qt.CheckState.Checked if belong else Qt.CheckState.Unchecked
-        )
-        item.setData(
-            Qt.ItemDataRole.UserRole,
-            "BELONG" if belong else "",
-        )
-        return item
-
     def _format_cell_resi_manifest(self, data, column):
         value = str(data) if data is not None else ""
         if column == self.KOL_TGL_MASUK and value:
@@ -969,71 +1221,30 @@ class TabManifest(QWidget):
 
 
 
-    @staticmethod
-    def _buat_editor_keterangan_manifest(teks=""):
-        editor = EditableOnDoubleClickLineEdit()
-        editor.setObjectName("manifestKetCell")
-        editor.setFrame(False)
-        editor.setPlaceholderText("Ket...")
-        editor.textChanged.connect(
-            lambda _text, widget=editor: paksa_kapital_lineedit(widget)
-        )
-        if teks:
-            editor.setText(str(teks).strip().upper())
-        atur_editor_sel(editor)
-        return editor
-
-    def _isi_baris_resi_manifest(self, row):
+    def _buat_data_baris_resi_manifest(self, row, pos):
+        """Ubah satu hasil query menjadi record model tanpa objek per sel."""
         row = tuple(row or ())
-        tabel = self.tabel_manifest
-        pos = tabel.rowCount()
-        tabel.insertRow(pos)
-
         manifest_row = str(row[9] or "").strip() if len(row) > 9 else ""
         belong = bool(self.is_edit_mode and manifest_row == self.edit_manifest_id)
-        tabel.setItem(pos, self.KOL_CHECK, self._buat_item_check_manifest(belong))
-        tabel.setItem(
-            pos,
-            self.KOL_NO,
-            buat_tabel_item(
-                text=str(pos + 1),
-                editable=False,
-                alignment=Qt.AlignmentFlag.AlignCenter,
-            ),
-        )
+
+        values = [""] * self.KOL_KET + [""]
+        values[self.KOL_NO] = str(pos + 1)
 
         for index in range(9):
             column = index + 2
             data = row[index] if index < len(row) else ""
-            tabel.setItem(
-                pos,
-                column,
-                buat_tabel_item(
-                    text=self._format_cell_resi_manifest(data, column),
-                    editable=False,
-                    alignment=self._alignment_cell_resi_manifest(column),
-                ),
-            )
+            values[column] = self._format_cell_resi_manifest(data, column)
 
         ongkir = row[10] if len(row) > 10 else 0
-        tabel.setItem(
-            pos,
-            self.KOL_ONGKIR,
-            buat_tabel_item(
-                text=format_ke_rupiah(ongkir) if ongkir else "-",
-                editable=False,
-                alignment=(
-                    Qt.AlignmentFlag.AlignRight
-                    | Qt.AlignmentFlag.AlignVCenter
-                ),
-            ),
-        )
+        values[self.KOL_ONGKIR] = format_ke_rupiah(ongkir) if ongkir else "-"
 
         keterangan = row[11] if belong and len(row) > 11 and row[11] else ""
-        tabel.setCellWidget(
-            pos,
-            self.KOL_KET,
-            self._buat_editor_keterangan_manifest(keterangan),
+        values[self.KOL_KET] = str(keterangan or "").strip().upper()
+
+        return _ManifestTableRow(
+            values,
+            checked=belong,
+            status_tag="BELONG" if belong else "",
         )
 
     @db_service.profile_performance("Manifest.load_available_resi", threshold=0.05)
@@ -1052,7 +1263,6 @@ class TabManifest(QWidget):
 
         tabel.blockSignals(True)
         tabel.setUpdatesEnabled(False)
-        tabel.setRowCount(0)
 
         try:
             rows = db_service.ambil_resi_untuk_manifest(
@@ -1061,10 +1271,14 @@ class TabManifest(QWidget):
                 self.is_edit_mode,
                 self.edit_manifest_id,
             ) or []
-            for row in rows:
-                self._isi_baris_resi_manifest(row)
+            prepared_rows = [
+                self._buat_data_baris_resi_manifest(row, pos)
+                for pos, row in enumerate(rows)
+            ]
+            tabel.model().setRows(prepared_rows)
             self.load_histori()
         except Exception as exc:
+            tabel.model().setRows([])
             QMessageBox.critical(
                 self,
                 "Error Load Data",
@@ -1236,28 +1450,30 @@ class TabManifest(QWidget):
 
     def _ambil_resi_terpilih_manifest(self):
         resi = []
-        for row in range(self.tabel_manifest.rowCount()):
-            if self.tabel_manifest.isRowHidden(row):
+        tabel = self.tabel_manifest
+        model = tabel.model()
+
+        for row in range(model.rowCount()):
+            if tabel.isRowHidden(row):
                 continue
 
-            item_check = self.tabel_manifest.item(row, self.KOL_CHECK)
-            item_resi = self.tabel_manifest.item(row, self.KOL_RESI)
-            if not (
-                item_check
-                and item_resi
-                and item_check.checkState() == Qt.CheckState.Checked
-            ):
+            index_check = model.index(row, self.KOL_CHECK)
+            if model.data(index_check, Qt.ItemDataRole.CheckStateRole) != Qt.CheckState.Checked:
                 continue
 
-            widget_ket = self.tabel_manifest.cellWidget(row, self.KOL_KET)
-            ket_text = (
-                widget_ket.text().strip().upper()
-                if widget_ket
-                else ""
-            )
-            nomor_resi = item_resi.text().strip()
-            if nomor_resi:
-                resi.append((nomor_resi, ket_text))
+            nomor_resi = str(
+                model.data(model.index(row, self.KOL_RESI), Qt.ItemDataRole.DisplayRole)
+                or ""
+            ).strip()
+            if not nomor_resi:
+                continue
+
+            ket_text = str(
+                model.data(model.index(row, self.KOL_KET), Qt.ItemDataRole.EditRole)
+                or ""
+            ).strip().upper()
+            resi.append((nomor_resi, ket_text))
+
         return resi
 
     def _ambil_input_armada_manifest(self):

@@ -10,6 +10,16 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY")
 
+# Batas waktu request PostgREST agar worker sync tidak menunggu jaringan
+# bermasalah terlalu lama. Nilai dapat dioverride tanpa mengubah source code.
+try:
+    SUPABASE_REST_TIMEOUT_SECONDS = max(
+        3.0,
+        min(30.0, float(os.getenv("KARGO_SUPABASE_REST_TIMEOUT", "10"))),
+    )
+except (TypeError, ValueError):
+    SUPABASE_REST_TIMEOUT_SECONDS = 10.0
+
 
 class DeveloperSupabaseAccessBlocked(RuntimeError):
     """Raised if code tries to access Supabase during a DEV_SUPER session."""
@@ -57,10 +67,46 @@ class _LazySupabaseClient:
 
                 from supabase import create_client
 
-                self._client = create_client(
-                    SUPABASE_URL,
-                    SUPABASE_PUBLISHABLE_KEY,
-                )
+                # ClientOptions pada versi supabase-py yang mendukungnya
+                # memberi timeout eksplisit pada request PostgREST. Fallback
+                # mempertahankan kompatibilitas dengan versi SDK lama yang
+                # belum menyediakan opsi ini.
+                options = None
+                try:
+                    try:
+                        from supabase.client import ClientOptions
+                    except ImportError:
+                        from supabase import ClientOptions
+                    options = ClientOptions(
+                        postgrest_client_timeout=SUPABASE_REST_TIMEOUT_SECONDS,
+                    )
+                except (ImportError, TypeError, AttributeError):
+                    options = None
+
+                if options is not None:
+                    try:
+                        self._client = create_client(
+                            SUPABASE_URL,
+                            SUPABASE_PUBLISHABLE_KEY,
+                            options=options,
+                        )
+                    except (TypeError, AttributeError) as exc:
+                        # Jangan gagalkan startup bila versi SDK yang terpasang
+                        # memiliki perbedaan pada ClientOptions.
+                        print(
+                            "[SUPABASE] Timeout khusus tidak didukung SDK ini; "
+                            f"menggunakan konfigurasi default ({type(exc).__name__}).",
+                            flush=True,
+                        )
+                        self._client = create_client(
+                            SUPABASE_URL,
+                            SUPABASE_PUBLISHABLE_KEY,
+                        )
+                else:
+                    self._client = create_client(
+                        SUPABASE_URL,
+                        SUPABASE_PUBLISHABLE_KEY,
+                    )
 
         return self._client
 

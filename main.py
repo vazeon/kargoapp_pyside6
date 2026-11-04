@@ -5,7 +5,7 @@ import faulthandler
 import threading
 import time
 import traceback
-from PySide6.QtCore import QEvent, QLocale, QSettings, QTimer, Qt
+from PySide6.QtCore import QEvent, QLocale, QObject, QSettings, QTimer, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -54,6 +54,8 @@ from themes.palette import get_theme_palette
 from login import LoginWindow
 from database_manager import init_db
 from services.sync_service import AutoSyncController
+from utils.wheel_event_policy import pasang_kebijakan_mouse_wheel
+from utils.smooth_scroll_helper import pasang_scroll_halus_global
 
 from tabs.tab_resi import TabResi
 from tabs.tab_setting import TabSettingSistem
@@ -171,6 +173,8 @@ class MainWindow(QMainWindow):
         self._logout_signout_error = None
         self._logout_poll_timer = None
         self._close_sync_wait_timer = None
+        self._close_sync_deadline = None
+        self._shutdown_worker_abandoned = False
 
         # Profiling first-visible work is opt-in and only active when requested.
         # It helps distinguish lazy construction from each tab's first showEvent.
@@ -364,6 +368,11 @@ class MainWindow(QMainWindow):
             self.tab_manifest = _LazyTabPage(self._buat_tab_manifest, self.tabs)
             self.tabs.addTab(self.tab_manifest, "Manifest")
 
+            self.tab_manifest_penagihan = _LazyTabPage(
+                self._buat_tab_manifest_penagihan, self.tabs
+            )
+            self.tabs.addTab(self.tab_manifest_penagihan, "Manifest Penagihan")
+
             self.tab_invoice = _LazyTabPage(self._buat_tab_invoice, self.tabs)
             self.tabs.addTab(self.tab_invoice, "Invoice")
 
@@ -382,6 +391,11 @@ class MainWindow(QMainWindow):
     def _buat_tab_manifest():
         from tabs.tab_manifest import TabManifest
         return TabManifest()
+
+    @staticmethod
+    def _buat_tab_manifest_penagihan():
+        from tabs.tab_manifest_penagihan import TabManifestPenagihan
+        return TabManifestPenagihan()
 
     @staticmethod
     def _buat_tab_invoice():
@@ -501,8 +515,8 @@ class MainWindow(QMainWindow):
         )
 
     def eventFilter(self, watched, event):
-        # Track only genuine user interaction. Do not consume the event or
-        # alter normal QWidget event handling.
+        if not isinstance(watched, QObject) or not isinstance(event, QEvent):
+            return False
         timer = getattr(self, "_tab_prewarm_timer", None)
         if (
             timer is not None
@@ -511,8 +525,6 @@ class MainWindow(QMainWindow):
         ):
             timer.start(self._TAB_PREWARM_IDLE_MS)
 
-        # QEvent.Show is observed before the widget's showEvent override runs.
-        # A zero-delay callback reports after synchronous show handling returns.
         if (
             self._tab_first_show_profile_enabled
             and event.type() == QEvent.Type.Show
@@ -532,7 +544,7 @@ class MainWindow(QMainWindow):
                     ),
                 )
 
-        return super().eventFilter(watched, event)
+        return False
 
     def _prewarm_next_lazy_tab(self):
         if getattr(self, "_logout_sedang_berjalan", False):
@@ -547,6 +559,7 @@ class MainWindow(QMainWindow):
         pages = (
             self.tab_buku_gudang,
             self.tab_manifest,
+            self.tab_manifest_penagihan,
             self.tab_invoice,
             self.tab_kontak,
             self.tab_armada,
@@ -1513,17 +1526,22 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         auto_sync = getattr(self, "_auto_sync", None)
-        if auto_sync is not None and auto_sync.is_running():
-            # Jangan menutup proses saat worker masih menggunakan DB/session.
-            # Hentikan jadwal sync baru, lalu tunggu worker selesai melalui
-            # event loop agar UI tidak membeku saat proses sinkronisasi berjalan.
+        if (
+            auto_sync is not None
+            and auto_sync.is_running()
+            and not self._shutdown_worker_abandoned
+        ):
+            # Hentikan scheduling dan minta worker berhenti pada batas operasi.
+            # Penantian dibatasi agar request jaringan yang macet tidak menahan
+            # proses penutupan tanpa batas.
             event.ignore()
             self._hentikan_pemanasan_tab_tunda()
             auto_sync.stop(wait=False)
 
             if self._close_sync_wait_timer is None:
+                self._close_sync_deadline = time.monotonic() + 2.5
                 print(
-                    "[SHUTDOWN] Menunggu sinkronisasi aktif selesai sebelum aplikasi ditutup.",
+                    "[SHUTDOWN] Menghentikan sinkronisasi aktif (batas tunggu 2,5 detik)...",
                     flush=True,
                 )
                 timer = QTimer(self)
@@ -1551,16 +1569,32 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
 
     def _lanjutkan_tutup_setelah_sync(self):
-        """Tutup aplikasi setelah worker sync aktif benar-benar selesai."""
+        """Tutup setelah worker selesai atau batas tunggu shutdown tercapai."""
         auto_sync = getattr(self, "_auto_sync", None)
-        if auto_sync is not None and auto_sync.is_running():
+        worker_running = auto_sync is not None and auto_sync.is_running()
+        deadline = self._close_sync_deadline or time.monotonic()
+
+        if worker_running and time.monotonic() < deadline:
             return
+
+        if worker_running:
+            # Worker dibuat daemon dan sudah menerima cancellation request.
+            # Jika satu request jaringan tetap macet, jangan tahan GUI/proses;
+            # thread akan dihentikan bersama proses aplikasi setelah close.
+            self._shutdown_worker_abandoned = True
+            print(
+                "[SHUTDOWN] Batas tunggu tercapai; aplikasi ditutup tanpa menunggu request jaringan selesai.",
+                flush=True,
+            )
+        else:
+            print("[SHUTDOWN] Sinkronisasi berhenti dengan aman.", flush=True)
 
         timer = self._close_sync_wait_timer
         if timer is not None:
             timer.stop()
             timer.deleteLater()
         self._close_sync_wait_timer = None
+        self._close_sync_deadline = None
         self.close()
 
     def _lepas_resource_native(self):
@@ -1636,6 +1670,9 @@ def jalankan_aplikasi():
 
     with db_service.performance_timer("Startup.create_qapplication", threshold=0.05):
         app = QApplication(sys.argv)
+
+    app._kargo_wheel_policy = pasang_kebijakan_mouse_wheel(app)
+    app._kargo_smooth_scroll_policy = pasang_scroll_halus_global(app)
     app.setWindowIcon(QIcon("assets/logo/logo_mahkota_kargo.png"))
 
     if os.environ.get("DEBUG_FOCUS") == "1":
