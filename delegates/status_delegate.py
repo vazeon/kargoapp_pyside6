@@ -9,10 +9,9 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QStyle,
+    QStyledItemDelegate,
     QStyleOptionViewItem,
 )
-
-from delegates.overflow_tooltip_delegate import OverflowTooltipDelegate
 
 ColorValue = Union[QColor, str]
 ColorResult = Tuple[Optional[ColorValue], Optional[ColorValue]]
@@ -29,7 +28,7 @@ def _to_qcolor(value: Optional[ColorValue]) -> Optional[QColor]:
     return color if color.isValid() else None
 
 
-class StatusColorDelegate(OverflowTooltipDelegate):
+class StatusColorDelegate(QStyledItemDelegate):
 
     def __init__(
         self,
