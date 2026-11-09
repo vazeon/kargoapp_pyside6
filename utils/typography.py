@@ -13,11 +13,12 @@ ORGANIZATION_NAME = "AplikasiEkspedisi"
 APPLICATION_NAME = "PengaturanUI"
 
 DEFAULT_FONT = "Roboto"
-DEFAULT_FONT_SIZE_PT = 9.0
-MIN_FONT_SIZE = 8
-MIN_FONT_SIZE_PT = 7.5
 REFERENCE_DPI = 96.0
 POINTS_PER_INCH = 72.0
+DEFAULT_FONT_SIZE_PX = 14
+DEFAULT_FONT_SIZE_PT = DEFAULT_FONT_SIZE_PX * POINTS_PER_INCH / REFERENCE_DPI
+MIN_FONT_SIZE = 8
+MIN_FONT_SIZE_PT = 7.5
 
 _FONT_EXTENSIONS = (".ttf", ".otf")
 _FONT_SIZE_PX_PATTERN = re.compile(
@@ -29,6 +30,35 @@ _family_font_termuat: Tuple[str, ...] = ()
 _master_font_cache: str | None = None
 
 T = TypeVar("T")
+
+# Semantic font weights used by the application UI. The bundled Roboto family
+# provides matching Regular, Medium, and Bold font files.
+_FONT_WEIGHTS: Dict[str, int] = {
+    "regular": int(QFont.Weight.Normal),
+    "medium": int(QFont.Weight.Medium),
+    "bold": int(QFont.Weight.Bold),
+}
+
+_FONT_SIZES: Dict[str, int] = {
+    "caption": 10,
+    "body_small": 12,
+    "body": 14,
+    "subtitle": 16,
+    "title": 20,
+    "display": 24,
+}
+_ZOOMABLE_FONT_SIZES = frozenset({
+    "caption",
+    "body_small",
+    "body",
+    "subtitle",
+    "display",
+})
+
+
+def get_font_weights() -> Dict[str, int]:
+    """Return the canonical semantic font weights for application UI."""
+    return _FONT_WEIGHTS.copy()
 
 
 def _get_settings_ui() -> QSettings:
@@ -188,7 +218,7 @@ def konfigurasi_font_aplikasi(app: QApplication) -> str:
 
     font = QFont(font_aktif)
     font.setPointSizeF(DEFAULT_FONT_SIZE_PT)
-    font.setWeight(QFont.Weight.Normal)
+    font.setWeight(QFont.Weight(get_font_weights()["regular"]))
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
 
@@ -199,32 +229,25 @@ def konfigurasi_font_aplikasi(app: QApplication) -> str:
 
 
 def get_zoom_font_sizes(z: int = 0) -> Dict[str, int]:
-    """Ukuran font yang memang mengikuti level zoom modul/tabel."""
+    """Skala ukuran semantik; ukuran konten mengikuti zoom, judul tetap."""
     try:
         zoom = int(z)
     except (TypeError, ValueError, OverflowError):
         zoom = 0
 
     return {
-        "sz_title": 18,
-        "sz_total": max(MIN_FONT_SIZE, 15 + zoom),
-        "sz_input": max(MIN_FONT_SIZE, 13 + zoom),
-        "sz_base": max(MIN_FONT_SIZE, 12 + zoom),
-        "sz_tag": max(MIN_FONT_SIZE, 11 + zoom),
-        "sz_sm": max(MIN_FONT_SIZE, 10 + zoom),
+        name: (
+            max(MIN_FONT_SIZE, size + zoom)
+            if name in _ZOOMABLE_FONT_SIZES
+            else size
+        )
+        for name, size in _FONT_SIZES.items()
     }
 
 
 def get_fixed_font_sizes() -> Dict[str, int]:
-    """Ukuran font tetap untuk UI yang tidak mengikuti zoom."""
-    return {
-        "sz_title": 18,
-        "sz_total": 15,
-        "sz_input": 13,
-        "sz_base": 12,
-        "sz_tag": 11,
-        "sz_sm": 10,
-    }
+    """Skala ukuran semantik tetap untuk UI yang tidak mengikuti zoom."""
+    return _FONT_SIZES.copy()
 
 
 def get_zoom_font_sizes_pt(z: int = 0) -> Dict[str, float]:

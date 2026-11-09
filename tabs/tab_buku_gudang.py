@@ -2,6 +2,7 @@
 from collections import OrderedDict
 from enum import Enum
 from datetime import datetime
+import logging
 from time import perf_counter
 from weakref import ref
 from PySide6.QtCore import (
@@ -53,6 +54,8 @@ from PySide6.QtWidgets import (
 from config import CURRENT_SESSION, DATA_CLIENT
 
 import services.database_service as db_service
+
+logger = logging.getLogger(__name__)
 
 from utils import zoom as zoom_helper
 from utils.frozen_table_helper import FrozenTableView
@@ -905,6 +908,19 @@ class DatabaseWorkerBukuGudang(QThread):
                 self.tahun,
                 self.filters,
             ) or []
+            jumlah_resi_unik = len({
+                str(row[DBIndex.RESI] or "").strip().upper()
+                for row in rows
+                if len(row) > DBIndex.RESI and str(row[DBIndex.RESI] or "").strip()
+            })
+            logger.info(
+                "[BukuGudang] database_result wilayah=%s tahun=%s "
+                "detail_rows=%s unique_resi=%s",
+                self.wilayah,
+                self.tahun,
+                len(rows),
+                jumlah_resi_unik,
+            )
 
             if rows and not self.isInterruptionRequested():
                 try:
@@ -1356,13 +1372,16 @@ class TabBukuGudang(QWidget):
             tabel._buku_gudang_hidden_rows = hidden_rows
 
         if not keyword:
-            if hidden_rows:
+            previous_keyword = getattr(tabel, "_buku_gudang_search_keyword", "")
+            if hidden_rows or previous_keyword:
                 previous_updates = tabel.updatesEnabled()
                 try:
                     tabel.setUpdatesEnabled(False)
-                    row_count = tabel.rowCount()
-                    for row in hidden_rows:
-                        if 0 <= row < row_count and tabel.isRowHidden(row):
+                    # Seluruh row diperiksa hanya saat transisi ke pencarian kosong.
+                    # Ini mencegah row tetap tersembunyi bila bookkeeping pernah
+                    # ter-reset lebih dahulu daripada state QTableView.
+                    for row in range(tabel.rowCount()):
+                        if tabel.isRowHidden(row):
                             tabel.setRowHidden(row, False)
                     hidden_rows.clear()
                 finally:
@@ -2060,7 +2079,7 @@ class TabBukuGudang(QWidget):
 
     def setup_menu_tahun(self, tahun_sekarang):
         self.menu_tahun.clear()
-        ukuran_menu_tahun = max(10, get_fixed_font_sizes()["sz_input"] - 1)
+        ukuran_menu_tahun = get_fixed_font_sizes()["body_small"]
         style_menu = konversi_font_qss_ke_point(
             get_buku_gudang_menu_style(ukuran_menu_tahun, self._tema_gelap_aktif())
         )
@@ -2085,7 +2104,7 @@ class TabBukuGudang(QWidget):
         self.refresh_session_ui()
 
     def _style_menu_filter_periode(self):
-        ukuran = max(10, get_fixed_font_sizes()["sz_input"] - 1)
+        ukuran = get_fixed_font_sizes()["body_small"]
         return konversi_font_qss_ke_point(get_buku_gudang_menu_style(ukuran, self._tema_gelap_aktif()))
 
     def _buat_checkbox_menu_bulan(self, label):
@@ -2226,6 +2245,9 @@ class TabBukuGudang(QWidget):
         self.refresh_session_ui()
 
     def reset_semua_filter(self):
+        # Reset adalah aksi eksplisit; batalkan debounce pencarian lama sebelum
+        # textChanged diblokir saat input dikosongkan.
+        self._timer_pencarian.stop()
         sekarang = datetime.now()
         self.btn_tahun.setText(str(sekarang.year))
         self._bulan_terpilih = {sekarang.month}
@@ -2253,7 +2275,7 @@ class TabBukuGudang(QWidget):
 
     def _buat_menu_buku_gudang(self):
         menu = QMenu()
-        ukuran = get_fixed_font_sizes()["sz_input"]
+        ukuran = get_fixed_font_sizes()["body"]
         menu.setStyleSheet(
             konversi_font_qss_ke_point(get_buku_gudang_menu_style(ukuran, self._tema_gelap_aktif()))
         )
@@ -2826,8 +2848,9 @@ class TabBukuGudang(QWidget):
     def _setelah_urutan_berubah(self, tabel):
         self._jadwalkan_tinggi_baris(tabel)
         if getattr(tabel, "_render_state", None) is None:
-            tabel._buku_gudang_search_keyword = ""
-            tabel._buku_gudang_hidden_rows = set()
+            # Layout change dapat mengubah makna indeks row yang sebelumnya
+            # disembunyikan. Normalisasi visibilitas lebih dulu, baru cari ulang.
+            self._bersihkan_visibilitas_pencarian_tabel(tabel)
             self._terapkan_pencarian_ke_tabel(tabel)
 
     def _isi_baris_tabel(self, tabel, wilayah, detail_rows, target_row=None):
@@ -2984,6 +3007,11 @@ class TabBukuGudang(QWidget):
 
     @db_service.profile_performance("BukuGudang.request_table_load", threshold=0.025)
     def load_data(self, tab_widget):
+        # Request reload selalu memakai state filter terbaru; callback debounce
+        # yang tertunda tidak boleh berjalan belakangan dengan state sebelumnya.
+        if self._timer_pencarian.isActive():
+            self._timer_pencarian.stop()
+
         tabel = tab_widget.tabel
         cabang, wilayah, tahun_query, filters, search_all_year = (
             self._parameter_query_buku_gudang(tab_widget)
@@ -3005,6 +3033,25 @@ class TabBukuGudang(QWidget):
             tab_widget._table_was_enabled = tabel.isEnabled()
         tab_widget._load_generation += 1
         tab_widget._loading = True
+        bulan_query = filters.get(db_service.BukuGudangFilter.BULAN, "SEMUA")
+        status_query = filters.get(
+            db_service.BukuGudangFilter.STATUS_PENAGIHAN, "SEMUA"
+        )
+        logger.info(
+            "[BukuGudang] load_request gen=%s wilayah=%s tahun=%s bulan=%s "
+            "search_mode=%s status_tagihan=%s filter_keys=%s worker_active=%s",
+            tab_widget._load_generation,
+            wilayah,
+            tahun_query,
+            bulan_query,
+            search_all_year,
+            status_query,
+            tuple(sorted(str(key) for key in filters if key not in {
+                db_service.BukuGudangFilter.BULAN,
+                db_service.BukuGudangFilter.STATUS_PENAGIHAN,
+            })),
+            tab_widget._load_worker is not None,
+        )
         self._perbarui_status_data(tab_widget, "loading")
         tab_widget._render_timer.stop()
         if getattr(tabel, "_render_state", None) is not None:
@@ -3037,8 +3084,23 @@ class TabBukuGudang(QWidget):
     def _hasil_worker_data(self, rows):
         worker = self.sender()
         tab_widget = worker.tab_ref()
-        if tab_widget is not None and worker.generation == tab_widget._load_generation:
-            self._proses_hasil_data(rows, tab_widget)
+        if tab_widget is None:
+            return
+
+        if worker.generation != tab_widget._load_generation:
+            logger.debug(
+                "[BukuGudang] stale_worker_result ignored worker_gen=%s current_gen=%s",
+                worker.generation,
+                tab_widget._load_generation,
+            )
+            return
+
+        logger.info(
+            "[BukuGudang] worker_result accepted gen=%s grouped_resi=%s",
+            worker.generation,
+            len(rows or ()),
+        )
+        self._proses_hasil_data(rows, tab_widget)
 
     @Slot(str)
     def _error_worker_data(self, error_msg):
@@ -3055,11 +3117,44 @@ class TabBukuGudang(QWidget):
             tab_widget._load_worker = None
             self._mulai_request_data(tab_widget)
 
+    def _bersihkan_visibilitas_pencarian_tabel(self, tabel):
+        """Pastikan tidak ada section tersembunyi dari hasil pencarian sebelumnya."""
+        hidden_rows = getattr(tabel, "_buku_gudang_hidden_rows", None) or ()
+        previous_keyword = str(
+            getattr(tabel, "_buku_gudang_search_keyword", "") or ""
+        )
+        if not hidden_rows and not previous_keyword:
+            return
+
+        previous_updates = tabel.updatesEnabled()
+        try:
+            tabel.setUpdatesEnabled(False)
+            # Scan semua row karena model reset mempertahankan indeks visual pada
+            # beberapa kondisi QHeaderView; jangan hanya mengandalkan set pelacak.
+            for row in range(tabel.rowCount()):
+                if tabel.isRowHidden(row):
+                    tabel.setRowHidden(row, False)
+        finally:
+            tabel._buku_gudang_hidden_rows = set()
+            tabel._buku_gudang_search_keyword = ""
+            tabel.setUpdatesEnabled(previous_updates)
+
     @db_service.profile_performance("BukuGudang.prepare_table_render", threshold=0.025)
     def _proses_hasil_data(self, groups, tab_widget):
         tabel = tab_widget.tabel
         try:
             groups = groups or []
+            hidden_before = len(
+                getattr(tabel, "_buku_gudang_hidden_rows", ()) or ()
+            )
+            self._bersihkan_visibilitas_pencarian_tabel(tabel)
+            logger.info(
+                "[BukuGudang] render_start gen=%s grouped_resi=%s "
+                "previous_hidden_rows=%s",
+                tab_widget._load_generation,
+                len(groups),
+                hidden_before,
+            )
             targets = [tabel]
             tabel._loading_view_state = (
                 tabel.isSortingEnabled(),
@@ -3138,6 +3233,16 @@ class TabBukuGudang(QWidget):
             invalidated_during_load or fingerprint is None
         )
         tabel.setEnabled(getattr(tab_widget, "_table_was_enabled", True))
+        hidden_rows = len(getattr(tabel, "_buku_gudang_hidden_rows", ()) or ())
+        logger.info(
+            "[BukuGudang] render_complete gen=%s table_rows=%s hidden_rows=%s "
+            "invalidated_during_load=%s cache_stale=%s",
+            tab_widget._load_generation,
+            tabel.rowCount(),
+            hidden_rows,
+            invalidated_during_load,
+            tab_widget._buku_gudang_cache_stale,
+        )
         self._perbarui_status_data(tab_widget)
 
         if (

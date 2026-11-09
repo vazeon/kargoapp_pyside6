@@ -26,10 +26,12 @@ from utils.input_style_helper import (
     terapkan_style_input_global,
 )
 
-from utils.typography import get_master_font, get_fixed_font_sizes_pt
+from utils.typography import get_font_weights, get_master_font, get_fixed_font_sizes_pt
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import ModelTableView
 import utils.zoom as zoom_helper
+
+_FONT_WEIGHTS = get_font_weights()
 
 
 ARMADA_PAGE_MARGINS = (8, 8, 8, 8)
@@ -53,11 +55,12 @@ ARMADA_PHOTO_BUTTON_MIN_HEIGHT = 30
 ARMADA_TRUK_COLUMN_WIDTHS = (45, 80, 110, 140, 120, 250, 20)
 
 
-def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
+def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False, weight: str | None = None) -> QFont:
     """Membuat QFont berbasis point untuk elemen UI statis."""
     font = QFont(get_master_font())
     font.setPointSizeF(float(ukuran_pt))
-    font.setBold(bool(tebal))
+    nama_weight = weight or ("bold" if tebal else "regular")
+    font.setWeight(QFont.Weight(_FONT_WEIGHTS[nama_weight]))
     return font
 
 class SubTabTruk(QWidget, ZoomTableMixin):
@@ -154,7 +157,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         header_layout = QHBoxLayout()
         self.label_judul = QLabel("List Data Truk")
         self.label_judul.setFont(
-            _buat_font_pt(get_fixed_font_sizes_pt()["sz_title"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["subtitle"], weight="medium")
         )
         header_layout.addWidget(self.label_judul)
         header_layout.addStretch()
@@ -253,7 +256,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
 
         self.lbl_judul_kanan = QLabel("Detail / Editor truk")
         self.lbl_judul_kanan.setFont(
-            _buat_font_pt(get_fixed_font_sizes_pt()["sz_total"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["body"], weight="medium")
         )
         self.lbl_judul_kanan.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_judul_kanan)
@@ -709,8 +712,8 @@ class SubTabTruk(QWidget, ZoomTableMixin):
     # --- TEMA DAN ZOOM ---
 
     def _terapkan_font_form_truk(self, st, ukuran):
-        font_base = _buat_font_pt(ukuran["sz_base"])
-        font_input = _buat_font_pt(ukuran["sz_input"])
+        font_base = _buat_font_pt(ukuran["body_small"])
+        font_input = _buat_font_pt(ukuran["body"])
         for label in (
             self.lbl_jenis,
             self.lbl_jenis_lain,
@@ -741,7 +744,7 @@ class SubTabTruk(QWidget, ZoomTableMixin):
         return font_base
 
     def _terapkan_style_tombol_truk(self, st, ukuran, font_base):
-        font_tombol = _buat_font_pt(ukuran["sz_base"], tebal=True)
+        font_tombol = _buat_font_pt(ukuran["body_small"], tebal=True)
         for button, key in ((self.btn_batal, "btn_batal"), (self.btn_aksi, "btn_aksi")):
             button.setFont(font_tombol)
             button.setFixedHeight(max(ARMADA_ACTION_BUTTON_MIN_HEIGHT, button.sizeHint().height()))
@@ -762,8 +765,8 @@ class SubTabTruk(QWidget, ZoomTableMixin):
             (self.lbl_preview_foto, "preview_foto"),
         ):
             widget.setStyleSheet(st[key])
-        self.label_judul.setFont(_buat_font_pt(ukuran["sz_title"], tebal=True))
-        self.lbl_judul_kanan.setFont(_buat_font_pt(ukuran["sz_total"], tebal=True))
+        self.label_judul.setFont(_buat_font_pt(ukuran["subtitle"], weight="medium"))
+        self.lbl_judul_kanan.setFont(_buat_font_pt(ukuran["body"], weight="medium"))
         font_base = self._terapkan_font_form_truk(st, ukuran)
         self._terapkan_style_tombol_truk(st, ukuran, font_base)
 

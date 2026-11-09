@@ -18,7 +18,7 @@ from PySide6.QtCore import (
     Slot,
     QPersistentModelIndex,
 )
-from PySide6.QtGui import QBrush
+from PySide6.QtGui import QBrush, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -54,8 +54,6 @@ from themes.components.notification import FADE_NOTIFICATION_STYLE
 from themes.components.table import get_table_input_styles
 
 from themes.modules.resi import (
-    UKURAN_FONT_HISTORI_RESI,
-    UKURAN_FONT_INPUT,
     get_btn_simpan_cetak_style,
     get_resi_detail_barang_theme,
     get_resi_rekening_styles,
@@ -90,10 +88,13 @@ from utils.typography import (
     APPLICATION_NAME,
     ORGANIZATION_NAME,
     get_fixed_font_sizes,
+    get_font_weights,
     konversi_font_qss_ke_point,
     konversi_style_font_ke_point,
     ukuran_font_px_ke_pt,
 )
+
+_FONT_WEIGHTS = get_font_weights()
 
 
 RESI_PAGE_MARGINS = (8, 8, 8, 8)
@@ -518,7 +519,7 @@ class TabResi(QWidget):
         self.lbl_edit_mode = QLabel("Edit")
         self.lbl_edit_mode.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         font_edit = self.lbl_edit_mode.font()
-        font_edit.setBold(True)
+        font_edit.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
         self.lbl_edit_mode.setFont(font_edit)
         self.lbl_edit_mode.hide()
 
@@ -637,7 +638,7 @@ class TabResi(QWidget):
         header.setHighlightSections(False)
 
         font_header = header.font()
-        font_header.setBold(True)
+        font_header.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
         header.setFont(font_header)
 
         for kolom in self.LEBAR_KOLOM_DASAR:
@@ -1068,7 +1069,7 @@ class TabResi(QWidget):
     def _terapkan_tema_detail_barang(
         self,
         is_dark: bool,
-        sz_base: int,
+        body_size: int,
     ) -> None:
         table = getattr(self, "table_items", None)
         if table is None:
@@ -1084,7 +1085,7 @@ class TabResi(QWidget):
         table.viewport().setMouseTracking(False)
 
         font_table = table.font()
-        font_table.setPointSizeF(ukuran_font_px_ke_pt(sz_base))
+        font_table.setPointSizeF(ukuran_font_px_ke_pt(body_size))
         table.setFont(font_table)
 
     def sesuaikan_tema_lokal(self):
@@ -1157,7 +1158,7 @@ class TabResi(QWidget):
             ):
                 self._terapkan_tema_detail_barang(
                     is_dark=is_dark,
-                    sz_base=UKURAN_FONT_INPUT,
+                    body_size=fs["body"],
                 )
             with db_service.performance_timer(
                 "Resi.theme_step.account_style", threshold=0.001
@@ -1204,9 +1205,10 @@ class TabResi(QWidget):
 
     def _terapkan_style_tombol_reset_histori(self, is_dark):
         warna = "#FFFFFF" if is_dark else "#404040"
+        font_size = get_fixed_font_sizes()["title"]
         self.btn_reset_histori.setStyleSheet(
             f"QPushButton {{ background: transparent; border: none; padding: 0px; "
-            f"margin: 0px; color: {warna}; font-size: 18px; font-weight: 600; }}"
+            f"margin: 0px; color: {warna}; font-size: {font_size}px; font-weight: {_FONT_WEIGHTS['medium']}; }}"
             f"QPushButton:hover {{ background: transparent; border: none; color: {warna}; }}"
             f"QPushButton:pressed {{ background: transparent; border: none; color: {warna}; }}"
             f"QPushButton:disabled {{ background: transparent; border: none; }}"
@@ -1234,7 +1236,7 @@ class TabResi(QWidget):
 
     def _terapkan_tema_histori_statis(self, fs_statis):
         font = self.cb_periode_histori.font()
-        font.setPointSizeF(ukuran_font_px_ke_pt(UKURAN_FONT_HISTORI_RESI))
+        font.setPointSizeF(ukuran_font_px_ke_pt(fs_statis["body"]))
         self.cb_periode_histori.setFont(font)
         atur_tinggi_input(self.date_input, tinggi=RESI_INPUT_HEIGHT)
         atur_tinggi_input(self.cb_periode_histori, tinggi=RESI_INPUT_HEIGHT)
@@ -1507,24 +1509,8 @@ class TabResi(QWidget):
         self.cb_periode_histori.setToolTip("Pilih cakupan periode histori")
         self.load_data_resi()
 
-    def _ukuran_point_histori_aktif(self):
-        font_histori = self.list_histori.font()
-        ukuran_point = font_histori.pointSizeF()
-        if ukuran_point > 0:
-            return ukuran_point
-
-        ukuran_pixel = font_histori.pixelSize()
-        if ukuran_pixel <= 0:
-            return ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
-
-        dpi_y = max(1, self.list_histori.logicalDpiY())
-        return max(1.0, ukuran_pixel * 72.0 / dpi_y)
-
     def _sinkronkan_font_item_histori_resi(self, is_dark):
-        font_tanggal, warna_abu = get_manifest_history_date_appearance(
-            is_dark,
-            self._ukuran_point_histori_aktif(),
-        )
+        font_tanggal, warna_abu = get_manifest_history_date_appearance(is_dark)
         for parent_index in range(self.list_histori.topLevelItemCount()):
             parent = self.list_histori.topLevelItem(parent_index)
             if parent is None:
@@ -1541,7 +1527,7 @@ class TabResi(QWidget):
         self.list_histori.setStyleSheet(style_manifest["list_histori"])
         font_histori = self.list_histori.font()
         font_histori.setPointSizeF(
-            ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
+            ukuran_font_px_ke_pt(get_fixed_font_sizes()["body_small"])
         )
         self.list_histori.setFont(font_histori)
         self._sinkronkan_font_item_histori_resi(is_dark)
@@ -1698,7 +1684,7 @@ class TabResi(QWidget):
 
     def _isi_tree_histori(self, rows, parent_default="Hasil Pencarian"):
         font_tanggal, warna = get_manifest_history_date_appearance(
-            self._tema_gelap_aktif(), self._ukuran_point_histori_aktif()
+            self._tema_gelap_aktif()
         )
         request_key = getattr(self, "_history_request_key", None)
         view = (

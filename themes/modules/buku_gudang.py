@@ -8,8 +8,11 @@ from PySide6.QtGui import QColor
 import qdarktheme
 
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font
+from utils.typography import get_font_weights, get_master_font, get_fixed_font_sizes
 from utils.ui_metrics import NESTED_TAB_PADDING_H, NESTED_TAB_PADDING_V
+
+_FONT_WEIGHTS = get_font_weights()
+_FONT_SIZES = get_fixed_font_sizes()
 
 _BUKU_GUDANG_TABBAR_QSS_CACHE = {}
 
@@ -39,7 +42,7 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
 
 
 DIALOG_PILIH_PENAGIH_STYLE = f"""
-    font-size: 13px;
+    font-size: {get_fixed_font_sizes()["body"]}px;
     font-family: '{get_master_font()}';
 """
 
@@ -53,7 +56,7 @@ DIALOG_PILIH_PENAGIH_BUTTON_PRIMARY_STYLE = f"""
     QPushButton {{
         background-color: #3b82f6;
         color: white;
-        font-weight: bold;
+        font-weight: {_FONT_WEIGHTS["bold"]};
         padding: 6px;
         border-radius: 4px;
         border: none;
@@ -70,7 +73,7 @@ DIALOG_PILIH_PENAGIH_BUTTON_DANGER_STYLE = f"""
     QPushButton {{
         background-color: #ef4444;
         color: white;
-        font-weight: bold;
+        font-weight: {_FONT_WEIGHTS["bold"]};
         padding: 6px;
         border-radius: 4px;
         border: none;
@@ -88,7 +91,7 @@ BUKU_GUDANG_BUTTON_INVOICE_STYLE = f"""
     QPushButton {{
         background-color: #3b82f6;
         color: white;
-        font-weight: bold;
+        font-weight: {_FONT_WEIGHTS["bold"]};
         padding: 5px 14px;
         border-radius: 4px;
         border: none;
@@ -105,7 +108,7 @@ BUKU_GUDANG_BUTTON_SAVE_STYLE = f"""
     QPushButton {{
         background-color: #10b981;
         color: white;
-        font-weight: bold;
+        font-weight: {_FONT_WEIGHTS["bold"]};
         padding: 5px 14px;
         border-radius: 4px;
         border: none;
@@ -122,7 +125,7 @@ BUKU_GUDANG_BUTTON_CANCEL_STYLE = f"""
     QPushButton {{
         background-color: #ef4444;
         color: white;
-        font-weight: bold;
+        font-weight: {_FONT_WEIGHTS["bold"]};
         padding: 5px 14px;
         border-radius: 4px;
         border: none;
@@ -156,19 +159,13 @@ def get_buku_gudang_action_styles() -> Dict[str, str]:
     }
 
 
-# Ukuran tetap untuk elemen UI Buku Gudang yang bukan tabel.
-# Zoom tabel diterapkan terpisah oleh utils.zoom pada widget tabel.
-BUKU_GUDANG_FONT_TITLE = 16
-BUKU_GUDANG_FONT_FILTER = 12
-BUKU_GUDANG_FONT_LABEL = 11
-BUKU_GUDANG_FONT_TABLE = 11
-
-
+# Ukuran font UI mengikuti token terpusat. Zoom tabel diterapkan terpisah
+# oleh utils.zoom pada widget tabel.
 def get_buku_gudang_styles(is_dark: bool) -> Dict[str, str]:
     """Style Buku Gudang; zoom hanya diterapkan langsung pada tabel."""
     ui = get_theme_colors(is_dark)["ui"]
-    ukuran_judul = BUKU_GUDANG_FONT_TITLE
-    ukuran_filter = BUKU_GUDANG_FONT_FILTER
+    ukuran_judul = _FONT_SIZES["subtitle"]
+    ukuran_filter = _FONT_SIZES["body_small"]
 
     return {
         "lbl_judul": f"""
@@ -176,7 +173,7 @@ def get_buku_gudang_styles(is_dark: bool) -> Dict[str, str]:
             background-color: transparent;
             border: none;
             font-size: {ukuran_judul}px;
-            font-weight: 600;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
             margin: 0px;
             padding: 0px;
@@ -185,7 +182,7 @@ def get_buku_gudang_styles(is_dark: bool) -> Dict[str, str]:
         "btn_tahun": f"""
             QPushButton {{
                 font-size: {ukuran_filter}px;
-                font-weight: 400;
+                font-weight: {_FONT_WEIGHTS["regular"]};
                 background-color: {ui["field_background"]};
                 color: {ui["text_primary"]};
                 border: 1px solid {ui["field_border"]};
@@ -207,7 +204,7 @@ def get_buku_gudang_styles(is_dark: bool) -> Dict[str, str]:
         "btn_reset_filter": f"""
             QToolButton {{
                 font-size: {ukuran_filter}px;
-                font-weight: 400;
+                font-weight: {_FONT_WEIGHTS["regular"]};
                 background-color: transparent;
                 color: {ui["text_primary"]};
                 border: 1px solid transparent;

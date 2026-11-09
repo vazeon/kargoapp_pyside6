@@ -791,7 +791,8 @@ class TabManifest(QWidget):
         self.panel_kanan.setMinimumWidth(MANIFEST_HISTORY_MIN_WIDTH)
         self.panel_kanan.setMaximumWidth(MANIFEST_HISTORY_MAX_WIDTH)
         layout = QVBoxLayout(self.panel_kanan)
-        layout.addWidget(QLabel("Histori Manifest:"))
+        self.lbl_history_title = QLabel("Histori Manifest:")
+        layout.addWidget(self.lbl_history_title)
 
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("Tahun:"))
@@ -1396,10 +1397,7 @@ class TabManifest(QWidget):
             ) or []
             parents = {}
             tahun_terpilih = self.cb_tahun_filter.currentText()
-            font_tanggal, warna_abu = get_manifest_history_date_appearance(
-                is_dark,
-                self._ukuran_point_histori_aktif(),
-            )
+            font_tanggal, warna_abu = get_manifest_history_date_appearance(is_dark)
             brush_tanggal = QBrush(warna_abu)
             for row in rows:
                 self._buat_item_histori_manifest(
@@ -1441,28 +1439,9 @@ class TabManifest(QWidget):
             self.list_histori.setUpdatesEnabled(True)
             self.list_histori.viewport().update()
 
-    def _ukuran_point_histori_aktif(self):
-        """Menghasilkan ukuran point valid dari font histori aktif."""
-        font_histori = self.list_histori.font()
-        ukuran_point = font_histori.pointSize()
-
-        if ukuran_point > 0:
-            return ukuran_point
-
-        ukuran_pixel = font_histori.pixelSize()
-        if ukuran_pixel <= 0:
-            return ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
-
-        dpi_y = max(1, self.list_histori.logicalDpiY())
-        return max(1.0, ukuran_pixel * 72.0 / dpi_y)
-
     def _sinkronkan_font_item_histori(self, is_dark):
         """Menyamakan font tanggal histori setelah tema atau zoom berubah."""
-        ukuran_point = self._ukuran_point_histori_aktif()
-        font_tanggal, warna_abu = get_manifest_history_date_appearance(
-            is_dark,
-            ukuran_point,
-        )
+        font_tanggal, warna_abu = get_manifest_history_date_appearance(is_dark)
 
         for parent_index in range(self.list_histori.topLevelItemCount()):
             parent_item = self.list_histori.topLevelItem(parent_index)
@@ -1823,6 +1802,7 @@ class TabManifest(QWidget):
         self.panel_kiri.setStyleSheet(styles_statis["panel_kiri"])
         self.panel_kanan.setStyleSheet(styles_statis["panel_kanan"])
         self.lbl_title.setStyleSheet(styles_statis["lbl_title"])
+        self.lbl_history_title.setStyleSheet(styles_statis["lbl_history_title"])
         self.btn_proses.setStyleSheet(styles_statis["btn_proses"])
 
         if not self._tinggi_input_manifest_sudah_diterapkan:
@@ -1887,7 +1867,7 @@ class TabManifest(QWidget):
             self.list_histori.setStyleSheet(styles_statis["list_histori"])
             font_histori = self.list_histori.font()
             font_histori.setPointSizeF(
-                ukuran_font_px_ke_pt(get_fixed_font_sizes()["sz_base"])
+                ukuran_font_px_ke_pt(get_fixed_font_sizes()["body_small"])
             )
             self.list_histori.setFont(font_histori)
 

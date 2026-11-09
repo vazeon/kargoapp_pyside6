@@ -4,8 +4,15 @@ from typing import Optional, Tuple
 from PySide6.QtGui import QColor, QFont
 
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font, get_fixed_font_sizes
+from utils.typography import (
+    get_fixed_font_sizes,
+    get_fixed_font_sizes_pt,
+    get_font_weights,
+    get_master_font,
+)
 
+
+_FONT_WEIGHTS = get_font_weights()
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
@@ -15,10 +22,10 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
 def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
     """Menghasilkan seluruh QSS utama milik TabManifest (tanpa QSS Tabel)."""
     sizes = get_fixed_font_sizes()
-    sz_base = sizes["sz_base"]
-    sz_input = sizes["sz_input"]
-    sz_title = sizes["sz_title"]
-    sz_total = sizes["sz_total"]
+    body_small_size = sizes["body_small"]
+    body_size = sizes["body"]
+    page_title_size = sizes["subtitle"]
+    subtitle_size = sizes["subtitle"]
 
     ui = get_theme_colors(is_dark)["ui"]
     placeholder = ui["placeholder_text"]
@@ -29,14 +36,21 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
 
     lbl_title = f"""
         color: {ui["text_primary"]};
-        font-size: {sz_title}px;
-        font-weight: bold;
+        font-size: {page_title_size}px;
+        font-weight: {_FONT_WEIGHTS["medium"]};
+        font-family: '{get_master_font()}';
+    """
+
+    lbl_history_title = f"""
+        color: {ui["text_primary"]};
+        font-size: {body_size}px;
+        font-weight: {_FONT_WEIGHTS["medium"]};
         font-family: '{get_master_font()}';
     """
 
     style_input = f"""
         QLineEdit {{
-            font-size: {sz_input}px;
+            font-size: {body_size}px;
             background-color: {ui["field_background"]};
             color: {ui["text_primary"]};
             placeholder-text-color: {placeholder};
@@ -60,8 +74,8 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             color: {_warna_tema(is_dark, "#F2F4F7", "#172033")};
             background: transparent;
             border: none;
-            font-size: {sz_base}px;
-            font-weight: 600;
+            font-size: {body_small_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
         }}
     """
@@ -70,8 +84,8 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         QLabel {{
             color: {_warna_tema(is_dark, "#C8D1E0", "#4B5C73")};
             background: transparent;
-            font-size: {sz_base}px;
-            font-weight: 600;
+            font-size: {body_small_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
         }}
     """
@@ -83,7 +97,8 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             background: transparent;
             border: none;
             padding: 2px 10px;
-            font-size: {sz_base}px;
+            font-size: {body_small_size}px;
+            font-weight: {_FONT_WEIGHTS["regular"]};
             font-family: '{get_master_font()}';
         }}
     """
@@ -96,8 +111,8 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             border: 1px solid {_warna_tema(is_dark, "#3B82F6", "#3B82F6")};
             border-radius: 6px;
             padding: 6px 12px;
-            font-size: {sz_total}px;
-            font-weight: 500;
+            font-size: {subtitle_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             letter-spacing: 1px;
             font-family: '{get_master_font()}';
         }}
@@ -110,7 +125,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             border: 1px solid {ui["field_border"]};
             border-radius: 6px;
             padding: 5px;
-            font-size: {sz_base}px;
+            font-size: {body_small_size}px;
             font-family: '{get_master_font()}';
         }}
         QTreeView::item {{
@@ -122,10 +137,10 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         QPushButton {{
             background-color: {warna_btn};
             color: #ffffff;
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["bold"]};
             padding: 7px 20px;
             border-radius: 4px;
-            font-size: {sz_base}px;
+            font-size: {body_small_size}px;
             font-family: '{get_master_font()}';
         }}
         QPushButton:hover {{
@@ -138,7 +153,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
 
     panel_kiri = f"""
         QLabel {{
-            font-size: {sz_base}px;
+            font-size: {body_small_size}px;
             font-family: '{get_master_font()}';
             color: {ui["text_primary"]};
             background-color: transparent;
@@ -150,6 +165,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
 
     return {
         "lbl_title": lbl_title,
+        "lbl_history_title": lbl_history_title,
         "style_input": style_input,
         "card_manifest": card_manifest,
         "label_input": label_input,
@@ -174,11 +190,10 @@ def get_manifest_row_highlight(
 
 def get_manifest_history_date_appearance(
     is_dark: bool,
-    base_point_size: int,
 ) -> Tuple[QFont, QColor]:
+    """Gunakan ukuran caption yang konsisten untuk tanggal item histori."""
     font_tanggal = QFont(get_master_font())
-    if base_point_size > 0:
-        font_tanggal.setPointSize(max(6, base_point_size - 2))
+    font_tanggal.setPointSizeF(get_fixed_font_sizes_pt()["caption"])
     font_tanggal.setItalic(True)
     warna_tanggal = QColor("#94a3b8" if is_dark else "#64748b")
     return font_tanggal, warna_tanggal

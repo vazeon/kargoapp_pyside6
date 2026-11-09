@@ -52,8 +52,11 @@ from utils.input_style_helper import atur_tinggi_input, terapkan_style_input_glo
 from utils.typography import (
     get_master_font,
     get_fixed_font_sizes,
+    get_font_weights,
     perbarui_font_master,
 )
+
+_FONT_WEIGHTS = get_font_weights()
 
 
 SETTING_ROOT_MARGINS = (0, 0, 0, 0)
@@ -331,7 +334,9 @@ class TabSettingSistem(QWidget):
         layout.addWidget(lbl_title)
 
         lbl_numbering = QLabel("Penomoran Dokumen")
-        lbl_numbering.setStyleSheet("font-weight: 700; margin-top: 2px;")
+        lbl_numbering.setStyleSheet(
+            f"font-weight: {_FONT_WEIGHTS['bold']}; margin-top: 2px;"
+        )
         layout.addWidget(lbl_numbering)
 
         self.table_numbering = QTableWidget(0, 6)
@@ -375,7 +380,9 @@ class TabSettingSistem(QWidget):
         # PENGATURAN TAMBAHAN - TETAP DIPERTAHANKAN
         # =============================================================
         lbl_tambahan = QLabel("Pengaturan Tambahan")
-        lbl_tambahan.setStyleSheet("font-weight: bold; margin-top: 12px;")
+        lbl_tambahan.setStyleSheet(
+            f"font-weight: {_FONT_WEIGHTS['bold']}; margin-top: 12px;"
+        )
         layout.addWidget(lbl_tambahan)
 
         form_tambahan = QFormLayout()
@@ -1521,11 +1528,11 @@ class TabSettingSistem(QWidget):
 
     def _terapkan_tema_setting(self, is_dark):
         sizes = get_fixed_font_sizes()
-        sz_base = sizes["sz_base"]
-        sz_input = sizes["sz_input"]
-        sz_title = sizes["sz_title"]
+        body_small = sizes["body_small"]
+        body = sizes["body"]
+        subtitle = sizes["subtitle"]
 
-        s = get_setting_styles(is_dark, sz_base, sz_input, sz_title)
+        s = get_setting_styles(is_dark, body_small, body, subtitle)
         self._setting_styles = s
 
         self.sidebar_container.setStyleSheet(s['sidebar_container'])
@@ -1535,10 +1542,11 @@ class TabSettingSistem(QWidget):
             # Info sesi ditampilkan sebagai teks biasa tanpa kotak/border.
             self.session_info_box.setStyleSheet("background: transparent; border: none;")
             self.lbl_session_user.setStyleSheet(
-                "font-weight: 700; border: none; background: transparent;"
+                f"font-weight: {_FONT_WEIGHTS['bold']}; "
+                "border: none; background: transparent;"
             )
             self.lbl_session_branch.setStyleSheet(
-                "font-size: 11px; border: none; background: transparent;"
+                f"font-size: {get_fixed_font_sizes()['caption']}px; border: none; background: transparent;"
             )
 
         if hasattr(self, 'lbl_menu'):
@@ -1582,7 +1590,7 @@ class TabSettingSistem(QWidget):
         ):
             font_combo = combo.font()
             font_combo.setFamily(get_master_font())
-            font_combo.setPixelSize(max(1, sz_input))
+            font_combo.setPixelSize(max(1, body))
             combo.setFont(font_combo)
 
             combo_view = combo.view()

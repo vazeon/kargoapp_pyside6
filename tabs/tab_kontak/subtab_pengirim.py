@@ -27,11 +27,13 @@ from utils.input_style_helper import (
     paksa_kapital_lineedit as helper_paksa_kapital_lineedit,
     terapkan_style_input_global,
 )
-from utils.typography import get_fixed_font_sizes_pt, get_master_font
+from utils.typography import get_fixed_font_sizes_pt, get_font_weights, get_master_font
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
 from utils.table_helper import ModelTableView
 from utils.date_ind_format import format_tanggal_ke_ui
+
+_FONT_WEIGHTS = get_font_weights()
 
 
 KONTAK_SUBTAB_MARGINS = (0, 0, 0, 0)
@@ -53,10 +55,10 @@ KONTAK_HISTORY_COLUMN_WIDTHS = (95, 100, 140, 50, 60, 60, 90)
 KONTAK_PENGIRIM_COLUMN_WIDTHS = (50, 90, 180, 130, 260, 120)
 
 
-def _buat_font_pt(ukuran_pt: float, *, tebal: bool = False) -> QFont:
+def _buat_font_pt(ukuran_pt: float, *, weight: str = "regular") -> QFont:
     font = QFont(get_master_font())
     font.setPointSizeF(float(ukuran_pt))
-    font.setBold(tebal)
+    font.setWeight(QFont.Weight(_FONT_WEIGHTS[weight]))
     return font
 
 
@@ -134,7 +136,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
         self.lbl_judul = QLabel("List Pengirim")
         self.lbl_judul.setFont(
-            _buat_font_pt(get_fixed_font_sizes_pt()["sz_title"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["subtitle"], weight="medium")
         )
         self.txt_cari = self._buat_input_cari(
             "Cari pengirim...", KONTAK_SEARCH_WIDTH, self._search_timer
@@ -179,7 +181,7 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
         self.lbl_judul_histori = QLabel("Riwayat Pengiriman")
         self.lbl_judul_histori.setFont(
-            _buat_font_pt(get_fixed_font_sizes_pt()["sz_total"], tebal=True)
+            _buat_font_pt(get_fixed_font_sizes_pt()["body"], weight="medium")
         )
         self.txt_cari_histori = self._buat_input_cari(
             "Cari di histori ini...", KONTAK_HISTORY_SEARCH_WIDTH, self._history_search_timer
@@ -554,14 +556,14 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
     def _terapkan_font_dasar(self):
         ukuran = get_fixed_font_sizes_pt()
-        for widget, token, tebal in (
-            (self.lbl_judul, "sz_title", True),
-            (self.lbl_judul_histori, "sz_total", True),
-            (self.txt_cari, "sz_input", False),
-            (self.txt_cari_histori, "sz_input", False),
-            (self.btn_tambah_pengirim, "sz_input", False),
+        for widget, token, weight in (
+            (self.lbl_judul, "subtitle", "medium"),
+            (self.lbl_judul_histori, "body", "medium"),
+            (self.txt_cari, "body", "regular"),
+            (self.txt_cari_histori, "body", "regular"),
+            (self.btn_tambah_pengirim, "body", "regular"),
         ):
-            widget.setFont(_buat_font_pt(ukuran[token], tebal=tebal))
+            widget.setFont(_buat_font_pt(ukuran[token], weight=weight))
         atur_tinggi_input((self.txt_cari, self.txt_cari_histori))
 
     def _ubah_zoom_ctrl_scroll(self, arah):

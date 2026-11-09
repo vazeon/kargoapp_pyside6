@@ -38,6 +38,7 @@ from utils.typography import (
     ORGANIZATION_NAME,
     konversi_style_font_ke_point,
     get_fixed_font_sizes,
+    get_font_weights,
 )
 from themes.modules.buku_gudang import (
     get_buku_gudang_styles,
@@ -65,6 +66,8 @@ WARNA_HEADER = "#F4C7F3"
 WARNA_GRUP = "#DDEBF7"
 WARNA_BARIS = ("#FFFFFF", "#FAFBFC")
 WARNA_TOTAL = "#FFF2CC"
+
+_FONT_WEIGHTS = get_font_weights()
 
 
 class _TabelManifestPenagihan(QTableWidget):
@@ -202,7 +205,8 @@ class TabManifestPenagihan(QWidget):
         )
         self.lbl_grup_terpin.setStyleSheet(
             f"QLabel {{ background-color: {WARNA_GRUP}; color: #202020; "
-            "font-weight: 700; padding: 4px 6px; border: 1px solid #9A9A9A; }"
+            f"font-weight: {_FONT_WEIGHTS['bold']}; "
+            "padding: 4px 6px; border: 1px solid #9A9A9A; }"
         )
         self.lbl_grup_terpin.hide()
 
@@ -238,7 +242,8 @@ class TabManifestPenagihan(QWidget):
 
         style_tabel = (
             "QHeaderView::section { background-color: #F4C7F3; color: #202020; "
-            "font-weight: 700; padding: 5px; border: 1px solid #777777; }"
+            f"font-weight: {_FONT_WEIGHTS['bold']}; "
+            "padding: 5px; border: 1px solid #777777; }"
             "QTableWidget { gridline-color: #9A9A9A; }"
         )
         self.tabel.setStyleSheet(style_tabel)
@@ -483,7 +488,7 @@ class TabManifestPenagihan(QWidget):
 
     def _style_menu_periode(self, is_dark=False):
         """Pakai tipografi menu yang sama dengan filter Buku Gudang."""
-        ukuran = max(10, get_fixed_font_sizes()["sz_input"] - 1)
+        ukuran = get_fixed_font_sizes()["body_small"]
         style_menu = konversi_style_font_ke_point(
             get_buku_gudang_menu_style(ukuran, is_dark)
         )
@@ -719,7 +724,7 @@ class TabManifestPenagihan(QWidget):
                 item_judul.setBackground(QColor(WARNA_GRUP))
                 item_judul.setForeground(QColor("#202020"))
                 font = QFont(item_judul.font())
-                font.setBold(True)
+                font.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
                 item_judul.setFont(font)
                 item_judul.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.tabel.setItem(row_group, 2, item_judul)
@@ -817,7 +822,7 @@ class TabManifestPenagihan(QWidget):
         item_label.setBackground(QColor(WARNA_TOTAL))
         item_label.setForeground(QColor("#202020"))
         font = QFont(item_label.font())
-        font.setBold(True)
+        font.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
         item_label.setFont(font)
         item_label.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.tabel.setItem(row_total, 2, item_label)
@@ -829,7 +834,7 @@ class TabManifestPenagihan(QWidget):
         item_nominal.setBackground(QColor(WARNA_TOTAL))
         item_nominal.setForeground(QColor("#202020"))
         font_nominal = QFont(item_nominal.font())
-        font_nominal.setBold(True)
+        font_nominal.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
         item_nominal.setFont(font_nominal)
         item_nominal.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         item_nominal.setData(Qt.ItemDataRole.UserRole, int(nilai_total))

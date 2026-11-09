@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from PySide6.QtGui import QFont
 from PySide6.QtCore import QSettings, QSignalBlocker, QSize, QTimer, QEvent, Qt, QObject
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,6 +44,7 @@ MAX_ICON_RENDER_SIZE = 512
 _TABLE_VIEW_TYPES = (QTableView,)
 
 settings_ui = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
+_FONT_WEIGHTS = typography.get_font_weights()
 
 
 class CtrlWheelZoomFilter(QObject):
@@ -134,7 +136,9 @@ def _float_aman(
     return hasil
 
 
-def batasi_ukuran_font(value: Any, default: float = 9.0) -> float:
+def batasi_ukuran_font(value: Any, default: Optional[float] = None) -> float:
+    if default is None:
+        default = typography.get_fixed_font_sizes_pt()["body_small"]
     minimum = _float_aman(
         getattr(typography, "MIN_FONT_SIZE_PT", 6.0),
         6.0,
@@ -213,7 +217,7 @@ def dapatkan_metrik_zoom(z: Any) -> ZoomMetrics:
     return ZoomMetrics(
         level=level,
         factor=dapatkan_faktor_geometri(level),
-        font_base_pt=batasi_ukuran_font(sizes.get("sz_base", 9.0), 9.0),
+        font_base_pt=batasi_ukuran_font(sizes["body_small"]),
         row_height=_skalakan(DEFAULT_TABLE_ROW_HEIGHT, level, 24, 10_000),
         header_height=_skalakan(DEFAULT_TABLE_HEADER_HEIGHT, level, 26, 10_000),
         icon_size=_skalakan(
@@ -425,7 +429,7 @@ def _header_font(header: QHeaderView, metrics: ZoomMetrics):
     font = header.font()
     font.setFamily(_master_font())
     font.setPointSizeF(metrics.font_base_pt)
-    font.setBold(True)
+    font.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
     return font
 
 

@@ -10,13 +10,15 @@ import re
 from functools import lru_cache
 
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font
+from utils.typography import get_font_weights, get_master_font, get_fixed_font_sizes
 from utils.ui_metrics import (
     MAIN_TAB_BAR_MIN_HEIGHT,
     TAB_MIN_WIDTH,
     TAB_PADDING_H,
     TAB_PADDING_V,
 )
+
+_FONT_WEIGHTS = get_font_weights()
 
 
 @lru_cache(maxsize=4)
@@ -104,7 +106,7 @@ def get_main_shell_styles(is_dark: bool) -> str:
             background-color: {btn_background};
             color: {btn_text};
             border: 1px solid {btn_border};
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             border-radius: 10px;
             padding: 4px;
         }}
@@ -118,7 +120,7 @@ def get_main_shell_styles(is_dark: bool) -> str:
         }}
         QLabel#LabelCabang {{
             font-family: "{get_master_font()}";
-            font-size: 13px;
+            font-size: {get_fixed_font_sizes()["body_small"]}px;
             color: #f59e0b;
             padding: 5px;
             margin-right: 10px;

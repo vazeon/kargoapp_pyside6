@@ -553,7 +553,7 @@ class ColumnDesignerDialog(QDialog):
         ukuran_dialog = get_fixed_font_sizes()
         style_dialog = konversi_style_font_ke_point(
             get_invoice_dialog_styles(
-                ukuran_dialog["sz_total"],
+                ukuran_dialog["subtitle"],
                 is_dark=bool(parent and getattr(parent.window(), "current_theme", "light") == "dark"),
             )
         )
@@ -1067,7 +1067,7 @@ class BillingQueueDialog(QDialog):
         self.tabel = QTableWidget()
         parent = self.parentWidget()
         dialog_styles = get_invoice_dialog_styles(
-            get_fixed_font_sizes()["sz_total"],
+            get_fixed_font_sizes()["subtitle"],
             is_dark=bool(parent and getattr(parent.window(), "current_theme", "light") == "dark"),
         )
         self.tabel.setStyleSheet(dialog_styles["table"])
@@ -3062,10 +3062,10 @@ class TabInvoice(ZoomTableMixin, QWidget):
         ukuran = get_fixed_font_sizes()
         return konversi_style_font_ke_point(get_invoice_styles(
             is_dark,
-            ukuran["sz_title"],
-            ukuran["sz_base"],
-            ukuran["sz_input"],
-            ukuran["sz_total"],
+            ukuran["body"],
+            ukuran["body_small"],
+            ukuran["body"],
+            ukuran["display"],
         ))
 
     def _terapkan_tema_statis_invoice(self, is_dark, styles):

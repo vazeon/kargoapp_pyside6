@@ -166,31 +166,65 @@ def _set_property(obj: QObject, name: str, value) -> None:
 
 def _ancestor_item_view(widget: QWidget) -> bool:
     """True untuk child internal tabel/list, bukan item-view root itu sendiri."""
+    # QTableWidgetItem bukan QWidget dan tidak memiliki parentWidget().
+    # Guard ini juga melindungi helper dari objek Qt lain yang terselip.
+    if not isinstance(widget, QWidget):
+        return False
+
     try:
         parent = widget.parentWidget()
-    except RuntimeError:
+    except (AttributeError, RuntimeError, TypeError):
         return False
-    while parent is not None:
+
+    while isinstance(parent, QWidget):
         if isinstance(parent, QAbstractItemView):
             return True
         try:
             parent = parent.parentWidget()
-        except RuntimeError:
+        except (AttributeError, RuntimeError, TypeError):
             return False
     return False
 
 
 def _dalam_message_box(widget: QWidget) -> bool:
     """True bila widget adalah QMessageBox atau child internalnya."""
+    # Jangan memanggil parentWidget() pada QTableWidgetItem/QObject non-widget.
+    if not isinstance(widget, QWidget):
+        return False
+
     current = widget
-    while current is not None:
+    while isinstance(current, QWidget):
         if isinstance(current, QMessageBox):
             return True
         try:
             current = current.parentWidget()
-        except RuntimeError:
+        except (AttributeError, RuntimeError, TypeError):
             return False
     return False
+
+
+def _collect_root_widgets(root: QWidget) -> list[QWidget]:
+    """Ambil hanya QWidget dari tree root dan hilangkan duplikat."""
+    if not isinstance(root, QWidget):
+        return []
+
+    widgets = [root]
+    try:
+        children = root.findChildren(QWidget)
+    except (AttributeError, RuntimeError, TypeError):
+        children = ()
+
+    seen = {id(root)}
+    for child in children:
+        # Semua operasi scaler di bawah hanya valid untuk QWidget.
+        if not isinstance(child, QWidget):
+            continue
+        child_id = id(child)
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        widgets.append(child)
+    return widgets
 
 
 def _layout_dalam_message_box(layout: QLayout) -> bool:
@@ -214,7 +248,7 @@ def _layout_dalam_message_box(layout: QLayout) -> bool:
 
 def _qt_object_alive(obj) -> bool:
     """Cek wrapper Qt sebelum menyentuh property/method C++-nya."""
-    if obj is None:
+    if obj is None or not isinstance(obj, QObject):
         return False
     if _shiboken_is_valid is not None:
         try:
@@ -349,21 +383,19 @@ class ResponsiveUIScaler(QObject):
 
     def _install_filters(self) -> None:
         root = self._root
-        if root is None:
+        if not isinstance(root, QWidget):
             return
-        widgets = [root]
-        try:
-            widgets.extend(root.findChildren(QWidget))
-        except RuntimeError:
-            return
-        for widget in widgets:
+
+        for widget in _collect_root_widgets(root):
             if _dalam_message_box(widget):
                 continue
             try:
                 if not bool(widget.property("_ui_scaler_filter_installed")):
                     widget.installEventFilter(self)
                     widget.setProperty("_ui_scaler_filter_installed", True)
-            except RuntimeError:
+            except (AttributeError, RuntimeError, TypeError):
+                # Satu wrapper Qt yang tidak valid tidak boleh membatalkan
+                # pemasangan filter untuk widget lain.
                 continue
         self._ensure_screen_connection()
 
@@ -655,14 +687,12 @@ class ResponsiveUIScaler(QObject):
             if scale_changed and callable(self._on_scale_changed):
                 self._on_scale_changed(self._scale)
 
-            widgets = [root]
-            try:
-                widgets.extend(root.findChildren(QWidget))
-            except RuntimeError:
-                pass
+            # Kumpulkan hanya QWidget. Jangan biarkan object item/model non-widget
+            # masuk ke helper yang menggunakan parentWidget(), styleSheet(), dll.
+            widgets = _collect_root_widgets(root)
 
             for widget in widgets:
-                if not _qt_object_alive(widget):
+                if not isinstance(widget, QWidget) or not _qt_object_alive(widget):
                     continue
                 try:
                     self._scale_widget_stylesheet(widget, self._scale)

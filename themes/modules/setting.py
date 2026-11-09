@@ -1,8 +1,15 @@
 # themes/modules/setting.py
 from themes.colors import get_theme_colors
 from themes.components.table import get_table_styles, TableMetrics
-from utils.typography import get_master_font, ukuran_font_px_ke_pt
+from utils.typography import (
+    get_fixed_font_sizes,
+    get_font_weights,
+    get_master_font,
+    ukuran_font_px_ke_pt,
+)
 
+
+_FONT_WEIGHTS = get_font_weights()
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
@@ -11,32 +18,33 @@ def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
 
 def get_setting_styles(
     is_dark: bool,
-    sz_base: int,
-    sz_input: int,
-    sz_title: int,
+    body_small_size: int,
+    body_size: int,
+    subtitle_size: int,
 ) -> dict:
     ui = get_theme_colors(is_dark)["ui"]
+    display_size = get_fixed_font_sizes()["display"]
     return {
         'table': get_table_styles(
             is_dark,
             metrics=TableMetrics(
                 font_family=get_master_font(),
-                font_size_pt=ukuran_font_px_ke_pt(sz_base),
+                font_size_pt=ukuran_font_px_ke_pt(body_small_size),
             ),
         ),
         'form_label': f"""
             color: {_warna_tema(is_dark, "#94a3b8", "#475569")};
-            font-size: {sz_base}px;
+            font-size: {body_small_size}px;
             font-family: '{get_master_font()}';
-            font-weight: normal;
+            font-weight: {_FONT_WEIGHTS["regular"]};
         """,
         'btn_secondary': f"""
             QPushButton {{
                 background-color: transparent;
                 color: {_warna_tema(is_dark, "#93c5fd", "#2563eb")};
-                font-size: {sz_base}px;
+                font-size: {body_small_size}px;
                 font-family: '{get_master_font()}';
-                font-weight: 600;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 border: 1px solid {_warna_tema(is_dark, "#60a5fa", "#2563eb")};
                 border-radius: 6px;
                 padding: 8px 8px;
@@ -64,7 +72,7 @@ def get_setting_styles(
                 border: none;
                 outline: none;
                 font-family: '{get_master_font()}';
-                font-size: {sz_input}px;
+                font-size: {body_size}px;
             }}
             QListWidget::item {{
                 padding: 8px 16px;
@@ -79,13 +87,13 @@ def get_setting_styles(
             QListWidget::item:selected:!active {{
                 background-color: #3b82f6;
                 color: #ffffff;
-                font-weight: bold;
+                font-weight: {_FONT_WEIGHTS["bold"]};
             }}
         """,
         'custom_groupbox': f"""
             QGroupBox {{
-                font-weight: 500;
-                font-size: {sz_title}px;
+                font-weight: {_FONT_WEIGHTS["medium"]};
+                font-size: {body_size}px;
                 font-family: '{get_master_font()}';
                 color: {ui["text_primary"]};
                 background-color: transparent;
@@ -98,8 +106,8 @@ def get_setting_styles(
             }}
         """,
         'lbl_page_title': f"""
-            font-size: {sz_title + 2}px;
-            font-weight: 600;
+            font-size: {subtitle_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
             margin-bottom: 20px;
             color: {ui["text_primary"]};
@@ -111,8 +119,8 @@ def get_setting_styles(
         'btn_add_rekening': f"""
             QPushButton {{
                 color: #3b82f6;
-                font-size: 26px;
-                font-weight: bold;
+                font-size: {display_size}px;
+                font-weight: {_FONT_WEIGHTS["bold"]};
                 background: transparent;
                 border: none;
                 font-family: "{get_master_font()}";
@@ -121,8 +129,8 @@ def get_setting_styles(
         'btn_row_delete': f"""
             QPushButton {{
                 color: #ef4444;
-                font-size: 26px;
-                font-weight: bold;
+                font-size: {display_size}px;
+                font-weight: {_FONT_WEIGHTS["bold"]};
                 background: transparent;
                 border: none;
                 font-family: "{get_master_font()}";
@@ -131,16 +139,16 @@ def get_setting_styles(
         'btn_row_delete_disabled': f"""
             QPushButton {{
                 color: #94a3b8;
-                font-size: 26px;
-                font-weight: bold;
+                font-size: {display_size}px;
+                font-weight: {_FONT_WEIGHTS["bold"]};
                 background: transparent;
                 border: none;
                 font-family: "{get_master_font()}";
             }}
         """,
         'lbl_menu': f"""
-            font-weight: 500;
-            font-size: 18px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            font-size: {subtitle_size}px;
             color: #94a3b8;
             margin-bottom: 10px;
         """

@@ -1,15 +1,8 @@
 # themes/modules/resi.py
 from themes.colors import get_theme_colors
-from utils.typography import get_master_font, get_fixed_font_sizes
+from utils.typography import get_font_weights, get_master_font, get_fixed_font_sizes
 
-# Caller ukuran font khusus Tab Resi.
-# Ubah nilai di sini untuk menyesuaikan tipografi tanpa menyentuh kode widget.
-UKURAN_FONT_LABEL = 13
-UKURAN_FONT_INPUT = 13
-UKURAN_FONT_TOTAL_ONGKIR = 16
-UKURAN_FONT_CARD_REKENING_BANK = 13
-UKURAN_FONT_HISTORI_RESI = 13
-
+_FONT_WEIGHTS = get_font_weights()
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     """Pilih warna tanpa menjauhkan kode warna dari blok style pemakainya."""
@@ -32,13 +25,15 @@ def get_resi_rekening_styles(is_dark: bool) -> dict:
     """Style khusus kelompok dan isi kartu rekening pada Tab Resi."""
     border = _warna_tema(is_dark, "#3f434d", "#cbd5e1")
     font = get_master_font()
+    body_size = get_fixed_font_sizes()["body"]
+    panel_title_size = get_fixed_font_sizes()["body_small"]
 
     return {
         "group_box": f"""
             QGroupBox {{
                 font-family: '{font}';
-                font-size: {UKURAN_FONT_LABEL}px;
-                font-weight: 500;
+                font-size: {panel_title_size}px;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 color: {_warna_tema(is_dark, "#94a3b8", "#64748b")};
 
                 border: 1px solid {border};
@@ -49,8 +44,8 @@ def get_resi_rekening_styles(is_dark: bool) -> dict:
 
             QGroupBox::title {{
                 font-family: '{font}';
-                font-size: {UKURAN_FONT_LABEL}px;
-                font-weight: 500;
+                font-size: {panel_title_size}px;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
                 left: 10px;
@@ -60,15 +55,15 @@ def get_resi_rekening_styles(is_dark: bool) -> dict:
         """,
         "label_top": f"""
             color: {_warna_tema(is_dark, "#e2e8f0", "#334155")};
-            font-size: {UKURAN_FONT_CARD_REKENING_BANK}px;
+            font-size: {body_size}px;
             border: none;
             background: transparent;
             font-family: '{font}';
         """,
         "label_bottom": f"""
             color: {_warna_tema(is_dark, "#a8b3c5", "#64748b")};
-            font-size: {UKURAN_FONT_CARD_REKENING_BANK}px;
-            font-weight: normal;
+            font-size: {body_size}px;
+            font-weight: {_FONT_WEIGHTS["regular"]};
             border: none;
             background: transparent;
             font-family: '{font}';
@@ -101,8 +96,8 @@ def get_btn_simpan_cetak_style() -> str:
         QPushButton {{
             background-color: #22c55e;
             color: white;
-            font-weight: 500;
-            font-size: 14px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            font-size: {get_fixed_font_sizes()["body"]}px;
             padding: 10px 40px;
             border-radius: 6px;
             border: none;
@@ -125,17 +120,18 @@ def get_resi_styles(
 ) -> dict:
     """Menghasilkan seluruh style UI untuk TabResi."""
     sizes = get_fixed_font_sizes()
-    sz_title = sizes["sz_title"]
-    sz_sm = sizes["sz_sm"]
-    sz_base = sizes["sz_base"]
-    sz_total = sizes["sz_total"]
+    page_title_size = sizes["subtitle"]
+    subtitle_size = sizes["subtitle"]
+    body_size = sizes["body"]
+    body_small_size = sizes["body_small"]
+    caption_size = sizes["caption"]
 
     ui = get_theme_colors(is_dark)["ui"]
     placeholder = ui["placeholder_text"]
 
     input_style = f"""
         QLineEdit, QTextEdit, QDateEdit {{
-            font-size: {UKURAN_FONT_INPUT}px;
+            font-size: {body_size}px;
             background-color: {ui["field_background"]};
             color: {ui["text_primary"]};
             border: 1px solid {ui["field_border"]};
@@ -154,8 +150,8 @@ def get_resi_styles(
 
     qss_group_umum = f"""
         QGroupBox {{
-            font-weight: 500;
-            font-size: {sz_base}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            font-size: {body_small_size}px;
             color: {ui["text_primary"]};
             background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
             border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
@@ -169,8 +165,8 @@ def get_resi_styles(
         }}
         QLabel {{
             color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
-            font-size: {UKURAN_FONT_LABEL}px;
-            font-weight: 500;
+            font-size: {body_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             background-color: transparent;
             font-family: '{get_master_font()}';
         }}
@@ -179,8 +175,8 @@ def get_resi_styles(
 
     qss_group_tabel = f"""
         QGroupBox {{
-            font-weight: 500;
-            font-size: {sz_base}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            font-size: {body_small_size}px;
             color: {ui["text_primary"]};
             background-color: {_warna_tema(is_dark, "#25282e", "#ffffff")};
             border: 1px solid {_warna_tema(is_dark, "#3f434d", "#cbd5e1")};
@@ -194,7 +190,7 @@ def get_resi_styles(
         }}
         QLabel {{
             color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
-            font-size: {UKURAN_FONT_LABEL}px;
+            font-size: {body_size}px;
             font-family: '{get_master_font()}';
         }}
     """
@@ -205,27 +201,27 @@ def get_resi_styles(
     return {
         "lbl_main_title": f"""
             color: {ui["text_primary"]};
-            font-size: {sz_title}px;
-            font-weight: 500;
+            font-size: {page_title_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             margin-bottom: 1px;
             font-family: '{get_master_font()}';
         """,
         "lbl_tgl_tag": f"""
             color: {_warna_tema(is_dark, "#9ca3af", "#64748b")};
-            font-weight: 500;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
-            font-size: {UKURAN_FONT_LABEL}px;
+            font-size: {body_size}px;
         """,
         "lbl_resi_tag": f"""
             color: {_warna_tema(is_dark, "#9ca3af", "#64748b")};
-            font-size: {UKURAN_FONT_LABEL}px;
-            font-weight: 500;
+            font-size: {body_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
         """,
         "lbl_histori_title": f"""
             color: {ui["text_primary"]};
-            font-size: {UKURAN_FONT_HISTORI_RESI}px;
-            font-weight: 500;
+            font-size: {body_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
         """,
         "txt_resi_display": f"""
@@ -234,14 +230,15 @@ def get_resi_styles(
             border-radius: 6px;
             padding: 6px 12px;
             color: {_warna_tema(is_dark, "#fbbf24", "#3b82f6")};
-            font-weight: 500;
-            font-size: {sz_total}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            font-size: {subtitle_size}px;
             letter-spacing: 1px;
             font-family: '{get_master_font()}';
         """,
         "date_input": f"""
             QLabel {{
-                font-size: {UKURAN_FONT_INPUT}px;
+                font-size: {body_small_size}px;
+                font-weight: {_FONT_WEIGHTS["regular"]};
                 font-family: '{get_master_font()}';
                 padding: 2px 10px;
                 border: none;
@@ -256,7 +253,7 @@ def get_resi_styles(
                 border: 1px solid {ui["field_border"]};
                 border-radius: 6px;
                 padding: 5px;
-                font-size: {UKURAN_FONT_HISTORI_RESI}px;
+                font-size: {body_size}px;
                 font-family: '{get_master_font()}';
             }}
             QListWidget::item {{
@@ -265,7 +262,7 @@ def get_resi_styles(
         """,
         "txt_search": f"""
             QLineEdit {{
-                font-size: {UKURAN_FONT_INPUT}px;
+                font-size: {body_size}px;
                 background-color: {ui["field_background"]};
                 color: {ui["text_primary"]};
                 placeholder-text-color: {placeholder};
@@ -279,10 +276,10 @@ def get_resi_styles(
             QPushButton {{
                 background-color: #ef4444;
                 color: white;
-                font-weight: 500;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 border-radius: 4px;
                 padding: 4px;
-                font-size: {sz_sm}px;
+                font-size: {caption_size}px;
                 font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
@@ -300,13 +297,13 @@ def get_resi_styles(
         "group_tabel_container": qss_group_tabel,
         "btn_tambah_baris": f"""
             QPushButton {{
-                font-size: {sz_base}px;
+                font-size: {body_small_size}px;
                 background-color: {_warna_tema(is_dark, "#31353d", "#ffffff")};
                 color: {ui["selection_background"]};
                 border: 1px solid {ui["selection_background"]};
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: 500;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
@@ -318,13 +315,13 @@ def get_resi_styles(
         """,
         "btn_hapus_baris": f"""
             QPushButton {{
-                font-size: {sz_base}px;
+                font-size: {body_small_size}px;
                 background-color: {_warna_tema(is_dark, "#31353d", "#ffffff")};
                 color: {_warna_tema(is_dark, "#ef4444", "#dc2626")};
                 border: 1px solid {_warna_tema(is_dark, "#4c525e", "#fca5a5")};
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: 500;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 font-family: '{get_master_font()}';
             }}
             QPushButton:hover {{
@@ -338,8 +335,8 @@ def get_resi_styles(
         """,
         "txt_total_ongkir": f"""
             QLineEdit {{
-                font-size: {UKURAN_FONT_TOTAL_ONGKIR}px;
-                font-weight: 500;
+                font-size: {subtitle_size}px;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 color: {ui["selection_background"]};
                 placeholder-text-color: {placeholder};
                 background-color: {ui["field_background"]};
@@ -359,7 +356,7 @@ def get_resi_styles(
                 border: 2px solid transparent;
                 border-radius: 6px;
                 padding: 5px 9px;
-                font-weight: 600;
+                font-weight: {_FONT_WEIGHTS["medium"]};
                 text-align: left;
                 font-family: '{get_master_font()}';
             }}
@@ -378,14 +375,17 @@ def get_resi_styles(
 def get_btn_clear_container_style(is_dark: bool = False) -> str:
     """Style QToolButton reset/clear container khusus untuk Tab Resi."""
     ui = get_theme_colors(is_dark)["ui"]
+    sizes = get_fixed_font_sizes()
+    caption_size = sizes["caption"]
+    title_size = sizes["title"]
     return f"""
         QToolButton {{
             color: {_warna_tema(is_dark, "#d1d5db", "#808d8b")};
             background-color: transparent;
             border: none;
             border-radius: 4px;
-            font-size: 16pt;
-            font-weight: 400;
+            font-size: {title_size}px;
+            font-weight: {_FONT_WEIGHTS["regular"]};
             padding: 0px;
             font-family: '{get_master_font()}';
         }}
@@ -405,8 +405,8 @@ def get_btn_clear_container_style(is_dark: bool = False) -> str:
             border: 1px solid {_warna_tema(is_dark, "#4c525e", "#d1d5db")};
             padding: 2px 5px;
             border-radius: 3px;
-            font-size: 11px;
-            font-weight: normal;
+            font-size: {caption_size}px;
+            font-weight: {_FONT_WEIGHTS["regular"]};
             font-family: '{get_master_font()}';
         }}
     """

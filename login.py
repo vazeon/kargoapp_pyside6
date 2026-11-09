@@ -32,9 +32,11 @@ from session_store import (
     update_offline_login_profile,
 )
 from database_manager import init_db
-from utils.typography import get_fixed_font_sizes_pt
+from utils.typography import get_fixed_font_sizes_pt, get_font_weights
 from utils.ui_scaler import ResponsiveUIScaler
 
+
+_FONT_WEIGHTS = get_font_weights()
 
 class LoginWindow(QWidget):
     restore_finished = Signal(bool)
@@ -73,7 +75,7 @@ class LoginWindow(QWidget):
                 }}
                 QWidget {{
                     color: #1e293b;
-                    font-size: {font_sizes['sz_base']}pt;
+                    font-size: {font_sizes['body_small']}pt;
                 }}
                 #LoginCard {{
                     background-color: #ffffff;
@@ -87,7 +89,7 @@ class LoginWindow(QWidget):
                     padding: 11px 15px;
                     color: #0f172a;
                     placeholder-text-color: {placeholder_color};
-                    font-size: {font_sizes['sz_input']}pt;
+                    font-size: {font_sizes['body']}pt;
                 }}
                 QLineEdit:focus {{
                     border: 1px solid #2563eb;
@@ -99,8 +101,8 @@ class LoginWindow(QWidget):
                     border: none;
                     border-radius: 6px;
                     padding: 12px;
-                    font-weight: bold;
-                    font-size: {font_sizes['sz_input']}pt;
+                    font-weight: {_FONT_WEIGHTS["bold"]};
+                    font-size: {font_sizes['body']}pt;
                     letter-spacing: 1px;
                 }}
                 QPushButton#BtnEnter:hover {{
@@ -109,8 +111,8 @@ class LoginWindow(QWidget):
                 QPushButton#BtnCloseTop {{
                     background-color: transparent;
                     color: #94a3b8;
-                    font-size: {font_sizes['sz_title']}pt;
-                    font-weight: bold;
+                    font-size: {font_sizes['subtitle']}pt;
+                    font-weight: {_FONT_WEIGHTS["bold"]};
                     border: none;
                     border-radius: 4px;
                 }}
@@ -156,8 +158,8 @@ class LoginWindow(QWidget):
         lbl_title = self._buat_label_identitas(
             DATA_CLIENT.get("nama_perusahaan", "SISTEM EKSPEDISI KARGO"),
             f"""
-                font-size: {font_sizes['sz_total']}pt;
-                font-weight: bold;
+                font-size: {font_sizes['title']}pt;
+                font-weight: {_FONT_WEIGHTS["bold"]};
                 color: #0f172a;
                 letter-spacing: 1px;
                 text-transform: uppercase;
@@ -170,10 +172,10 @@ class LoginWindow(QWidget):
         card_layout.addWidget(self._buat_label_identitas(
             "PANEL ADMIN",
             f"""
-                font-size: {font_sizes['sz_sm']}pt;
+                font-size: {font_sizes['caption']}pt;
                 letter-spacing: 3px;
                 color: #2563eb;
-                font-weight: bold;
+                font-weight: {_FONT_WEIGHTS["bold"]};
                 margin-bottom: 5px;
             """,
         ))

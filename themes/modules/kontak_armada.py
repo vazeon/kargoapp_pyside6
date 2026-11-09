@@ -6,7 +6,10 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 from themes.colors import get_theme_colors
+from utils.typography import get_font_weights
 
+
+_FONT_WEIGHTS = get_font_weights()
 
 ARMADA_PREVIEW_FOTO_STYLE = """
     border: 2px dashed #9ca3af;
@@ -27,11 +30,11 @@ def get_kontak_riwayat_styles(is_dark: bool) -> Dict[str, str]:
     return {
         "judul": f"""
             color: {_warna_tema(is_dark, "#ffffff", "#1e293b")};
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["medium"]};
         """,
         "judul_histori": f"""
             color: {ui["accent"]};
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["medium"]};
         """,
         "input": f"""
             background-color: {ui["field_background"]};
@@ -86,7 +89,7 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
                 background-color: transparent;
                 color: #ef4444;
                 border: 1px solid #ef4444;
-                font-weight: bold;
+                font-weight: {_FONT_WEIGHTS["bold"]};
                 border-radius: 4px;
             }}
             QPushButton:hover {{
@@ -114,11 +117,11 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
         """,
         "label_judul": f"""
             color: {ui["text_primary"]};
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["medium"]};
         """,
         "label_judul_kanan": f"""
             color: {ui["accent"]};
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["medium"]};
         """,
     }
 
@@ -126,7 +129,7 @@ def get_armada_styles(is_dark: bool, mode: str) -> Dict[str, str]:
         QPushButton {{
             background-color: {warna_btn_utama};
             color: white;
-            font-weight: bold;
+            font-weight: {_FONT_WEIGHTS["bold"]};
             border-radius: 4px;
         }}
         QPushButton:hover {{

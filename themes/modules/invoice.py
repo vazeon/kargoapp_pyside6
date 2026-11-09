@@ -5,21 +5,23 @@ from typing import Dict
 
 from themes.colors import get_theme_colors
 from themes.components.table import get_table_styles, TableMetrics
-from utils.typography import get_master_font, ukuran_font_px_ke_pt
+from utils.typography import get_font_weights, get_master_font, ukuran_font_px_ke_pt
 
+
+_FONT_WEIGHTS = get_font_weights()
 
 def _warna_tema(is_dark: bool, gelap: str, terang: str) -> str:
     """Pilih warna khusus modul yang memang berbeda antara tema gelap/terang."""
     return gelap if is_dark else terang
 
 
-def get_invoice_dialog_styles(size_total: int, is_dark: bool = False) -> Dict[str, str]:
+def get_invoice_dialog_styles(title_size: int, is_dark: bool = False) -> Dict[str, str]:
     """Menghasilkan QSS khusus dialog pengaturan kolom Invoice."""
     return {
         "table": get_table_styles(is_dark),
         "title": f"""
-            font-size:{size_total}px;
-            font-weight:bold;
+            font-size:{title_size}px;
+            font-weight:{_FONT_WEIGHTS["medium"]};
             font-family:'{get_master_font()}';
         """,
     }
@@ -27,10 +29,10 @@ def get_invoice_dialog_styles(size_total: int, is_dark: bool = False) -> Dict[st
 
 def get_invoice_styles(
     is_dark: bool,
-    size_title: int,
-    size_base: int,
-    size_input: int,
-    size_total: int,
+    section_title_size: int,
+    body_small_size: int,
+    body_size: int,
+    display_size: int,
 ) -> Dict[str, str]:
     """Menghasilkan seluruh style UI Invoice berdasarkan tema dan zoom."""
     ui = get_theme_colors(is_dark)["ui"]
@@ -41,16 +43,16 @@ def get_invoice_styles(
         is_dark,
         metrics=TableMetrics(
             font_family=get_master_font(),
-            font_size_pt=ukuran_font_px_ke_pt(size_base),
+            font_size_pt=ukuran_font_px_ke_pt(body_small_size),
         ),
     )
     history_qss = editor_qss = table_qss
 
     button_qss = f"""
         QPushButton {{
-            font-size:{size_base}px;
+            font-size:{body_small_size}px;
             font-family:'{get_master_font()}';
-            font-weight:600;
+            font-weight:{_FONT_WEIGHTS["medium"]};
             padding:7px 12px;
             border-radius:5px;
             background:#e2e8f0;
@@ -71,32 +73,32 @@ def get_invoice_styles(
 
     return {
         "lbl_title_histori": f"""
-            font-size:{size_title}px;
-            font-weight:bold;
+            font-size:{section_title_size}px;
+            font-weight:{_FONT_WEIGHTS["medium"]};
             font-family:'{get_master_font()}';
             color:{ui["text_primary"]};
         """,
         "lbl_title_editor": f"""
-            font-size:{size_title + 1}px;
-            font-weight:bold;
+            font-size:{section_title_size}px;
+            font-weight:{_FONT_WEIGHTS["medium"]};
             font-family:'{get_master_font()}';
             color:{ui["accent"]};
         """,
         "lbl_subtotal": f"""
-            font-size:{size_base}px;
-            font-weight:bold;
+            font-size:{body_small_size}px;
+            font-weight:{_FONT_WEIGHTS["bold"]};
             font-family:'{get_master_font()}';
             color:{_warna_tema(is_dark, "#e2e8f0", "#334155")};
         """,
         "lbl_total_tagihan": f"""
-            font-size:{size_total}px;
-            font-weight:bold;
+            font-size:{display_size}px;
+            font-weight:{_FONT_WEIGHTS["bold"]};
             font-family:'{get_master_font()}';
             color:#dc2626;
             margin-top:4px;
         """,
         "input": f"""
-            font-size:{size_input}px;
+            font-size:{body_size}px;
             font-family:'{get_master_font()}';
             padding:6px;
         """,
