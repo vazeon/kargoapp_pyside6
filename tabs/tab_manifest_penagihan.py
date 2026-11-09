@@ -11,7 +11,7 @@ from datetime import datetime
 from bisect import bisect_right
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, QTimer, Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -68,13 +68,32 @@ WARNA_TOTAL = "#FFF2CC"
 
 
 class _TabelManifestPenagihan(QTableWidget):
-    """Tabel utama yang memberi tahu overlay ketika ukurannya berubah."""
+    """Tabel utama dengan sinkronisasi overlay resize yang terkoalesensi."""
+
+    RESIZE_SYNC_INTERVAL_MS = 16
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._callback_resize = None
+        self._resize_sync_timer = QTimer(self)
+        self._resize_sync_timer.setSingleShot(True)
+        self._resize_sync_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._resize_sync_timer.setInterval(self.RESIZE_SYNC_INTERVAL_MS)
+        self._resize_sync_timer.timeout.connect(self._jalankan_callback_resize)
+
+    def _jadwalkan_callback_resize(self):
+        callback = self._callback_resize
+        if callable(callback) and not self._resize_sync_timer.isActive():
+            self._resize_sync_timer.start()
+
+    def _jalankan_callback_resize(self):
+        callback = self._callback_resize
+        if callable(callback):
+            callback()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        callback = getattr(self, "_callback_resize", None)
-        if callable(callback):
-            callback()
+        self._jadwalkan_callback_resize()
 
 
 class TabManifestPenagihan(QWidget):
@@ -300,11 +319,25 @@ class TabManifestPenagihan(QWidget):
             + self.tabel.viewport().height()
             + 2 * frame
         )
-        self.tabel_terpin.setGeometry(0, 0, lebar + 2 * frame, tinggi)
-        self.tabel_terpin.setColumnWidth(0, self.tabel.columnWidth(0))
-        self.tabel_terpin.setColumnWidth(1, self.tabel.columnWidth(1))
+        target_geometry = (0, 0, lebar + 2 * frame, tinggi)
+        current_geometry = self.tabel_terpin.geometry()
+        geometry_changed = (
+            current_geometry.x(),
+            current_geometry.y(),
+            current_geometry.width(),
+            current_geometry.height(),
+        ) != target_geometry
+        if geometry_changed:
+            self.tabel_terpin.setGeometry(*target_geometry)
+
+        for column in (0, 1):
+            target_width = self.tabel.columnWidth(column)
+            if self.tabel_terpin.columnWidth(column) != target_width:
+                self.tabel_terpin.setColumnWidth(column, target_width)
+
         self._sinkronkan_scrollbar_terpin()
-        self.tabel_terpin.raise_()
+        if geometry_changed:
+            self.tabel_terpin.raise_()
         self._perbarui_label_grup_terpin()
 
     def _sinkronkan_scrollbar_terpin(self, *_args):

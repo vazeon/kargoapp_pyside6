@@ -5360,11 +5360,12 @@ def _sync_once_with_network_retry(cancel_event=None) -> Dict[str, int]:
 
 
 class AutoSyncController:
-    def __init__(self, parent, interval_ms: int = 15_000):
+    def __init__(self, parent, interval_ms: int = 15_000, on_success=None):
         from PySide6.QtCore import QTimer
 
         self.parent = parent
         self.interval_ms = int(interval_ms)
+        self.on_success = on_success
         self.timer = QTimer(parent)
         self.timer.setInterval(self.interval_ms)
         self.timer.timeout.connect(self._start_worker)
@@ -5394,6 +5395,12 @@ class AutoSyncController:
                 return
             self._offline_logged = False
             print(f"[SYNC] {result}", flush=True)
+            callback = self.on_success
+            if callable(callback):
+                try:
+                    callback(result)
+                except Exception:
+                    logger.exception("[SYNC] Callback hasil sync gagal dikirim ke UI.")
         except SyncCancelledError:
             logger.debug("[SYNC] Worker dihentikan secara terkoordinasi.")
         except SyncOfflineError:

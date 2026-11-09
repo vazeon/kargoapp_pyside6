@@ -1,17 +1,4 @@
 # utils/ui_scaler.py
-"""Penerapan responsive geometry ke tree QWidget secara aman.
-
-Layer ini menangani geometry umum (constraint widget, layout, spacer, icon,
-stylesheet geometry) berdasarkan faktor dari ``utils.ui_metrics``.
-
-Yang sengaja tidak ditangani di sini:
-- font: tetap point/DPI based melalui ``utils.typography``;
-- row/header/column internal tabel: ditangani ``utils.zoom``;
-- logika bisnis widget.
-
-Semua scaling selalu dihitung dari baseline yang disimpan pertama kali sehingga
-pemanggilan berulang tidak menumpuk (non-cumulative scaling).
-"""
 
 from __future__ import annotations
 
@@ -260,6 +247,12 @@ class ResponsiveUIScaler(QObject):
         self._apply_pending = False
         self._applying = False
         self._spacer_bases = {}
+        # Gabungkan perubahan widget dinamis menjadi satu pass. Event Show child
+        # tidak lagi menjadwalkan sweep seluruh tree (lihat eventFilter).
+        self._apply_timer = QTimer(self)
+        self._apply_timer.setSingleShot(True)
+        self._apply_timer.setInterval(30)
+        self._apply_timer.timeout.connect(self.apply_now)
         self._install_filters()
         self._initialized = True
 
@@ -317,16 +310,24 @@ class ResponsiveUIScaler(QObject):
             return False
 
         event_type = event.type()
+
+        # Show pada child sering terjadi ketika layout mengaktifkan scrollbar,
+        # editor, atau widget internal saat window di-resize. Menjadwalkan
+        # apply_now dari setiap Show membuat seluruh tree QWidget/layout disapu
+        # berulang kali selama drag resize. Show hanya diperlukan untuk
+        # menghubungkan screen native milik top-level window.
+        if event_type == QEvent.Type.Show:
+            if watched is self._root:
+                self._ensure_screen_connection()
+            return False
+
         if event_type in {
             QEvent.Type.ChildAdded,
-            QEvent.Type.Show,
             QEvent.Type.ParentChange,
         } or (
             event_type == QEvent.Type.StyleChange
             and bool(watched.property(_EXPLICIT_GEOMETRY))
         ):
-            if watched is self._root and event_type == QEvent.Type.Show:
-                self._ensure_screen_connection()
             self.schedule_apply()
         return False
 
@@ -339,7 +340,12 @@ class ResponsiveUIScaler(QObject):
             self._apply_pending = False
             return
         self._apply_pending = True
-        QTimer.singleShot(0, self.apply_now)
+        timer = getattr(self, "_apply_timer", None)
+        if timer is not None:
+            timer.start()
+        else:
+            # Fallback defensif selama konstruksi/compatibility.
+            QTimer.singleShot(30, self.apply_now)
 
     def _install_filters(self) -> None:
         root = self._root
@@ -626,6 +632,9 @@ class ResponsiveUIScaler(QObject):
 
     def apply_now(self) -> None:
         self._apply_pending = False
+        timer = getattr(self, "_apply_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
         if self._applying:
             return
 
@@ -687,6 +696,9 @@ class ResponsiveUIScaler(QObject):
     def shutdown(self) -> None:
         """Lepaskan referensi root agar callback queued tidak menyentuh QWidget mati."""
         self._apply_pending = False
+        timer = getattr(self, "_apply_timer", None)
+        if timer is not None:
+            timer.stop()
         self._root = None
         self._on_scale_changed = None
         self._spacer_bases.clear()

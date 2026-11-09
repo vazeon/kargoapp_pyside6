@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Callable, Optional, Tuple, Union
+from collections import OrderedDict
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPalette, QPen, QRegion
@@ -39,6 +40,7 @@ class StatusColorDelegate(QStyledItemDelegate):
         normalize_status: bool = True,
         status_role: int = Qt.ItemDataRole.DisplayRole,
         selected_checkbox_color: Optional[ColorValue] = None,
+        color_cache_size: int = 0,
         parent: Optional[QAbstractItemView] = None,
     ) -> None:
         super().__init__(parent)
@@ -53,8 +55,10 @@ class StatusColorDelegate(QStyledItemDelegate):
         self._is_dark = bool(is_dark)
         self._normalize_status = bool(normalize_status)
         self._status_role = int(status_role)
-        # Opt-in per tabel. None mempertahankan tampilan delegate lama.
+        # Opt-in per tabel. Default 0 mempertahankan perilaku delegate lama.
         self._selected_checkbox_color = _to_qcolor(selected_checkbox_color)
+        self._color_cache_limit = max(0, int(color_cache_size))
+        self._color_cache = OrderedDict()
 
     @property
     def is_dark(self) -> bool:
@@ -66,6 +70,7 @@ class StatusColorDelegate(QStyledItemDelegate):
             return
 
         self._is_dark = new_value
+        self._color_cache.clear()
         self.refresh()
 
     def refresh(self) -> None:
@@ -78,6 +83,34 @@ class StatusColorDelegate(QStyledItemDelegate):
         status = str(status_index.data(self._status_role) or "").strip()
         return status.upper() if self._normalize_status else status
 
+    def _colors_for_status(self, status: str, is_alternate_row: bool):
+        """Resolve warna status; cache opt-in dan dibatasi per delegate."""
+        if self._color_cache_limit <= 0:
+            background, foreground = self._color_provider(
+                is_dark=self._is_dark,
+                status=status,
+                is_alternate_row=is_alternate_row,
+            )
+            return _to_qcolor(background), _to_qcolor(foreground)
+
+        key = (self._is_dark, status, bool(is_alternate_row))
+        cached = self._color_cache.get(key)
+        if cached is not None:
+            self._color_cache.move_to_end(key)
+            return cached
+
+        background, foreground = self._color_provider(
+            is_dark=self._is_dark,
+            status=status,
+            is_alternate_row=is_alternate_row,
+        )
+        resolved = (_to_qcolor(background), _to_qcolor(foreground))
+        self._color_cache[key] = resolved
+        self._color_cache.move_to_end(key)
+        while len(self._color_cache) > self._color_cache_limit:
+            self._color_cache.popitem(last=False)
+        return resolved
+
     def paint(self, painter, option, index) -> None:
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -86,14 +119,10 @@ class StatusColorDelegate(QStyledItemDelegate):
 
         # 1. Evaluasi warna HANYA jika baris tidak sedang di-select
         if not (opt.state & QStyle.StateFlag.State_Selected):
-            background, foreground = self._color_provider(
-                is_dark=self._is_dark,
-                status=self._status_for_index(index),
-                is_alternate_row=bool(index.row() % 2),
+            background_color, foreground_color = self._colors_for_status(
+                self._status_for_index(index),
+                bool(index.row() % 2),
             )
-
-            background_color = _to_qcolor(background)
-            foreground_color = _to_qcolor(foreground)
 
             if foreground_color is not None:
                 text_brush = QBrush(foreground_color)

@@ -5,7 +5,7 @@ import faulthandler
 import threading
 import time
 import traceback
-from PySide6.QtCore import QEvent, QLocale, QObject, QSettings, QTimer, Qt
+from PySide6.QtCore import QEvent, QLocale, QObject, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -127,6 +127,12 @@ class _LazyTabPage(QWidget):
         return widget.load_invoice_by_no(*args, **kwargs)
 
 
+class _SyncUiBridge(QObject):
+    """Mengirim hasil worker sync ke GUI thread melalui queued Qt signal."""
+
+    completed = Signal(object)
+
+
 def _logout_error_is_network(exc: BaseException) -> bool:
     """True bila sign-out gagal hanya karena Supabase sedang tidak terjangkau."""
     seen = set()
@@ -152,6 +158,10 @@ class MainWindow(QMainWindow):
     SETTINGS_APPLICATION = APPLICATION_NAME
     THEME_LIGHT = "light"
     THEME_DARK = "dark"
+    # Batas minimum menjaga toolbar/tab tetap usable saat window di-resize.
+    # Ukuran aktual akan disesuaikan dengan area kerja monitor yang tersedia.
+    MIN_WINDOW_WIDTH = 1024
+    MIN_WINDOW_HEIGHT = 640
 
     @db_service.profile_performance("MainWindow.__init__", threshold=0.05)
     def __init__(self):
@@ -188,6 +198,9 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         self._siapkan_tema_aplikasi(app)
         self.init_ui()
+        # Tetapkan normal geometry sebelum dashboard pertama kali dimaksimalkan.
+        # Ini membuat ukuran saat Windows melakukan restore-on-drag konsisten.
+        self._siapkan_geometri_jendela()
 
         self._ui_scaler = ResponsiveUIScaler(
             self,
@@ -199,7 +212,16 @@ class MainWindow(QMainWindow):
             self._ui_scaler.apply_now()
 
         self._session_signature_terakhir = self._buat_signature_session()
-        self._auto_sync = AutoSyncController(self, interval_ms=15_000)
+        self._sync_ui_bridge = _SyncUiBridge(self)
+        self._sync_ui_bridge.completed.connect(
+            self._on_auto_sync_completed,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._auto_sync = AutoSyncController(
+            self,
+            interval_ms=15_000,
+            on_success=self._sync_ui_bridge.completed.emit,
+        )
 
         # Warm up lazy tabs gradually while the user is idle. QWidget creation
         # must stay on the GUI thread, so this shifts first-open work away from
@@ -213,6 +235,52 @@ class MainWindow(QMainWindow):
             or self.THEME_LIGHT
         ).strip().lower()
         return tema if tema in {self.THEME_LIGHT, self.THEME_DARK} else self.THEME_LIGHT
+
+    def _siapkan_geometri_jendela(self):
+        """Siapkan geometri dan batas resize sebelum window ditampilkan."""
+        geometry_key = "window/main_geometry"
+        screen = QApplication.primaryScreen()
+
+        if screen is None:
+            self.setMinimumSize(self.MIN_WINDOW_WIDTH, self.MIN_WINDOW_HEIGHT)
+            try:
+                geometry_tersimpan = self.settings.value(geometry_key)
+                if geometry_tersimpan and self.restoreGeometry(geometry_tersimpan):
+                    return
+            except (RuntimeError, TypeError, ValueError):
+                pass
+            self.resize(1280, 800)
+            return
+
+        area = screen.availableGeometry()
+        area_width = max(1, int(area.width()))
+        area_height = max(1, int(area.height()))
+
+        # Jangan biarkan layout utama terjepit sampai kontrol/header bertumpuk.
+        # Pada monitor kecil, batas minimum mengikuti area kerja agar window
+        # tetap dapat ditampilkan penuh.
+        self.setMinimumSize(
+            min(self.MIN_WINDOW_WIDTH, area_width),
+            min(self.MIN_WINDOW_HEIGHT, area_height),
+        )
+
+        try:
+            geometry_tersimpan = self.settings.value(geometry_key)
+            if geometry_tersimpan and self.restoreGeometry(geometry_tersimpan):
+                return
+        except (RuntimeError, TypeError, ValueError):
+            pass
+
+        # Instalasi baru atau geometry lama yang tidak valid: buat ukuran
+        # restore yang proporsional terhadap area kerja monitor utama.
+        width = min(area_width, max(960, round(area_width * 0.86)))
+        height = min(area_height, max(640, round(area_height * 0.86)))
+
+        self.resize(width, height)
+        self.move(
+            int(area.x() + (area_width - width) / 2),
+            int(area.y() + (area_height - height) / 2),
+        )
 
     def _siapkan_tema_aplikasi(self, app):
         if app is None:
@@ -865,6 +933,35 @@ class MainWindow(QMainWindow):
         # Pemanasan berikutnya hanya berjalan jika pengguna benar-benar berhenti
         # berinteraksi selama interval singkat ini.
         self._jadwalkan_pemanasan_tab_tunda()
+
+    def _on_auto_sync_completed(self, result):
+        """Segarkan cache Buku Gudang setelah siklus sync mengubah sumbernya."""
+        if not isinstance(result, dict):
+            return
+
+        relevant_keys = (
+            "pulled",
+            "manifest",
+            "authoritative_deleted",
+            "initial_resi",
+            "initial_details",
+        )
+        has_relevant_changes = False
+        for key in relevant_keys:
+            try:
+                if int(result.get(key, 0) or 0) > 0:
+                    has_relevant_changes = True
+                    break
+            except (TypeError, ValueError):
+                continue
+        if not has_relevant_changes:
+            return
+
+        page = getattr(self, "tab_buku_gudang", None)
+        widget = self._konten_tab(page, muat=False) if page is not None else None
+        invalidate = getattr(widget, "invalidate_data_cache", None)
+        if callable(invalidate):
+            invalidate(refresh_active=True)
 
     @db_service.profile_performance("UI.refresh_all_data", threshold=0.05)
     def refresh_semua_data(self):
@@ -1566,6 +1663,10 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         finally:
+            try:
+                self.settings.setValue("window/main_geometry", self.saveGeometry())
+            except (RuntimeError, TypeError, ValueError):
+                pass
             super().closeEvent(event)
 
     def _lanjutkan_tutup_setelah_sync(self):

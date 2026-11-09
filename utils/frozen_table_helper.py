@@ -10,6 +10,18 @@ from PySide6.QtWidgets import (
 )
 
 
+_FROZEN_GEOMETRY_UPDATE_INTERVAL_MS = 16
+
+
+def _buat_timer_geometri_frozen(owner):
+    timer = QTimer(owner)
+    timer.setSingleShot(True)
+    timer.setTimerType(Qt.TimerType.PreciseTimer)
+    timer.setInterval(_FROZEN_GEOMETRY_UPDATE_INTERVAL_MS)
+    timer.timeout.connect(owner.update_frozen_geometry)
+    owner._frozen_geometry_timer = timer
+
+
 def _set_frozen_separator_color(owner):
     separator = getattr(owner, "frozen_separator", None)
     if separator is None:
@@ -28,6 +40,7 @@ def _set_frozen_separator_color(owner):
 
 
 def _position_frozen_separator(owner):
+    """Posisikan separator hanya saat geometri frozen view berubah."""
     separator = getattr(owner, "frozen_separator", None)
     frozen = getattr(owner, "frozen_table", None)
     if separator is None or frozen is None:
@@ -35,28 +48,43 @@ def _position_frozen_separator(owner):
 
     rect = frozen.geometry()
     if rect.width() <= 0 or rect.height() <= 0:
-        separator.hide()
+        if not separator.isHidden():
+            separator.hide()
         return
 
     separator_width = 2
-    separator.setGeometry(
+    target = (
         rect.x() + rect.width() - separator_width,
         rect.y(),
         separator_width,
         rect.height(),
     )
+    current = separator.geometry()
+    current_geometry = (
+        current.x(), current.y(), current.width(), current.height()
+    )
+    if current_geometry != target:
+        separator.setGeometry(*target)
+    # Dipanggil hanya saat layout/ukuran berubah, bukan pada setiap pixel scroll.
+    separator.raise_()
 
 
 def _update_frozen_separator(owner):
-    """Hanya ubah visibilitas saat scroll; geometri diatur saat layout berubah."""
+    """Ubah visibilitas hanya ketika state berubah; scroll tidak perlu raise_()."""
     separator = getattr(owner, "frozen_separator", None)
     if separator is None:
         return
 
-    visible = owner.horizontalScrollBar().value() > 0 and getattr(owner, "frozen_cols", 0) > 0
-    separator.setVisible(visible)
+    visible = (
+        owner.horizontalScrollBar().value() > 0
+        and getattr(owner, "frozen_cols", 0) > 0
+    )
     if visible:
-        separator.raise_()
+        if separator.isHidden():
+            separator.show()
+            separator.raise_()
+    elif not separator.isHidden():
+        separator.hide()
 
 class FrozenTableWidget(QTableWidget):
     """QTableWidget dengan view bayangan untuk membekukan kolom kiri."""
@@ -67,6 +95,7 @@ class FrozenTableWidget(QTableWidget):
         self.fixed_cols = fixed_cols or []
         self.fixed_widths = fixed_widths or {}
         self._syncing_frozen_geometry = False
+        _buat_timer_geometri_frozen(self)
 
         self.frozen_table = QTableView(self)
         self._konfigurasi_frozen_table()
@@ -147,8 +176,15 @@ class FrozenTableWidget(QTableWidget):
         self.horizontalScrollBar().valueChanged.connect(self._perbarui_separator)
         self.horizontalScrollBar().rangeChanged.connect(self._perbarui_separator)
 
+    def _jadwalkan_update_frozen_geometry(self, *_args):
+        if self._syncing_frozen_geometry:
+            return
+        timer = getattr(self, "_frozen_geometry_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
     def _sinkronkan_tinggi_header(self):
-        self.update_frozen_geometry()
+        self._jadwalkan_update_frozen_geometry()
 
     def _sinkronkan_tinggi_baris_ke_frozen(self, logical_index, _old_size, new_size):
         frozen_vheader = self.frozen_table.verticalHeader()
@@ -176,7 +212,7 @@ class FrozenTableWidget(QTableWidget):
         blocker = QSignalBlocker(frozen_header)
         self.frozen_table.setColumnWidth(logicalIndex, newSize)
         del blocker
-        self.update_frozen_geometry()
+        self._jadwalkan_update_frozen_geometry()
 
     def update_main_section_width(self, logicalIndex, oldSize, newSize):
         if logicalIndex >= self.frozen_cols:
@@ -189,7 +225,7 @@ class FrozenTableWidget(QTableWidget):
         self.setColumnWidth(logicalIndex, newSize)
         del blocker_frozen
         del blocker_main
-        self.update_frozen_geometry()
+        self._jadwalkan_update_frozen_geometry()
 
     def update_frozen_geometry(self):
         """Sejajarkan viewport kedua view, termasuk inset nyata dari style Qt."""
@@ -247,7 +283,7 @@ class FrozenTableWidget(QTableWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self.update_frozen_geometry)
+        self._jadwalkan_update_frozen_geometry()
 
     def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
         if index.column() >= self.frozen_cols:
@@ -344,6 +380,7 @@ class FrozenTableView(QTableView):
         self.fixed_cols = tuple(fixed_cols or ())
         self.fixed_widths = dict(fixed_widths or {})
         self._syncing_frozen_geometry = False
+        _buat_timer_geometri_frozen(self)
 
         self.frozen_table = QTableView(self)
         self._konfigurasi_frozen_table()
@@ -413,8 +450,8 @@ class FrozenTableView(QTableView):
         main_scroll = self.verticalScrollBar()
         frozen_scroll = frozen.verticalScrollBar()
 
-        main_header.geometriesChanged.connect(self.update_frozen_geometry)
-        frozen_header.geometriesChanged.connect(self.update_frozen_geometry)
+        main_header.geometriesChanged.connect(self._jadwalkan_update_frozen_geometry)
+        frozen_header.geometriesChanged.connect(self._jadwalkan_update_frozen_geometry)
         main_header.sectionResized.connect(self.update_section_width)
         frozen_header.sectionResized.connect(self.update_main_section_width)
         main_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_frozen)
@@ -453,6 +490,13 @@ class FrozenTableView(QTableView):
         if frozen is not None and selection_model is not None:
             if frozen.model() is self.model():
                 frozen.setSelectionModel(selection_model)
+
+    def _jadwalkan_update_frozen_geometry(self, *_args):
+        if self._syncing_frozen_geometry:
+            return
+        timer = getattr(self, "_frozen_geometry_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
 
     def _jumlah_kolom_model(self):
         model = self.model()
@@ -529,7 +573,7 @@ class FrozenTableView(QTableView):
         blocker = QSignalBlocker(frozen_header)
         self.frozen_table.setColumnWidth(logical_index, new_size)
         del blocker
-        self.update_frozen_geometry()
+        self._jadwalkan_update_frozen_geometry()
 
     def update_main_section_width(self, logical_index, _old_size, new_size):
         if logical_index >= self.frozen_cols:
@@ -541,7 +585,7 @@ class FrozenTableView(QTableView):
         super().setColumnWidth(logical_index, new_size)
         del blocker_frozen
         del blocker_main
-        self.update_frozen_geometry()
+        self._jadwalkan_update_frozen_geometry()
 
     def update_frozen_geometry(self):
         frozen = getattr(self, "frozen_table", None)
@@ -595,7 +639,7 @@ class FrozenTableView(QTableView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        QTimer.singleShot(0, self.update_frozen_geometry)
+        self._jadwalkan_update_frozen_geometry()
 
     def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
         if not index.isValid():

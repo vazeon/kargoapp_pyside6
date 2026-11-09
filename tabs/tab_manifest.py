@@ -6,6 +6,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QSettings,
     QStringListModel,
+    QTimer,
     Qt,
 )
 from PySide6.QtGui import QBrush
@@ -392,6 +393,14 @@ class TabManifest(QWidget):
         # layout menghitung ulang fixed height pada seluruh input.
         self._tinggi_input_manifest_sudah_diterapkan = False
 
+        # Simpan lebar kolom setelah resize berhenti, bukan pada setiap pixel.
+        self._save_column_width_timer = QTimer(self)
+        self._save_column_width_timer.setSingleShot(True)
+        self._save_column_width_timer.setInterval(300)
+        self._save_column_width_timer.timeout.connect(
+            self._simpan_lebar_kolom_tertunda
+        )
+
         # Cache master Kapal untuk autocomplete, autofill, dan pencegahan duplikat.
         self._kapal_master_by_key = {}
 
@@ -436,6 +445,7 @@ class TabManifest(QWidget):
         self.btn_proses.clicked.connect(self.update_truk_ke_manifest)
         self.refresh_tahun_filter()
         self.load_data_resi_gudang()
+        self.load_histori()
         self.generate_no_manifest()
         self.setup_autocomplete_truk()
 
@@ -706,6 +716,7 @@ class TabManifest(QWidget):
             color_provider=_get_manifest_delegate_colors,
             is_dark=is_dark,
             selected_checkbox_color="#ffffff",
+            color_cache_size=16,
             parent=tabel,
         )
         tabel.setItemDelegate(delegate)
@@ -764,7 +775,7 @@ class TabManifest(QWidget):
             self.tabel_manifest, self._ubah_zoom_tabel_manifest,
         )
         self.tabel_manifest.horizontalHeader().sectionResized.connect(
-            lambda: self.simpan_lebar_kolom(self.tabel_manifest)
+            self._jadwalkan_simpan_lebar_kolom
         )
         self.tabel_manifest.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -791,7 +802,15 @@ class TabManifest(QWidget):
 
         self.txt_cari_histori = QLineEdit()
         self._konfigurasi_lineedit_kapital(self.txt_cari_histori, "Cari manifest...")
-        self.txt_cari_histori.textChanged.connect(self.filter_histori)
+        self._filter_histori_timer = QTimer(self)
+        self._filter_histori_timer.setSingleShot(True)
+        self._filter_histori_timer.setInterval(160)
+        self._filter_histori_timer.timeout.connect(
+            self._jalankan_filter_histori_tertunda
+        )
+        self.txt_cari_histori.textChanged.connect(
+            self._jadwalkan_filter_histori
+        )
         filter_layout.addWidget(self.txt_cari_histori)
         layout.addLayout(filter_layout)
 
@@ -819,7 +838,7 @@ class TabManifest(QWidget):
 
         self.load_data_resi_gudang()
         self.generate_no_manifest()
-        self.filter_histori(self.txt_cari_histori.text())
+        self.load_histori()
 
     def on_jenis_truk_manifest_changed(self, _index=None):
         """Menampilkan kolom jenis lainnya hanya saat diperlukan."""
@@ -1276,7 +1295,6 @@ class TabManifest(QWidget):
                 for pos, row in enumerate(rows)
             ]
             tabel.model().setRows(prepared_rows)
-            self.load_histori()
         except Exception as exc:
             tabel.model().setRows([])
             QMessageBox.critical(
@@ -1302,7 +1320,9 @@ class TabManifest(QWidget):
             return f"{nama_bulan} {tahun}"
         return nama_bulan
 
-    def _buat_item_histori_manifest(self, row, parents, is_dark, tahun_terpilih):
+    def _buat_item_histori_manifest(
+        self, row, parents, font_tanggal, brush_tanggal, tahun_terpilih
+    ):
         row = tuple(row or ())
         tanggal_raw = str(row[0] or "") if len(row) > 0 else ""
         manifest_id = str(row[1] or "") if len(row) > 1 else ""
@@ -1319,12 +1339,8 @@ class TabManifest(QWidget):
 
         child = QTreeWidgetItem(parents[title])
         child.setText(0, tanggal_ui)
-        font_tanggal, warna_abu = get_manifest_history_date_appearance(
-            is_dark,
-            self._ukuran_point_histori_aktif(),
-        )
         child.setFont(0, font_tanggal)
-        child.setForeground(0, QBrush(warna_abu))
+        child.setForeground(0, brush_tanggal)
 
         is_note_only = bool(
             note_manifest
@@ -1355,10 +1371,16 @@ class TabManifest(QWidget):
                 Qt.ItemDataRole.UserRole + role_offset,
                 value,
             )
+        search_values = (
+            tanggal_raw,
+            tanggal_ui,
+            child.text(1),
+            *nilai_pencarian,
+        )
         child.setData(
             0,
             Qt.ItemDataRole.UserRole + 10,
-            " ".join(str(value or "") for value in nilai_pencarian).casefold(),
+            " ".join(str(value or "") for value in search_values).casefold(),
         )
 
     @db_service.profile_performance("Manifest.load_history", threshold=0.05)
@@ -1366,6 +1388,7 @@ class TabManifest(QWidget):
         self.list_histori.setUpdatesEnabled(False)
         self.list_histori.clear()
         is_dark = self._tema_gelap_aktif()
+        self._filter_histori_timer.stop()
         try:
             rows = db_service.ambil_histori_manifest(
                 self._kode_cabang_aktif(),
@@ -1373,11 +1396,17 @@ class TabManifest(QWidget):
             ) or []
             parents = {}
             tahun_terpilih = self.cb_tahun_filter.currentText()
+            font_tanggal, warna_abu = get_manifest_history_date_appearance(
+                is_dark,
+                self._ukuran_point_histori_aktif(),
+            )
+            brush_tanggal = QBrush(warna_abu)
             for row in rows:
                 self._buat_item_histori_manifest(
                     row,
                     parents,
-                    is_dark,
+                    font_tanggal,
+                    brush_tanggal,
                     tahun_terpilih,
                 )
 
@@ -1620,10 +1649,12 @@ class TabManifest(QWidget):
         self.setup_autocomplete_truk()
         if self.is_edit_mode:
             self.batal_edit()
+            self.load_histori()
             return
         self._kosongkan_input_manifest()
         self.refresh_tahun_filter()
         self.load_data_resi_gudang()
+        self.load_histori()
         self.generate_no_manifest()
 
     def update_truk_ke_manifest(self):
@@ -1780,10 +1811,6 @@ class TabManifest(QWidget):
         if self._show_event_pertama:
             self._show_event_pertama = False
             self.perbarui_tanggal_header()
-            # Sebelumnya refresh autocomplete pertama datang dari MainWindow.
-            # Tab sekarang mengelola refresh-nya sendiri agar tidak terjadi
-            # pemanggilan ganda pada perpindahan tab berikutnya.
-            self.setup_autocomplete_truk()
         else:
             self.refresh_session_ui()
 
@@ -1926,6 +1953,16 @@ class TabManifest(QWidget):
             return None
         return hasil
 
+    def _jadwalkan_simpan_lebar_kolom(self, *_args):
+        if self._sedang_menerapkan_zoom:
+            return
+        self._save_column_width_timer.start()
+
+    def _simpan_lebar_kolom_tertunda(self):
+        tabel = getattr(self, "tabel_manifest", None)
+        if tabel is not None and not self._sedang_menerapkan_zoom:
+            self.simpan_lebar_kolom(tabel)
+
     def simpan_lebar_kolom(self, tabel):
         if self._sedang_menerapkan_zoom:
             return
@@ -2001,9 +2038,16 @@ class TabManifest(QWidget):
         self.generate_no_manifest()
         self.load_data_resi_gudang()
 
+    def _jadwalkan_filter_histori(self, _text=None):
+        """Gabungkan ketikan cepat menjadi satu pemindaian histori."""
+        self._filter_histori_timer.start()
+
+    def _jalankan_filter_histori_tertunda(self):
+        self.filter_histori(self.txt_cari_histori.text())
+
     @db_service.profile_performance("Manifest.search_history", threshold=0.025)
     def filter_histori(self, text):
-        keyword = str(text or "").strip().lower()
+        keyword = str(text or "").strip().casefold()
 
         for index_parent in range(self.list_histori.topLevelItemCount()):
             parent = self.list_histori.topLevelItem(index_parent)
@@ -2012,11 +2056,9 @@ class TabManifest(QWidget):
             for index_child in range(parent.childCount()):
                 child = parent.child(index_child)
                 haystack = child.data(0, Qt.ItemDataRole.UserRole + 10)
-                if not haystack:
+                if haystack is None:
                     haystack = f"{child.text(0)} {child.text(1)}".casefold()
-                else:
-                    haystack = f"{child.text(0)} {child.text(1)} {haystack}".casefold()
-                match = keyword in haystack
+                match = not keyword or keyword in haystack
                 child.setHidden(not match)
                 parent_visible = parent_visible or match
 

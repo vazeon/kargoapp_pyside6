@@ -1701,6 +1701,11 @@ class TabResi(QWidget):
             self._tema_gelap_aktif(), self._ukuran_point_histori_aktif()
         )
         request_key = getattr(self, "_history_request_key", None)
+        view = (
+            self._state_histori()
+            if request_key == self._history_display_key
+            else None
+        )
         self._history_render_state = {
             "generation": self._read_generation["history"],
             "rows": iter(rows), "parents": {}, "date_cache": {},
@@ -1708,7 +1713,10 @@ class TabResi(QWidget):
             "parent_default": parent_default,
             "request_key": request_key,
             "collapsed_by_default": self.cb_periode_histori.currentData() == "year",
-            "view": self._state_histori() if request_key == self._history_display_key else None,
+            "view": view,
+            # Simpan referensi hanya untuk item terpilih/current. Ini menghindari
+            # pemindaian ulang seluruh histori ketika memulihkan posisi pilihan.
+            "restore_items": {},
         }
         self._timer_render_histori.start(0)
 
@@ -1743,6 +1751,14 @@ class TabResi(QWidget):
         child.setFont(0, state["font"])
         child.setForeground(0, state["brush"])
         child.setData(0, Qt.ItemDataRole.UserRole, no_resi)
+
+        # Referensi item yang perlu dipulihkan dicatat saat item dibuat, bukan
+        # dicari dengan menelusuri semua child setelah tree dipasang.
+        view = state.get("view")
+        if view and (
+            no_resi in view["selected"] or no_resi == view["current"]
+        ):
+            state["restore_items"].setdefault(no_resi, []).append(child)
 
     @db_service.profile_performance("Resi.render_history_batch", threshold=0.025)
     def _render_histori_batch(self):
@@ -1793,14 +1809,21 @@ class TabResi(QWidget):
                 tree.setToolTip("")
             self.lbl_histori_title.setText(f"Histori Resi ({total_resi})")
             view = state["view"]
+            if view:
+                restore_items = state.get("restore_items", {})
+                current_items = restore_items.get(view["current"], ())
+                current_item = current_items[-1] if current_items else None
+                if current_item is not None:
+                    tree.setCurrentItem(current_item)
+
+                # Pulihkan status pilihan hanya pada item yang sebelumnya
+                # terpilih/current, tanpa iterasi atas seluruh histori.
+                for no_resi, items in restore_items.items():
+                    selected = no_resi in view["selected"]
+                    for child in items:
+                        child.setSelected(selected)
+
             for title, parent in state["parents"].items():
-                if view:
-                    for index in range(parent.childCount()):
-                        child = parent.child(index)
-                        no_resi = self._ambil_no_resi_dari_item(child)
-                        if no_resi == view["current"]:
-                            tree.setCurrentItem(child)
-                        child.setSelected(no_resi in view["selected"])
                 # setCurrentItem dapat membuka parent; pulihkan collapse terakhir.
                 if view:
                     parent.setExpanded(view["expanded"].get(title, True))

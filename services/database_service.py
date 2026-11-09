@@ -1787,6 +1787,50 @@ def update_transaksi_resi(data):
 # 04. BUKU GUDANG — MONITORING RESI MASUK & KELUAR
 # ==============================================================================
 
+class BukuGudangFilter:
+    """Nama field filter resmi untuk komunikasi UI dan database Buku Gudang."""
+
+    NO_RESI = "no_resi"
+    TANGGAL_MASUK = "tanggal_masuk"
+    TANGGAL_KELUAR = "tanggal_keluar"
+    STATUS_RESI = "status_resi"
+    STATUS_PENAGIHAN = "status_penagihan"
+    STATUS_PENAGIHAN_KOLOM = "status_penagihan_kolom"
+    TRUK = "truk"
+    PENGIRIM = "pengirim"
+    KOTA_ASAL = "kota_asal"
+    PENERIMA = "penerima"
+    KOTA_TUJUAN = "kota_tujuan"
+    NAMA_BARANG = "nama_barang"
+    KOLI = "koli"
+    BERAT = "berat"
+    CBM = "cbm"
+    ONGKIR = "ongkir"
+    PEMBAYARAN = "pembayaran"
+    KETERANGAN = "keterangan"
+    BULAN = "bulan"
+
+
+BUKU_GUDANG_SQL_FILTER_MAPPING = {
+    BukuGudangFilter.NO_RESI: "r.no_resi",
+    BukuGudangFilter.TANGGAL_MASUK: "r.tanggal_masuk",
+    BukuGudangFilter.TANGGAL_KELUAR: "r.tanggal_keluar",
+    BukuGudangFilter.STATUS_RESI: "r.status_resi",
+    BukuGudangFilter.TRUK: "r.truk",
+    BukuGudangFilter.PENGIRIM: "r.pengirim",
+    BukuGudangFilter.KOTA_ASAL: "r.kota_asal",
+    BukuGudangFilter.PENERIMA: "r.penerima",
+    BukuGudangFilter.KOTA_TUJUAN: "r.kota_tujuan",
+    BukuGudangFilter.NAMA_BARANG: "COALESCE(d.nama_barang, r.nama_barang)",
+    BukuGudangFilter.KOLI: "COALESCE(d.koli, r.koli)",
+    BukuGudangFilter.BERAT: "COALESCE(d.berat, r.berat)",
+    BukuGudangFilter.CBM: "COALESCE(d.cbm, r.cbm)",
+    BukuGudangFilter.ONGKIR: "r.total_ongkir",
+    BukuGudangFilter.PEMBAYARAN: "r.pembayaran",
+    BukuGudangFilter.KETERANGAN: "r.ket_buku_gudang",
+}
+
+
 def _normalisasi_filter_bulan(value):
     if value in (None, ""):
         return []
@@ -1881,31 +1925,157 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
     finally:
         _close(conn)
 
-def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
-    """Ambil Buku Gudang grouped multi-row beserta status penagihan terbaru.
 
-    Signature lama dipertahankan. Filter periode tambahan dikirim melalui
-    ``filters['_bulan']`` dan dapat berupa satu nomor bulan atau kumpulan
-    beberapa bulan. Filter penagihan dikirim melalui
-    ``filters['_status_penagihan']``. Kolom filter indeks 5 juga diperlakukan
-    sebagai STATUS PENAGIHAN pada Buku Gudang V2.
+def ambil_fingerprint_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih):
+    """Baca fingerprint murah untuk memvalidasi cache Buku Gudang.
+
+    Fingerprint mencakup seluruh sumber tampilan Buku Gudang:
+    - data_resi dan data_resi_detail untuk cabang/wilayah/tahun terkait;
+    - manifest yang direferensikan oleh resi tersebut (metadata nama kapal);
+    - invoice yang terhubung ke resi tersebut (status penagihan).
+
+    Fungsi ini tidak mengubah database dan tidak menyimpan cache global. Ia
+    sengaja dipanggil saat cache wilayah akan digunakan kembali, bukan pada
+    setiap repaint atau scroll tabel.
+    """
+    cabang = str(kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT")).strip().upper()
+    wilayah = str(wilayah or "")
+    tahun = str(tahun_terpilih or "").strip()
+    pola_wilayah = f"%{wilayah}%"
+
+    filter_tahun = "r.tanggal_masuk LIKE ?"
+    params_tahun = (f"{tahun}%",)
+    if len(tahun) == 4 and tahun.isdigit():
+        filter_tahun = "r.tanggal_masuk >= ? AND r.tanggal_masuk < ?"
+        tahun_int = int(tahun)
+        params_tahun = (f"{tahun_int:04d}-01-01", f"{tahun_int + 1:04d}-01-01")
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        resi = cursor.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(MAX(r.updated_at), ''),
+                   COALESCE(SUM(COALESCE(r.revision, 0)), 0),
+                   COALESCE(MAX(r.rowid), 0)
+            FROM data_resi AS r
+            WHERE r.kode_cabang = ?
+              AND r.kota_tujuan LIKE ?
+              AND {filter_tahun}
+            """,
+            (cabang, pola_wilayah, *params_tahun),
+        ).fetchone()
+
+        detail = cursor.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(MAX(d.updated_at), ''),
+                   COALESCE(MAX(d.rowid), 0),
+                   COALESCE(SUM(LENGTH(COALESCE(d.nama_barang, ''))), 0),
+                   COALESCE(SUM(LENGTH(COALESCE(d.koli, ''))), 0),
+                   COALESCE(SUM(CAST(COALESCE(d.berat, 0) AS REAL)), 0),
+                   COALESCE(SUM(CAST(COALESCE(d.cbm, 0) AS REAL)), 0)
+            FROM data_resi_detail AS d
+            INNER JOIN data_resi AS r ON r.no_resi = d.no_resi
+            WHERE r.kode_cabang = ?
+              AND r.kota_tujuan LIKE ?
+              AND {filter_tahun}
+              AND d.deleted_at IS NULL
+            """,
+            (cabang, pola_wilayah, *params_tahun),
+        ).fetchone()
+
+        manifest = cursor.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(MAX(m.updated_at), ''),
+                   COALESCE(MAX(m.id_manifest), ''),
+                   COALESCE(MAX(m.nama_kapal), '')
+            FROM manifest AS m
+            WHERE m.kode_cabang = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM data_resi AS r
+                  WHERE r.no_manifest = m.id_manifest
+                    AND r.kode_cabang = ?
+                    AND r.kota_tujuan LIKE ?
+                    AND {filter_tahun}
+              )
+            """,
+            (cabang, cabang, pola_wilayah, *params_tahun),
+        ).fetchone()
+
+        invoice = cursor.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(MAX(h.updated_at), ''),
+                   COALESCE(MAX(ir.created_at), ''),
+                   COALESCE(SUM(CASE WHEN UPPER(COALESCE(h.status, '')) = 'LUNAS'
+                                     THEN h.id ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN UPPER(COALESCE(h.status, '')) = 'MACET'
+                                     THEN h.id ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN UPPER(COALESCE(h.status, '')) NOT IN ('LUNAS', 'MACET')
+                                     THEN h.id ELSE 0 END), 0)
+            FROM invoice_resi AS ir
+            INNER JOIN invoice_header AS h ON h.no_invoice = ir.no_invoice
+            WHERE (ir.kode_cabang = ? OR ir.kode_cabang IS NULL)
+              AND EXISTS (
+                  SELECT 1
+                  FROM data_resi AS r
+                  WHERE r.no_resi = ir.no_resi
+                    AND r.kode_cabang = ?
+                    AND r.kota_tujuan LIKE ?
+                    AND {filter_tahun}
+              )
+            """,
+            (cabang, cabang, pola_wilayah, *params_tahun),
+        ).fetchone()
+
+        return (
+            tuple(resi or ()),
+            tuple(detail or ()),
+            tuple(manifest or ()),
+            tuple(invoice or ()),
+        )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "[Buku Gudang] Gagal memeriksa fingerprint data %s/%s/%s: %s",
+            cabang, wilayah, tahun, exc,
+        )
+        return None
+    finally:
+        _close(conn)
+
+
+def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
+    """Ambil data Buku Gudang grouped multi-row beserta status penagihan terbaru.
+
+    ``filters`` hanya menerima key dari :class:`BukuGudangFilter`. Filter
+    bulan dan kedua sumber status penagihan diproses secara khusus. Filter
+    kolom lainnya memakai pemetaan SQL tetap dan parameter query.
     """
 
     incoming_filters = dict(filters or {})
-    bulan_terpilih = incoming_filters.pop("_bulan", None)
-    status_penagihan = incoming_filters.pop("_status_penagihan", None)
-    status_header = incoming_filters.pop(5, None)
+    bulan_terpilih = incoming_filters.pop(BukuGudangFilter.BULAN, None)
+    status_penagihan = incoming_filters.pop(
+        BukuGudangFilter.STATUS_PENAGIHAN, None
+    )
+    status_penagihan_kolom = incoming_filters.pop(
+        BukuGudangFilter.STATUS_PENAGIHAN_KOLOM, None
+    )
     filter_penagihan = [
-        value for value in (status_penagihan, status_header)
+        value
+        for value in (status_penagihan, status_penagihan_kolom)
         if str(value or "").strip()
     ]
 
-    mapping = {
-        2: "r.tanggal_masuk", 3: "r.tanggal_keluar", 4: "r.status_resi",
-        6: "r.truk", 7: "r.pengirim", 8: "r.kota_asal", 9: "r.penerima",
-        10: "r.kota_tujuan", 11: "COALESCE(d.nama_barang, r.nama_barang)",
-        15: "r.total_ongkir", 16: "r.pembayaran", 17: "r.ket_buku_gudang",
-    }
+    unknown_filters = set(incoming_filters) - set(BUKU_GUDANG_SQL_FILTER_MAPPING)
+    if unknown_filters:
+        nama_filter = ", ".join(sorted(str(key) for key in unknown_filters))
+        raise ValueError(f"Key filter Buku Gudang tidak dikenal: {nama_filter}")
 
     bulan_pilihan = _normalisasi_filter_bulan(bulan_terpilih)
 
@@ -1943,11 +2113,9 @@ def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
         query += f" AND substr(r.tanggal_masuk, 6, 2) IN ({placeholders})"
         params.extend(f"{bulan:02d}" for bulan in bulan_pilihan)
 
-    for col_idx, val in incoming_filters.items():
-        expression = mapping.get(col_idx)
-        if not expression:
-            continue
-        if col_idx == 15:
+    for filter_key, val in incoming_filters.items():
+        expression = BUKU_GUDANG_SQL_FILTER_MAPPING[filter_key]
+        if filter_key == BukuGudangFilter.ONGKIR:
             val = str(val).replace(".", "")
         query += f" AND {expression} LIKE ?"
         params.append(f"%{val}%")
