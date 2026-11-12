@@ -96,54 +96,10 @@ from utils.typography import (
 
 _FONT_WEIGHTS = get_font_weights()
 
-
-RESI_PAGE_MARGINS = (8, 8, 8, 8)
-RESI_SPACING = 8
-RESI_INPUT_HEIGHT = 32
-RESI_TABLE_ROW_HEIGHT = 32
-RESI_TOTAL_ONGKIR_HEIGHT = 40
-RESI_SCROLL_LEFT_MIN_WIDTH = 700
-RESI_SPLITTER_INITIAL_SIZES = (856, 256)
-RESI_DATE_INPUT_WIDTH = 160
-RESI_NUMBER_DISPLAY_WIDTH = 200
-RESI_FORM_CONTAINER_MARGINS = (10, 8, 8, 8)
-RESI_TABLE_CONTAINER_MARGINS = (8, 8, 8, 8)
-RESI_IDENTITY_COLUMN_STRETCH = (6, 4)
-RESI_DESTINATION_STRETCH = (9, 9, 1)
-RESI_DETAIL_CONTAINER_MIN_HEIGHT = 320
-RESI_ITEMS_TABLE_MIN_HEIGHT = 150
-RESI_ITEMS_COLUMN_MIN_WIDTH = 20
-RESI_ITEMS_COLUMN_WIDTHS = {
-    0: 42,
-    1: 400,
-    2: 100,
-    3: 100,
-    4: 100,
-}
-RESI_PAYMENT_AREA_STRETCH = (45, 55)
-RESI_FINANCE_COLUMN_STRETCH = (5, 1)
-RESI_ACCOUNT_PANEL_MARGINS = (4, 10, 4, 4)
-RESI_ACCOUNT_CONTENT_MARGINS = (8, 8, 8, 8)
-RESI_ACTION_RIGHT_LEFT_MARGIN = 12
-RESI_ACTION_TOP_GAP = 15
-RESI_HISTORY_MARGINS = (8, 8, 8, 8)
-RESI_HISTORY_MIN_WIDTH = 256
-RESI_HISTORY_MAX_WIDTH = 520
-RESI_HISTORY_RESET_WIDTH = 56
-RESI_CLEAR_BUTTON_SIZE = 20
-RESI_ACCOUNT_CARD_MARGINS = (10, 8, 10, 8)
-RESI_ACCOUNT_CARD_SPACING = 2
-RESI_AUTOCOMPLETE_MAX_VISIBLE_ITEMS = 12
-RESI_AUDIT_DIALOG_SIZE = (760, 560)
-RESI_AUDIT_HISTORY_SPACING = 10
-
 logger = logging.getLogger(__name__)
 
 class ResiReadWorker(QThread):
     """Pembacaan database saja; widget dan transaksi tetap di GUI thread."""
-
-    # Metadata dikirim bersama hasil agar slot GUI tidak bergantung pada
-    # QObject.sender(), yang dapat menjadi None jika wrapper worker sudah dibuang.
     result_ready = Signal(str, int, str, object)
     error_occurred = Signal(str, int, str, str)
     _active_workers = set()
@@ -263,7 +219,6 @@ class TabResi(QWidget):
     KOL_BERAT = 3
     KOL_CBM = 4
 
-    LEBAR_KOLOM_DASAR = dict(RESI_ITEMS_COLUMN_WIDTHS)
     KOLOM_INPUT_BARANG = (KOL_NAMA_BARANG, KOL_KOLI, KOL_BERAT, KOL_CBM)
     HISTORY_BATCH_SIZE = 150
     HISTORY_TIME_BUDGET = 0.008
@@ -282,8 +237,6 @@ class TabResi(QWidget):
         self._resi_sedang_diedit = None
         self._revision_sedang_diedit = None
         self._butuh_update_tema = False
-        # Pekerjaan lokal yang mahal pada show pertama ditunda satu giliran
-        # event loop agar showMaximized() dapat menyelesaikan presentasi window.
         self._first_show_event_seen = False
 
         self._mode_total_ongkir = None
@@ -292,8 +245,6 @@ class TabResi(QWidget):
         self._sedang_simpan = False
         self._read_generation = {"history": 0, "autocomplete": 0}
         self._read_workers = {"history": None, "autocomplete": None}
-        # Token plain-Python; finalisasi tidak perlu memanggil metode pada
-        # wrapper QThread yang mungkin sudah dihapus oleh Qt.
         self._read_worker_generations = {"history": None, "autocomplete": None}
         self._read_pending = {"history": None, "autocomplete": None}
         self._history_render_state = None
@@ -312,10 +263,6 @@ class TabResi(QWidget):
         self._timer_layout.setSingleShot(True)
         self._timer_layout.setInterval(250)
         self._timer_layout.timeout.connect(self._simpan_layout_tertunda)
-
-        # Master Pengirim/Penerima dapat berubah melalui sync saat Tab Resi
-        # tetap terbuka. Refresh berkala hanya meminta ulang data lokal; database
-        # service menangani TTL/fingerprint agar cache tidak terus-menerus basi.
         self._timer_autocomplete_sync = QTimer(self)
         self._timer_autocomplete_sync.setInterval(10_000)
         self._timer_autocomplete_sync.timeout.connect(self._refresh_autocomplete_sync)
@@ -325,9 +272,6 @@ class TabResi(QWidget):
         ):
             self.init_ui()
 
-        # Ukuran kolom adalah preferensi layout, bukan bagian dari tema.
-        # Pulihkan sekali setelah tabel dibuat agar pergantian tema tidak
-        # mengulang restoreState dan setColumnWidth pada seluruh kolom.
         self._pulihkan_ukuran_tabel_resi()
         self._timer_autocomplete_sync.start()
 
@@ -346,18 +290,16 @@ class TabResi(QWidget):
             )
 
             self.scroll_kiri = QScrollArea()
-            self.scroll_kiri.setMinimumWidth(min(RESI_SCROLL_LEFT_MIN_WIDTH, skalakan_px(360)))
+            self.scroll_kiri.setMinimumWidth(min(700, skalakan_px(360)))
             self.scroll_kiri.setWidgetResizable(True)
             self.scroll_kiri.setFrameShape(QFrame.Shape.NoFrame)
             self.scroll_kiri.setStyleSheet(styles_awal["scroll_kiri"])
 
             self.widget_kiri = QWidget()
             layout_kiri = QVBoxLayout(self.widget_kiri)
-            layout_kiri.setContentsMargins(*RESI_PAGE_MARGINS)
-            layout_kiri.setSpacing(RESI_SPACING)
+            layout_kiri.setContentsMargins(8, 8, 4, 0)
+            layout_kiri.setSpacing(4)
 
-            # Kaitkan kontainer sebelum kontrol form dibuat agar QScrollArea
-            # tidak perlu memasang subtree yang besar setelah form selesai.
             self.scroll_kiri.setWidget(self.widget_kiri)
 
         with db_service.performance_timer(
@@ -407,7 +349,7 @@ class TabResi(QWidget):
                 "Resi.splitter.configure", threshold=0.005
             ):
                 self.splitter.setChildrenCollapsible(False)
-                self.splitter.setSizes(RESI_SPLITTER_INITIAL_SIZES)
+                self.splitter.setSizes((856, 256))
                 self.splitter.setHandleWidth(1)
                 self.splitter.setOpaqueResize(True)
                 self.splitter.setStretchFactor(0, 3)
@@ -451,24 +393,20 @@ class TabResi(QWidget):
         widget = QLineEdit()
         widget.setPlaceholderText(placeholder)
         if pakai_tinggi_lokal:
-            atur_tinggi_input(widget, tinggi=RESI_INPUT_HEIGHT)
+            atur_tinggi_input(widget, tinggi=32)
         else:
             atur_tinggi_input(widget)
         return widget
 
     @staticmethod
-    def _tinggi_input_total_ongkir():
-        return RESI_TOTAL_ONGKIR_HEIGHT
-
-    @staticmethod
     def _atur_grid_identitas(grid):
-        grid.setVerticalSpacing(RESI_SPACING)
-        grid.setHorizontalSpacing(RESI_SPACING)
-        grid.setContentsMargins(*RESI_FORM_CONTAINER_MARGINS)
+        grid.setVerticalSpacing(8)
+        grid.setHorizontalSpacing(8)
+        grid.setContentsMargins(10, 8, 8, 8)
         for row in range(3):
             grid.setRowStretch(row, 1)
-        grid.setColumnStretch(1, RESI_IDENTITY_COLUMN_STRETCH[0])
-        grid.setColumnStretch(3, RESI_IDENTITY_COLUMN_STRETCH[1])
+        grid.setColumnStretch(1, 6)
+        grid.setColumnStretch(3, 4)
 
     @staticmethod
     def _nilai_setting_list(key, default=None):
@@ -497,17 +435,17 @@ class TabResi(QWidget):
 
     def _bangun_top_bar(self, layout_kiri):
         top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setContentsMargins(0, 0, 0, 4)
 
         self.lbl_main_title = QLabel("Form Input Surat Jalan")
         top_bar.addWidget(self.lbl_main_title)
         top_bar.addStretch(1)
 
         area_tanggal = QHBoxLayout()
-        area_tanggal.setSpacing(RESI_SPACING)
+        area_tanggal.setSpacing(8)
         self.date_input = QLabel(self)
         self.date_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.date_input.setFixedWidth(RESI_DATE_INPUT_WIDTH)
+        self.date_input.setFixedWidth(160)
         self._tanggal_transaksi = QDate.currentDate()
         self.set_tanggal_resi(self._tanggal_transaksi)
         area_tanggal.addWidget(self.date_input)
@@ -515,7 +453,7 @@ class TabResi(QWidget):
         top_bar.addStretch(1)
 
         area_resi = QHBoxLayout()
-        area_resi.setSpacing(RESI_SPACING)
+        area_resi.setSpacing(8)
         self.lbl_edit_mode = QLabel("Edit")
         self.lbl_edit_mode.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         font_edit = self.lbl_edit_mode.font()
@@ -527,7 +465,7 @@ class TabResi(QWidget):
         self.lbl_resi_tag.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.txt_resi_display = QLabel("GEN-RESI-CODE")
         self.txt_resi_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.txt_resi_display.setFixedWidth(RESI_NUMBER_DISPLAY_WIDTH)
+        self.txt_resi_display.setFixedWidth(200)
         self.txt_resi_display.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
@@ -540,7 +478,7 @@ class TabResi(QWidget):
 
     def _bangun_form_pihak(self, layout_kiri):
         cards = QHBoxLayout()
-        cards.setSpacing(RESI_SPACING)
+        cards.setSpacing(8)
 
         self.group_pengirim = QGroupBox("")
         grid = QGridLayout(self.group_pengirim)
@@ -596,11 +534,11 @@ class TabResi(QWidget):
         )
 
         tujuan = QHBoxLayout()
-        tujuan.setSpacing(RESI_SPACING)
+        tujuan.setSpacing(8)
         tujuan.setContentsMargins(0, 0, 0, 0)
-        tujuan.addWidget(self.txt_kota_penerima, stretch=RESI_DESTINATION_STRETCH[0])
-        tujuan.addWidget(self.cb_provinsi, stretch=RESI_DESTINATION_STRETCH[1])
-        tujuan.addStretch(RESI_DESTINATION_STRETCH[2])
+        tujuan.addWidget(self.txt_kota_penerima, stretch=9)
+        tujuan.addWidget(self.cb_provinsi, stretch=9)
+        tujuan.addStretch(1)
         tujuan.addWidget(
             self.btn_clear_penerima,
             0,
@@ -622,10 +560,10 @@ class TabResi(QWidget):
 
     def _bangun_detail_barang(self, layout_kiri):
         self.group_tabel_container = QGroupBox("")
-        self.group_tabel_container.setMinimumHeight(RESI_DETAIL_CONTAINER_MIN_HEIGHT)
+        self.group_tabel_container.setMinimumHeight(320)
         layout = QVBoxLayout(self.group_tabel_container)
-        layout.setContentsMargins(*RESI_TABLE_CONTAINER_MARGINS)
-        layout.setSpacing(RESI_SPACING)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         self.table_items = QTableWidget()
         self.table_items.setColumnCount(5)
@@ -641,22 +579,28 @@ class TabResi(QWidget):
         font_header.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
         header.setFont(font_header)
 
-        for kolom in self.LEBAR_KOLOM_DASAR:
+        for kolom, lebar in {
+            0: 42,
+            1: 400,
+            2: 100,
+            3: 100,
+            4: 100,
+        }.items():
             mode = (
                 QHeaderView.ResizeMode.Fixed
                 if kolom == self.KOL_NO
                 else QHeaderView.ResizeMode.Interactive
             )
             header.setSectionResizeMode(kolom, mode)
-            self.table_items.setColumnWidth(kolom, self.LEBAR_KOLOM_DASAR[kolom])
+            self.table_items.setColumnWidth(kolom, lebar)
         header.setStretchLastSection(True)
         header.sectionResized.connect(self.auto_save_ukuran_kolom)
-        self.table_items.setMinimumHeight(RESI_ITEMS_TABLE_MIN_HEIGHT)
+        self.table_items.setMinimumHeight(150)
         self.table_items.verticalHeader().setVisible(False)
         layout.addWidget(self.table_items)
 
         actions = QHBoxLayout()
-        actions.setSpacing(RESI_SPACING)
+        actions.setSpacing(8)
         self.btn_tambah_baris = QPushButton("＋Tambah Baris")
         self.btn_tambah_baris.clicked.connect(lambda: self.tambah_baris_barang(fokus=True))
         self.btn_hapus_baris = QPushButton("－Hapus Baris")
@@ -680,12 +624,12 @@ class TabResi(QWidget):
 
     def _bangun_area_pembayaran(self, layout_kiri):
         area = QHBoxLayout()
-        area.setSpacing(RESI_SPACING)
+        area.setSpacing(8)
         self._bangun_form_finance(area)
 
         self.layout_pay_method = QHBoxLayout()
         self.layout_pay_method.setContentsMargins(0, 0, 0, 0)
-        self.layout_pay_method.setSpacing(RESI_SPACING)
+        self.layout_pay_method.setSpacing(8)
         self.rek_cards_labels = []
         rekening_styles = get_resi_rekening_styles(self.current_theme == "dark")
         style_card = rekening_styles["card"]
@@ -697,14 +641,14 @@ class TabResi(QWidget):
         )
         self.layout_pay_method.addWidget(self.box_np, stretch=1)
         self.layout_pay_method.addWidget(self.box_p, stretch=1)
-        area.addLayout(self.layout_pay_method, stretch=RESI_PAYMENT_AREA_STRETCH[1])
+        area.addLayout(self.layout_pay_method, stretch=55)
         layout_kiri.addLayout(area)
 
     def _bangun_form_finance(self, area):
         self.group_finance = QGroupBox("")
         grid = QGridLayout(self.group_finance)
-        grid.setSpacing(RESI_SPACING)
-        grid.setContentsMargins(*RESI_FORM_CONTAINER_MARGINS)
+        grid.setSpacing(8)
+        grid.setContentsMargins(10, 8, 8, 8)
 
         self.txt_ongkir_kg = self._lineedit("Ongkir /kg")
         self.txt_ongkir_kg.installEventFilter(self)
@@ -754,8 +698,8 @@ class TabResi(QWidget):
             else:
                 grid.addWidget(widget, row, 1, 1, 2)
 
-        grid.setColumnStretch(1, RESI_FINANCE_COLUMN_STRETCH[0])
-        grid.setColumnStretch(2, RESI_FINANCE_COLUMN_STRETCH[1])
+        grid.setColumnStretch(1, 5)
+        grid.setColumnStretch(2, 1)
         grid.addWidget(
             self.btn_clear_finance,
             4,
@@ -763,20 +707,20 @@ class TabResi(QWidget):
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
         grid.setRowStretch(5, 1)
-        area.addWidget(self.group_finance, stretch=RESI_PAYMENT_AREA_STRETCH[0])
+        area.addWidget(self.group_finance, stretch=45)
 
     def _buat_panel_rekening(self, judul, setting_key, style_card):
         box = QGroupBox(judul)
         outer = QVBoxLayout(box)
-        outer.setContentsMargins(*RESI_ACCOUNT_PANEL_MARGINS)
+        outer.setContentsMargins(4, 10, 4, 4)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(*RESI_ACCOUNT_CONTENT_MARGINS)
-        layout.setSpacing(RESI_SPACING)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
         self._bangun_kartu_rekening(
             self._nilai_setting_list(setting_key),
             layout,
@@ -796,7 +740,7 @@ class TabResi(QWidget):
         self.widget_action_kiri.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        self.btn_generate_simpan = QPushButton("SIMPAN DAN CETAK")
+        self.btn_generate_simpan = QPushButton("Simpan dan Cetak")
         self.btn_generate_simpan.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.btn_generate_simpan.setStyleSheet(
             konversi_font_qss_ke_point(get_btn_simpan_cetak_style())
@@ -810,7 +754,7 @@ class TabResi(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         right = QHBoxLayout(self.widget_action_kanan)
-        right.setContentsMargins(RESI_ACTION_RIGHT_LEFT_MARGIN, 0, 0, 0)
+        right.setContentsMargins(12, 0, 0, 0)
         right.setSpacing(0)
         self.lbl_reset_form = QPushButton("Reset Form")
         self.lbl_reset_form.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -826,17 +770,17 @@ class TabResi(QWidget):
         actions.addWidget(self.widget_action_kiri, stretch=1)
         actions.addWidget(self.btn_generate_simpan, 0, Qt.AlignmentFlag.AlignCenter)
         actions.addWidget(self.widget_action_kanan, stretch=1)
-        layout_kiri.addSpacing(RESI_ACTION_TOP_GAP)
+        layout_kiri.addSpacing(15)
         layout_kiri.addLayout(actions)
         layout_kiri.addStretch(1)
 
     def _bangun_histori(self):
         self.widget_kanan = QWidget()
-        self.widget_kanan.setMinimumWidth(min(RESI_HISTORY_MIN_WIDTH, skalakan_px(220)))
-        self.widget_kanan.setMaximumWidth(RESI_HISTORY_MAX_WIDTH)
+        self.widget_kanan.setMinimumWidth(min(256, skalakan_px(220)))
+        self.widget_kanan.setMaximumWidth(520)
         layout = QVBoxLayout(self.widget_kanan)
-        layout.setContentsMargins(*RESI_HISTORY_MARGINS)
-        layout.setSpacing(RESI_SPACING)
+        layout.setContentsMargins(6, 8, 8, 8)
+        layout.setSpacing(8)
 
         self.txt_search = self._lineedit(
             "Cari resi, pengirim, penerima...",
@@ -847,7 +791,7 @@ class TabResi(QWidget):
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(RESI_SPACING)
+        header.setSpacing(8)
         self.lbl_histori_title = QLabel("Histori Resi")
 
         self.cb_periode_histori = QComboBox()
@@ -858,7 +802,7 @@ class TabResi(QWidget):
         self.cb_periode_histori.setToolTip("Pilih cakupan periode histori")
 
         self.btn_reset_histori = QPushButton("⟳")
-        self.btn_reset_histori.setFixedWidth(RESI_HISTORY_RESET_WIDTH)
+        self.btn_reset_histori.setFixedWidth(56)
         self.btn_reset_histori.setToolTip("Reset pencarian dan periode histori")
         self.btn_reset_histori.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_reset_histori.setFlat(True)
@@ -948,9 +892,9 @@ class TabResi(QWidget):
         tombol = QToolButton(parent)
         tombol.setText("⟳")
         tombol.setToolTip(tooltip)
-        tombol.setFixedSize(RESI_CLEAR_BUTTON_SIZE, RESI_CLEAR_BUTTON_SIZE)
-        tombol.setProperty("_ui_scaler_min_width", RESI_CLEAR_BUTTON_SIZE)
-        tombol.setProperty("_ui_scaler_min_height", RESI_CLEAR_BUTTON_SIZE)
+        tombol.setFixedSize(20, 20)
+        tombol.setProperty("_ui_scaler_min_width", 20)
+        tombol.setProperty("_ui_scaler_min_height", 20)
         tombol.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         win = self.window()
@@ -1018,9 +962,6 @@ class TabResi(QWidget):
         super().showEvent(event)
         self.kode_cabang = self._kode_cabang_aktif()
 
-        # init_ui() sudah mengajukan pembacaan histori pertama secara async.
-        # Pada show pertama, jangan membatalkan request itu dengan request identik;
-        # dan jangan lakukan styling lokal berat di dalam showMaximized().
         if not self._first_show_event_seen:
             self._first_show_event_seen = True
             QTimer.singleShot(0, self._terapkan_tema_setelah_show_awal)
@@ -1045,8 +986,6 @@ class TabResi(QWidget):
     def _terapkan_tema_setelah_show_awal(self):
         """Terapkan tema lokal setelah event show pertama selesai diproses Qt."""
         if not self.isVisible():
-            # Jika window/tab langsung disembunyikan, tandai agar diterapkan
-            # saat ditampilkan lagi, sesuai perilaku tema lazy sebelumnya.
             self._butuh_update_tema = True
             return
 
@@ -1095,8 +1034,6 @@ class TabResi(QWidget):
         if getattr(self, "_tema_terakhir_terpasang", None) == tema_baru:
             return
 
-        # JIKA TAB SEDANG HIDDEN (User di tab lain):
-        # Tunda refresh visual agar pyqtdarktheme native tidak terdistorsi pada widget hidden
         if not self.isVisible():
             self._butuh_update_tema = True
             return
@@ -1115,8 +1052,6 @@ class TabResi(QWidget):
             ):
                 fs, styles = self._buat_resi_styles(is_dark)
 
-            # Jangan reset stylesheet splitter jika memang sudah kosong.
-            # setStyleSheet("") tetap memicu invalidasi style/layout Qt meski tidak ada QSS lokal.
             splitter = getattr(self, "splitter", None)
             if splitter is not None and splitter.styleSheet():
                 with db_service.performance_timer(
@@ -1238,8 +1173,8 @@ class TabResi(QWidget):
         font = self.cb_periode_histori.font()
         font.setPointSizeF(ukuran_font_px_ke_pt(fs_statis["body"]))
         self.cb_periode_histori.setFont(font)
-        atur_tinggi_input(self.date_input, tinggi=RESI_INPUT_HEIGHT)
-        atur_tinggi_input(self.cb_periode_histori, tinggi=RESI_INPUT_HEIGHT)
+        atur_tinggi_input(self.date_input, tinggi=32)
+        atur_tinggi_input(self.cb_periode_histori, tinggi=32)
         atur_tinggi_input(self.txt_search)
 
     def _terapkan_tema_input(self, styles):
@@ -1259,16 +1194,16 @@ class TabResi(QWidget):
                 self.txt_ongkir_m3,
                 *comboboxes,
             ),
-            tinggi=RESI_INPUT_HEIGHT,
+            tinggi=32,
         )
         atur_tinggi_input(
             self.txt_total_ongkir,
-            tinggi=self._tinggi_input_total_ongkir(),
+            tinggi=40,
         )
 
     def _pulihkan_ukuran_tabel_resi(self):
         self.table_items.verticalHeader().setDefaultSectionSize(
-            skalakan_px(RESI_TABLE_ROW_HEIGHT)
+            skalakan_px(32)
         )
         header = self.table_items.horizontalHeader()
         status_signal = header.blockSignals(True)
@@ -1286,10 +1221,16 @@ class TabResi(QWidget):
                 saved_scale = max(0.01, saved_scale)
                 ratio = current_scale / saved_scale
                 for kolom in range(self.table_items.columnCount()):
-                    lebar = max(RESI_ITEMS_COLUMN_MIN_WIDTH, round(self.table_items.columnWidth(kolom) * ratio))
+                    lebar = max(20, round(self.table_items.columnWidth(kolom) * ratio))
                     self.table_items.setColumnWidth(kolom, lebar)
             else:
-                for kolom, lebar in self.LEBAR_KOLOM_DASAR.items():
+                for kolom, lebar in {
+                    0: 42,
+                    1: 400,
+                    2: 100,
+                    3: 100,
+                    4: 100,
+                }.items():
                     self.table_items.setColumnWidth(
                         kolom,
                         skalakan_px(lebar),
@@ -1312,8 +1253,8 @@ class TabResi(QWidget):
             card = QWidget()
             card.setStyleSheet(style_card)
             l_card = QVBoxLayout(card)
-            l_card.setContentsMargins(*RESI_ACCOUNT_CARD_MARGINS)
-            l_card.setSpacing(RESI_ACCOUNT_CARD_SPACING)
+            l_card.setContentsMargins(10, 8, 10, 8)
+            l_card.setSpacing(2)
 
             if len(parts) >= 3:
                 lbl_top = QLabel(f"{parts[0]}")
@@ -1426,7 +1367,7 @@ class TabResi(QWidget):
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        completer.setMaxVisibleItems(RESI_AUTOCOMPLETE_MAX_VISIBLE_ITEMS)
+        completer.setMaxVisibleItems(12)
         completer.activated[str].connect(callback)
         lineedit.setCompleter(completer)
         return completer
@@ -2125,7 +2066,7 @@ class TabResi(QWidget):
                 ):
                     restored = self.splitter.restoreState(saved)
                 if not restored:
-                    self.splitter.setSizes(RESI_SPLITTER_INITIAL_SIZES)
+                    self.splitter.setSizes((856, 256))
             except (TypeError, ValueError):
                 logger.warning("State splitter resi tidak valid; gunakan ukuran awal")
 
@@ -2657,7 +2598,7 @@ class TabResi(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Riwayat Perubahan - {no_resi}")
         dialog.setModal(True)
-        dialog.resize(*RESI_AUDIT_DIALOG_SIZE)
+        dialog.resize(760, 560)
         layout_dialog = QVBoxLayout(dialog)
 
         judul = QLabel(f"Riwayat Perubahan Resi {no_resi}")
@@ -2670,7 +2611,7 @@ class TabResi(QWidget):
         isi_scroll = QWidget()
         layout_histori = QVBoxLayout(isi_scroll)
         layout_histori.setContentsMargins(0, 0, 0, 0)
-        layout_histori.setSpacing(RESI_AUDIT_HISTORY_SPACING)
+        layout_histori.setSpacing(10)
         for row in histori:
             card = self._buat_card_audit(isi_scroll, row)
             if card is not None:

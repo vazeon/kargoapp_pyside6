@@ -74,7 +74,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             color: {_warna_tema(is_dark, "#F2F4F7", "#172033")};
             background: transparent;
             border: none;
-            font-size: {body_small_size}px;
+            font-size: {body_size}px;
             font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
         }}
@@ -90,13 +90,22 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         }}
     """
 
+    lbl_no_manifest = f"""
+        QLabel {{
+            color: {_warna_tema(is_dark, "#9ca3af", "#64748b")};
+            font-size: {body_small_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            font-family: '{get_master_font()}';
+        }}
+    """
+
     txt_tanggal_manifest = f"""
         QLabel {{
             color: {_warna_tema(is_dark, "#F8FAFC", "#10233F")};
             placeholder-text-color: {placeholder};
             background: transparent;
             border: none;
-            padding: 2px 10px;
+            padding: 2px 8px;
             font-size: {body_small_size}px;
             font-weight: {_FONT_WEIGHTS["regular"]};
             font-family: '{get_master_font()}';
@@ -110,7 +119,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             background: {_warna_tema(is_dark, "#171B23", "#F2FCFF")};
             border: 1px solid {_warna_tema(is_dark, "#3B82F6", "#3B82F6")};
             border-radius: 6px;
-            padding: 6px 12px;
+            padding: 6px 8px;
             font-size: {subtitle_size}px;
             font-weight: {_FONT_WEIGHTS["medium"]};
             letter-spacing: 1px;
@@ -124,7 +133,7 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
             color: {_warna_tema(is_dark, "#cbd5e1", "#1e293b")};
             border: 1px solid {ui["field_border"]};
             border-radius: 6px;
-            padding: 5px;
+            padding: 4px;
             font-size: {body_small_size}px;
             font-family: '{get_master_font()}';
         }}
@@ -137,10 +146,10 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         QPushButton {{
             background-color: {warna_btn};
             color: #ffffff;
-            font-weight: {_FONT_WEIGHTS["bold"]};
-            padding: 7px 20px;
-            border-radius: 4px;
-            font-size: {body_small_size}px;
+            font-weight: {_FONT_WEIGHTS["medium"]};
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: {body_size}px;
             font-family: '{get_master_font()}';
         }}
         QPushButton:hover {{
@@ -148,6 +157,27 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         }}
         QPushButton:pressed {{
             background-color: {warna_btn_pressed};
+        }}
+    """
+
+    menu_histori = f"""
+        QMenu {{
+            background-color: {ui["field_background"]};
+            color: {ui["text_primary"]};
+            padding: 5px;
+            font-size: {body_small_size}px;
+            font-family: '{get_master_font()}';
+        }}
+        QMenu::item {{
+            color: {ui["text_primary"]};
+            padding: 6px 20px;
+        }}
+        QMenu::item:selected {{
+            background-color: {ui["selection_background"]};
+            color: {ui["text_primary"]};
+        }}
+        QMenu::item:disabled {{
+            color: {placeholder};
         }}
     """
 
@@ -170,9 +200,11 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         "card_manifest": card_manifest,
         "label_input": label_input,
         "label_header": label_header,
+        "lbl_no_manifest": lbl_no_manifest,
         "txt_tanggal_manifest": txt_tanggal_manifest,
         "txt_no_manifest": txt_no_manifest,
         "btn_proses": btn_proses,
+        "menu_histori": menu_histori,
         "list_histori": list_histori,
         "panel_kiri": panel_kiri,
         "panel_kanan": panel_kanan,

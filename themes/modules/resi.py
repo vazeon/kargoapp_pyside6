@@ -214,7 +214,7 @@ def get_resi_styles(
         """,
         "lbl_resi_tag": f"""
             color: {_warna_tema(is_dark, "#9ca3af", "#64748b")};
-            font-size: {body_size}px;
+            font-size: {body_small_size}px;
             font-weight: {_FONT_WEIGHTS["medium"]};
             font-family: '{get_master_font()}';
         """,
