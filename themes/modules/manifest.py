@@ -160,6 +160,8 @@ def get_manifest_styles(is_dark: bool, is_edit_mode: bool) -> dict:
         }}
     """
 
+    # QSS sengaja dibuat sederhana, mengikuti menu Buku Gudang.
+    # Hindari border/radius item yang tidak diperlukan pada popup context menu.
     menu_histori = f"""
         QMenu {{
             background-color: {ui["field_background"]};

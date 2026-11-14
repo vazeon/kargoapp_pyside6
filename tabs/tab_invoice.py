@@ -66,7 +66,12 @@ from utils.number_formatters import (
     rupiah_to_int,
     format_ke_rupiah,
 )
-from utils.table_helper import buat_tabel_item
+from utils.table_helper import (
+    buat_tabel_item,
+    pasang_header_wrap,
+    pasang_style_tabel,
+    terapkan_tema_tabel,
+)
 from utils.reset_form_helper import reset_form_input_global
 from utils.validators import UppercaseValidator
 from utils.mixins import ZoomTableMixin
@@ -277,6 +282,7 @@ class InvoiceSheet(QTableWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        pasang_header_wrap(self)
         self.invoice_columns = []
         self.setItemDelegate(InvoiceItemDelegate(self))
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -570,7 +576,8 @@ class ColumnDesignerDialog(QDialog):
         layout.addWidget(info)
 
         self.table = QTableWidget(0, 4)
-        self.table.setStyleSheet(style_dialog["table"])
+        pasang_header_wrap(self.table)
+        pasang_style_tabel(self.table, style_dialog["table"])
         self.table.setHorizontalHeaderLabels(
             ["NAMA KOLOM", "FORMAT ISI", "UKURAN KOLOM", "MASUK TOTAL"]
         )
@@ -1065,12 +1072,13 @@ class BillingQueueDialog(QDialog):
 
     def _bangun_tabel(self, layout):
         self.tabel = QTableWidget()
+        pasang_header_wrap(self.tabel)
         parent = self.parentWidget()
         dialog_styles = get_invoice_dialog_styles(
             get_fixed_font_sizes()["subtitle"],
             is_dark=bool(parent and getattr(parent.window(), "current_theme", "light") == "dark"),
         )
-        self.tabel.setStyleSheet(dialog_styles["table"])
+        pasang_style_tabel(self.tabel, dialog_styles["table"])
         self.tabel.setColumnCount(12)
         self.tabel.setHorizontalHeaderLabels((
             "✓", "NO. RESI", "CABANG", "TANGGAL", "PENGIRIM", "PENERIMA",
@@ -1300,6 +1308,7 @@ class TabInvoice(ZoomTableMixin, QWidget):
         )
 
         self.tabel_histori_invoice = QTableWidget()
+        pasang_header_wrap(self.tabel_histori_invoice)
         self.tabel_histori_invoice.setColumnCount(5)
         self.tabel_histori_invoice.setHorizontalHeaderLabels(
             ["NO. INV", "TANGGAL", "CLIENT", "STATUS", "PEMBUAT"],
@@ -3143,9 +3152,13 @@ class TabInvoice(ZoomTableMixin, QWidget):
             tabel.setUpdatesEnabled(False)
         try:
             with blokir_signal_sementara(tabel):
+                terapkan_tema_tabel(
+                    tabel,
+                    is_dark,
+                    font_size_pt=metrics.font_base_pt,
+                )
                 zoom_helper.terapkan_zoom_tabel(
                     tabel,
-                    is_dark=is_dark,
                     z=metrics.level,
                     update_geometry=update_geometry,
                 )

@@ -45,6 +45,8 @@ from themes.modules.buku_gudang import (
     get_buku_gudang_menu_style,
 )
 from utils.smooth_scroll_helper import pasang_scroll_halus
+from utils.table_helper import terapkan_tema_tabel
+from utils.table_helper import pasang_header_wrap
 
 
 KOLOM = (
@@ -170,6 +172,7 @@ class TabManifestPenagihan(QWidget):
         layout.addLayout(baris_filter)
 
         self.tabel = _TabelManifestPenagihan(0, len(KOLOM), self)
+        pasang_header_wrap(self.tabel)
         self.tabel.setHorizontalHeaderLabels(KOLOM)
         self.tabel.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.tabel.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -240,15 +243,23 @@ class TabManifestPenagihan(QWidget):
             tombol_filter.setStyleSheet(styles["btn_tahun"])
         self._style_menu_periode(is_dark)
 
-        style_tabel = (
+        style_tabel_khusus = (
             "QHeaderView::section { background-color: #F4C7F3; color: #202020; "
             f"font-weight: {_FONT_WEIGHTS['bold']}; "
-            "padding: 5px; border: 1px solid #777777; }"
+            "border: 1px solid #777777; }"
             "QTableWidget { gridline-color: #9A9A9A; }"
         )
-        self.tabel.setStyleSheet(style_tabel)
+        terapkan_tema_tabel(
+            self.tabel,
+            is_dark,
+            extra_stylesheet=style_tabel_khusus,
+        )
         if hasattr(self, "tabel_terpin"):
-            self.tabel_terpin.setStyleSheet(style_tabel)
+            terapkan_tema_tabel(
+                self.tabel_terpin,
+                is_dark,
+                extra_stylesheet=style_tabel_khusus,
+            )
         self.tabel.horizontalHeader().setMinimumHeight(30)
         self.tabel.horizontalHeader().setDefaultAlignment(
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
@@ -257,6 +268,7 @@ class TabManifestPenagihan(QWidget):
     def _bangun_kolom_terpin(self):
         """Membangun overlay untuk kolom KODE dan RESI yang tidak ikut scroll horizontal."""
         self.tabel_terpin = QTableWidget(0, 2, self.tabel)
+        pasang_header_wrap(self.tabel_terpin, manage_height=False)
         self.tabel_terpin.setHorizontalHeaderLabels(KOLOM[:2])
         self.tabel_terpin.verticalHeader().setVisible(False)
         self.tabel_terpin.setSelectionBehavior(
@@ -304,6 +316,9 @@ class TabManifestPenagihan(QWidget):
         self.tabel.horizontalHeader().sectionResized.connect(
             self._sinkronkan_lebar_kolom_terpin
         )
+        wrap_signal = getattr(self.tabel.horizontalHeader(), "wrapHeightChanged", None)
+        if wrap_signal is not None:
+            wrap_signal.connect(self.tabel._jadwalkan_callback_resize)
         self.tabel.itemSelectionChanged.connect(
             lambda: self._sinkronkan_pilihan_tabel(self.tabel, self.tabel_terpin)
         )
@@ -334,6 +349,11 @@ class TabManifestPenagihan(QWidget):
         ) != target_geometry
         if geometry_changed:
             self.tabel_terpin.setGeometry(*target_geometry)
+
+        tinggi_header = self.tabel.horizontalHeader().height()
+        header_terpin = self.tabel_terpin.horizontalHeader()
+        if header_terpin.height() != tinggi_header:
+            header_terpin.setFixedHeight(tinggi_header)
 
         for column in (0, 1):
             target_width = self.tabel.columnWidth(column)

@@ -1898,8 +1898,6 @@ def jalankan_aplikasi():
 
     login_window = buat_login_window(show=False)
 
-    # Auto-login dijalankan asynchronous agar startup tidak freeze ketika
-    # Supabase/database lambat. Form login hanya ditampilkan bila restore gagal.
     restore_started_at = time.perf_counter()
 
     def _selesai_restore(restored):

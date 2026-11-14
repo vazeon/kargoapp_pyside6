@@ -69,7 +69,7 @@ from themes.modules.manifest import (
 from utils.printer.print_resi import cetak_resi_ke_printer
 from utils.date_ind_format import format_tanggal_ke_db, format_tanggal_ke_ui
 from utils.reset_form_helper import reset_form_input_global
-from utils.table_helper import atur_editor_sel, buat_tabel_item
+from utils.table_helper import atur_editor_sel, buat_tabel_item, pasang_header_wrap, pasang_style_tabel
 from utils.ui_metrics import dapatkan_ui_scale, skalakan_px
 from utils.validators import UppercaseValidator, get_decimal_validator
 from utils.widget_helpers import blokir_signal_sementara
@@ -566,6 +566,7 @@ class TabResi(QWidget):
         layout.setSpacing(8)
 
         self.table_items = QTableWidget()
+        pasang_header_wrap(self.table_items)
         self.table_items.setColumnCount(5)
         self.table_items.setHorizontalHeaderLabels(
             ["NO.", "NAMA BARANG", "KOLI", "BERAT (Kg)", "KUBIK (m³)"]
@@ -1017,7 +1018,7 @@ class TabResi(QWidget):
         theme = get_resi_detail_barang_theme(is_dark=is_dark)
 
         qss = get_table_input_styles(is_dark, theme=theme)
-        table.setStyleSheet(konversi_font_qss_ke_point(qss))
+        pasang_style_tabel(table, konversi_font_qss_ke_point(qss))
         table.setAlternatingRowColors(True)
         table.setShowGrid(True)
         table.setMouseTracking(False)

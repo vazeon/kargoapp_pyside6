@@ -30,7 +30,7 @@ from utils.input_style_helper import (
 from utils.typography import get_fixed_font_sizes_pt, get_font_weights, get_master_font
 import utils.zoom as zoom_helper
 from utils.mixins import ZoomTableMixin
-from utils.table_helper import ModelTableView
+from utils.table_helper import ModelTableView, terapkan_tema_tabel
 from utils.date_ind_format import format_tanggal_ke_ui
 
 _FONT_WEIGHTS = get_font_weights()
@@ -589,7 +589,13 @@ class SubTabPengirim(QWidget, ZoomTableMixin):
 
         self._sedang_menerapkan_zoom = True
         try:
+            zoom_metrics = zoom_helper.dapatkan_metrik_zoom(z)
             for tabel in (self.tabel_pengirim, self.tabel_histori):
-                zoom_helper.terapkan_zoom_tabel(tabel, is_dark=is_dark, z=z)
+                terapkan_tema_tabel(
+                    tabel,
+                    is_dark,
+                    font_size_pt=zoom_metrics.font_base_pt,
+                )
+                zoom_helper.terapkan_zoom_tabel(tabel, z=z)
         finally:
             self._sedang_menerapkan_zoom = False

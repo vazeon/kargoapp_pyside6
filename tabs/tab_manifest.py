@@ -3,13 +3,14 @@ import re
 from PySide6.QtCore import (
     QAbstractTableModel,
     QDate,
+    QEvent,
     QModelIndex,
     QSettings,
     QStringListModel,
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QBrush
+from PySide6.QtGui import QBrush, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -64,7 +66,8 @@ from utils.number_formatters import (
     format_angka_indonesia,
     format_ke_rupiah,
 )
-from utils.table_helper import atur_editor_sel
+from utils.table_helper import atur_editor_sel, terapkan_tema_tabel
+from utils.smooth_scroll_helper import pasang_scroll_halus
 from utils.date_ind_format import format_tanggal_ke_ui
 
 
@@ -82,6 +85,26 @@ def _get_manifest_delegate_colors(
 MANIFEST_TABLE_COLUMN_COUNT = 13
 MANIFEST_KOL_CHECK = 0
 MANIFEST_KOL_KET = 12
+
+
+def _normalisasi_manifest_check_state(value):
+    """Konversi bool/enum/int Qt ke bool; None berarti nilai tidak valid."""
+    # bool adalah subclass int: True == 1, sedangkan Checked == 2.
+    if isinstance(value, bool):
+        return value
+
+    raw_value = getattr(value, "value", value)
+    try:
+        state = int(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    if state == int(Qt.CheckState.Checked.value):
+        return True
+    if state == int(Qt.CheckState.Unchecked.value):
+        return False
+    # Checkbox Manifest bersifat biner; PartiallyChecked tidak diterima.
+    return None
 
 
 class _ManifestTableRow:
@@ -163,14 +186,17 @@ class ManifestTableModel(QAbstractTableModel):
         row = self._rows[row_number]
 
         if column == MANIFEST_KOL_CHECK and role == Qt.ItemDataRole.CheckStateRole:
-            try:
-                checked = int(value) == int(Qt.CheckState.Checked)
-            except (TypeError, ValueError):
-                checked = value == Qt.CheckState.Checked
+            checked = _normalisasi_manifest_check_state(value)
+            if checked is None:
+                return False
             if row.checked == checked:
                 return True
             row.checked = checked
-            self.dataChanged.emit(index, index, [int(Qt.ItemDataRole.CheckStateRole)])
+            self.dataChanged.emit(
+                index,
+                index,
+                [int(Qt.ItemDataRole.CheckStateRole)],
+            )
             return True
 
         if column == MANIFEST_KOL_KET and role in (
@@ -231,6 +257,29 @@ class ManifestTableModel(QAbstractTableModel):
     def setAlignments(self, alignments):
         self._alignments = tuple(alignments or ())
 
+    def displayTextAt(self, row_number, column):
+        """Ambil teks tampilan langsung tanpa round-trip QModelIndex.data()."""
+        if not (0 <= row_number < len(self._rows)):
+            return ""
+        if not (0 <= column < self._column_count):
+            return ""
+        value = self._rows[row_number].values[column]
+        if column == MANIFEST_KOL_KET and not value:
+            return "Ket..."
+        return "" if value is None else str(value)
+
+    def statusTagAt(self, row_number):
+        """Ambil status highlight langsung dari record baris."""
+        if 0 <= row_number < len(self._rows):
+            return self._rows[row_number].status_tag
+        return ""
+
+    def alignmentAt(self, column):
+        """Ambil alignment yang tetap untuk setiap kolom."""
+        if 0 <= column < len(self._alignments):
+            return self._alignments[column]
+        return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
     def setRows(self, rows):
         prepared = list(rows or [])
         self.beginResetModel()
@@ -266,7 +315,226 @@ class ManifestTableView(FrozenTableView):
 
 
 class ManifestStatusDelegate(StatusColorDelegate):
-    """Delegate highlight Manifest sekaligus editor on-demand untuk Keterangan."""
+    """Fast-paint untuk sel teks; checkbox tetap memakai renderer Qt."""
+
+    PADDING_LEFT = 4
+    PADDING_RIGHT = 4
+    ROW_CACHE_LIMIT = 8192
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._paint_model = None
+        self._row_highlight_cache = {}
+        self._palette_cache_key = None
+        self._palette_cache_values = None
+        self._belong_background_brush = QBrush()
+        self._bind_paint_model()
+        self._set_highlight_brush()
+
+    def _bind_paint_model(self):
+        view = self.parent()
+        model = view.model() if isinstance(view, QAbstractItemView) else None
+        if model is None or model is self._paint_model:
+            return
+
+        self._paint_model = model
+        # Cache bound model accessors once; paint() runs for every visible cell.
+        self._display_text_getter = getattr(model, "displayTextAt", None)
+        self._status_tag_getter = getattr(model, "statusTagAt", None)
+        self._alignment_getter = getattr(model, "alignmentAt", None)
+        model.dataChanged.connect(self._invalidate_changed_rows)
+        model.modelReset.connect(self._invalidate_paint_cache)
+        model.rowsInserted.connect(self._invalidate_paint_cache)
+        model.rowsRemoved.connect(self._invalidate_paint_cache)
+        model.layoutChanged.connect(self._invalidate_paint_cache)
+
+    def _invalidate_changed_rows(self, top_left=None, bottom_right=None, *args):
+        # Highlight status berada pada UserRole. Perubahan checkbox/Keterangan
+        # tidak mengubah status baris, jadi cache tidak perlu dibuang.
+        roles = args[0] if args else None
+        if roles:
+            try:
+                role_ids = {int(role) for role in roles}
+                if int(Qt.ItemDataRole.UserRole) not in role_ids:
+                    return
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        if top_left is None or bottom_right is None:
+            self._row_highlight_cache.clear()
+            return
+
+        first_row = max(0, int(top_left.row()))
+        last_row = max(first_row, int(bottom_right.row()))
+        for row_number in range(first_row, last_row + 1):
+            self._row_highlight_cache.pop(row_number, None)
+
+    def _invalidate_paint_cache(self, *_args):
+        self._row_highlight_cache.clear()
+
+    def _set_highlight_brush(self):
+        color = get_manifest_row_highlight(self._is_dark, True)
+        self._belong_background_brush = QBrush(color) if color is not None else QBrush()
+
+    def set_theme(self, is_dark):
+        old_value = self._is_dark
+        super().set_theme(is_dark)
+        if old_value != bool(is_dark):
+            self._row_highlight_cache.clear()
+            self._palette_cache_key = None
+            self._palette_cache_values = None
+            self._set_highlight_brush()
+
+    def _palette_values(self, palette):
+        """Cache warna palette agar lookup tidak berulang pada setiap sel."""
+        try:
+            cache_key = (palette.cacheKey(), palette.currentColorGroup())
+        except (AttributeError, RuntimeError):
+            cache_key = None
+
+        if cache_key is None:
+            return (
+                palette.brush(QPalette.ColorRole.Base),
+                palette.brush(QPalette.ColorRole.AlternateBase),
+                palette.brush(QPalette.ColorRole.Highlight),
+                palette.color(QPalette.ColorRole.Text),
+                palette.color(QPalette.ColorRole.HighlightedText),
+            )
+
+        if cache_key != self._palette_cache_key:
+            self._palette_cache_key = cache_key
+            self._palette_cache_values = (
+                palette.brush(QPalette.ColorRole.Base),
+                palette.brush(QPalette.ColorRole.AlternateBase),
+                palette.brush(QPalette.ColorRole.Highlight),
+                palette.color(QPalette.ColorRole.Text),
+                palette.color(QPalette.ColorRole.HighlightedText),
+            )
+        return self._palette_cache_values
+
+    def _row_has_highlight(self, row_number, model):
+        cached = self._row_highlight_cache.get(row_number)
+        if cached is not None:
+            return cached
+
+        getter = self._status_tag_getter
+        if callable(getter):
+            status = getter(row_number)
+        else:
+            status_index = model.index(row_number, MANIFEST_KOL_CHECK)
+            status = (
+                status_index.data(Qt.ItemDataRole.UserRole)
+                if status_index.isValid()
+                else ""
+            )
+
+        highlighted = str(status or "").strip().upper() == "BELONG"
+        self._row_highlight_cache[row_number] = highlighted
+        if len(self._row_highlight_cache) > self.ROW_CACHE_LIMIT:
+            self._row_highlight_cache.clear()
+            self._row_highlight_cache[row_number] = highlighted
+        return highlighted
+
+    def paint(self, painter, option, index):
+        # Checkbox tetap memakai painter StatusColorDelegate, termasuk tampilan
+        # indikator saat selected. Ini menjaga perilaku yang sudah teruji.
+        if not index.isValid() or index.column() == MANIFEST_KOL_CHECK:
+            return super().paint(painter, option, index)
+
+        model = index.model()
+        row_number = index.row()
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        (
+            base_brush,
+            alternate_brush,
+            highlight_brush,
+            text_color,
+            highlighted_text_color,
+        ) = self._palette_values(option.palette)
+
+        if selected:
+            background_brush = highlight_brush
+            foreground = highlighted_text_color
+        elif self._row_has_highlight(row_number, model):
+            background_brush = self._belong_background_brush
+            foreground = text_color
+        else:
+            background_brush = alternate_brush if row_number & 1 else base_brush
+            foreground = text_color
+
+        getter = self._display_text_getter
+        value = (
+            getter(row_number, index.column())
+            if callable(getter)
+            else index.data(Qt.ItemDataRole.DisplayRole)
+        )
+        text = value if isinstance(value, str) else ("" if value is None else str(value))
+
+        alignment_getter = self._alignment_getter
+        alignment = (
+            alignment_getter(index.column())
+            if callable(alignment_getter)
+            else index.data(Qt.ItemDataRole.TextAlignmentRole)
+        )
+        if alignment is None:
+            alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+
+        painter.save()
+        try:
+            painter.setClipRect(option.rect)
+            painter.fillRect(option.rect, background_brush)
+            if text:
+                painter.setFont(option.font)
+                painter.setPen(foreground)
+                text_rect = option.rect.adjusted(
+                    self.PADDING_LEFT, 0, -self.PADDING_RIGHT, 0
+                )
+                painter.drawText(text_rect, int(alignment), text)
+        finally:
+            painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if not index.isValid() or index.column() != MANIFEST_KOL_CHECK:
+            return super().editorEvent(event, model, option, index)
+
+        flags = model.flags(index)
+        if not (flags & Qt.ItemFlag.ItemIsEnabled):
+            return False
+        if not (flags & Qt.ItemFlag.ItemIsUserCheckable):
+            return False
+
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonRelease:
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if not option.rect.contains(event.position().toPoint()):
+                return False
+            return self._toggle_manifest_check_state(model, index)
+
+        if event_type == QEvent.Type.KeyPress and event.key() in (
+            Qt.Key.Key_Space,
+            Qt.Key.Key_Select,
+        ):
+            if event.isAutoRepeat():
+                return True
+            return self._toggle_manifest_check_state(model, index)
+
+        return False
+
+    @staticmethod
+    def _toggle_manifest_check_state(model, index):
+        current_checked = _normalisasi_manifest_check_state(
+            model.data(index, Qt.ItemDataRole.CheckStateRole)
+        )
+        if current_checked is None:
+            return False
+
+        next_state = (
+            Qt.CheckState.Unchecked
+            if current_checked
+            else Qt.CheckState.Checked
+        )
+        return bool(model.setData(index, next_state, Qt.ItemDataRole.CheckStateRole))
 
     def createEditor(self, parent, option, index):
         if index.column() != MANIFEST_KOL_KET:
@@ -342,6 +610,7 @@ class TabManifest(QWidget):
         self._tanggal_edit_manifest = ""
         self._show_event_pertama = True
         self._sedang_menerapkan_zoom = False
+        self._zoom_tabel_manifest_sudah_diterapkan = False
         self._sedang_memuat_tabel = False
         self._sedang_memproses_manifest = False
 
@@ -711,6 +980,15 @@ class TabManifest(QWidget):
         self.tabel_manifest.setHorizontalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel,
         )
+        self.tabel_manifest.setMouseTracking(False)
+        tinggi_baris = max(
+            18,
+            int(self.tabel_manifest.verticalHeader().defaultSectionSize()),
+        )
+        self.tabel_manifest.verticalScrollBar().setSingleStep(tinggi_baris * 3)
+        self.tabel_manifest.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Fixed,
+        )
         self.tabel_manifest.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows,
         )
@@ -727,7 +1005,22 @@ class TabManifest(QWidget):
         frozen_table = getattr(self.tabel_manifest, "frozen_table", None)
         if frozen_table is not None:
             frozen_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            frozen_table.setMouseTracking(False)
+            frozen_table.verticalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Fixed,
+            )
             self._pasang_delegate_manifest(frozen_table, is_dark)
+
+        # Header word-wrap dipasang oleh FrozenTableView melalui helper bersama.
+        # Word-wrap isi sel tetap nonaktif agar tinggi baris stabil dan scroll ringan.
+        if not getattr(self.tabel_manifest, "_manifest_smooth_scroll_controller", None):
+            event_targets = [self.tabel_manifest.viewport()]
+            if frozen_table is not None:
+                event_targets.append(frozen_table.viewport())
+            self.tabel_manifest._manifest_smooth_scroll_controller = pasang_scroll_halus(
+                self.tabel_manifest,
+                event_targets=event_targets,
+            )
 
         self.load_lebar_kolom(self.tabel_manifest)
         zoom_helper.pasang_ctrl_scroll_zoom(
@@ -1417,7 +1710,9 @@ class TabManifest(QWidget):
                 continue
 
             index_check = model.index(row, self.KOL_CHECK)
-            if model.data(index_check, Qt.ItemDataRole.CheckStateRole) != Qt.CheckState.Checked:
+            if _normalisasi_manifest_check_state(
+                model.data(index_check, Qt.ItemDataRole.CheckStateRole)
+            ) is not True:
                 continue
 
             nomor_resi = str(
@@ -1737,14 +2032,21 @@ class TabManifest(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
 
-
         if self._show_event_pertama:
             self._show_event_pertama = False
             self.perbarui_tanggal_header()
         else:
             self.refresh_session_ui()
 
-        zoom_helper.sinkronkan_frozen_table(self.tabel_manifest, tertunda=True)
+        if not self._zoom_tabel_manifest_sudah_diterapkan:
+            self._terapkan_zoom_tabel_manifest(
+                self._tema_gelap_aktif(),
+                zoom_helper.dapatkan_zoom_level(self.__class__.__name__),
+                update_geometry=True,
+            )
+            self._zoom_tabel_manifest_sudah_diterapkan = True
+        else:
+            zoom_helper.sinkronkan_frozen_table(self.tabel_manifest, tertunda=True)
 
     def _terapkan_style_form_manifest(self, styles_statis):
         """Hanya menerapkan style form, card, dan input (Tabel dikelola oleh table.py)."""
@@ -1793,17 +2095,29 @@ class TabManifest(QWidget):
         *,
         update_geometry=True,
     ):
-        """Terapkan tema tabel; hitung ulang geometri hanya saat zoom berubah."""
+        """Terapkan tema dan zoom tabel melalui helper dengan tanggung jawab terpisah."""
         tabel = self.tabel_manifest
         zoom_sebelumnya = self._sedang_menerapkan_zoom
         self._sedang_menerapkan_zoom = True
         try:
+            zoom_metrics = zoom_helper.dapatkan_metrik_zoom(z)
+
+            # Tema (warna, border, padding, dan ukuran font QSS) dikelola oleh
+            # table_helper/themes.components.table, bukan oleh utils.zoom.
+            terapkan_tema_tabel(
+                tabel,
+                is_dark,
+                font_size_pt=zoom_metrics.font_base_pt,
+            )
+
             for target in (tabel, getattr(tabel, "frozen_table", None)):
                 if target is not None:
                     update_status_delegate_theme(target, is_dark)
+
+            # API zoom saat ini hanya mengatur font dan geometri. is_dark bukan
+            # argumen yang valid dan memang menjadi tanggung jawab tema/delegate.
             zoom_helper.terapkan_zoom_tabel(
                 tabel,
-                is_dark=is_dark,
                 z=z,
                 update_geometry=update_geometry,
             )

@@ -75,7 +75,12 @@ from utils.number_formatters import (
     angka_indonesia_to_decimal,
 )
 from utils.date_ind_format import format_tanggal_ke_ui
-from utils.table_helper import atur_editor_sel, setup_tabel_modern
+from utils.table_helper import (
+    atur_editor_sel,
+    setup_tabel_modern,
+    pasang_header_wrap,
+    terapkan_tema_tabel,
+)
 from utils.validators import UppercaseValidator, get_decimal_validator, get_integer_validator
 from themes.modules.buku_gudang import (
     get_buku_gudang_action_styles,
@@ -126,6 +131,7 @@ BUKU_GUDANG_COLUMN_WIDTH_MIN = 20
 BUKU_GUDANG_COLUMN_WIDTH_MAX = 1500
 BUKU_GUDANG_FALLBACK_COLUMN_WIDTH = 110
 BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT = 28
+BUKU_GUDANG_TABLE_ROW_EXTRA = 12
 BUKU_GUDANG_AUTOCOMPLETE_MAX_VISIBLE_ITEMS = 12
 
 class _BukuGudangRow:
@@ -537,11 +543,26 @@ class BukuGudangFastPaintDelegate(QStyledItemDelegate):
     """Delegate paint ringan dengan cache metadata per baris/kolom."""
 
     PADDING_LEFT = 6
+    PADDING_TOP = 4
     PADDING_RIGHT = 6
+    BASE_MINIMUM_LINE_GAP = 3
 
-    def __init__(self, parent=None, *, is_dark=False, status_role=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        is_dark=False,
+        status_role=None,
+        zoom_level=0,
+    ):
         super().__init__(parent)
         self._is_dark = bool(is_dark)
+        self._zoom_level = None
+        self._padding_left = self.PADDING_LEFT
+        self._padding_top = self.PADDING_TOP
+        self._padding_right = self.PADDING_RIGHT
+        self.minimum_line_gap = self.BASE_MINIMUM_LINE_GAP
+        self.set_zoom_level(zoom_level)
         self._status_role = (
             TabBukuGudang.ROLE_STATUS_HIGHLIGHT
             if status_role is None else int(status_role)
@@ -617,9 +638,27 @@ class BukuGudangFastPaintDelegate(QStyledItemDelegate):
             view.viewport().update()
 
     @staticmethod
-    def jarak_baris(font_metrics):
-        """Jarak antardetail, mempertahankan spasi nyaman dari tampilan lama."""
-        return font_metrics.lineSpacing() + max(3, round(font_metrics.height() * 0.25))
+    def jarak_baris(font_metrics, minimum_gap=3):
+        """Jarak antardetail mengikuti ukuran font dengan batas yang diskalakan."""
+        gap_minimum = max(1, int(minimum_gap))
+        gap_proporsional = round(font_metrics.height() * 0.25)
+        return font_metrics.lineSpacing() + max(gap_minimum, gap_proporsional)
+
+    def set_zoom_level(self, zoom_level):
+        """Skalakan padding dan gap delegate memakai faktor geometri tabel."""
+        zoom_metrics = zoom_helper.dapatkan_metrik_zoom(zoom_level)
+        factor = zoom_metrics.factor
+        level = zoom_metrics.level
+        self._zoom_level = level
+        self._padding_left = max(1, round(self.PADDING_LEFT * factor))
+        self._padding_top = max(1, round(self.PADDING_TOP * factor))
+        self._padding_right = max(1, round(self.PADDING_RIGHT * factor))
+        self.minimum_line_gap = max(1, round(self.BASE_MINIMUM_LINE_GAP * factor))
+        self._line_pitch_metrics_key = None
+        self._line_pitch_value = 0
+        view = self.parent()
+        if isinstance(view, QAbstractItemView):
+            view.viewport().update()
 
     def _status_foreground(self, index):
         row_number = index.row()
@@ -730,10 +769,17 @@ class BukuGudangFastPaintDelegate(QStyledItemDelegate):
     def _line_pitch(self, painter):
         """Cache jarak baris tanpa menyimpan wrapper objek QFont dari Qt."""
         metrics = painter.fontMetrics()
-        metrics_key = (metrics.lineSpacing(), metrics.height())
+        metrics_key = (
+            metrics.lineSpacing(),
+            metrics.height(),
+            self.minimum_line_gap,
+        )
         if metrics_key != self._line_pitch_metrics_key:
             self._line_pitch_metrics_key = metrics_key
-            self._line_pitch_value = self.jarak_baris(metrics)
+            self._line_pitch_value = self.jarak_baris(
+                metrics,
+                self.minimum_line_gap,
+            )
         return self._line_pitch_value
 
     def paint(self, painter, option, index):
@@ -776,7 +822,10 @@ class BukuGudangFastPaintDelegate(QStyledItemDelegate):
                 return
 
             text_rect = option.rect.adjusted(
-                self.PADDING_LEFT, 0, -self.PADDING_RIGHT, 0
+                self._padding_left,
+                self._padding_top,
+                -self._padding_right,
+                0,
             )
             alignment = int(self._alignment_for(index))
             if "\n" not in text:
@@ -793,7 +842,7 @@ class BukuGudangFastPaintDelegate(QStyledItemDelegate):
                         0, line_number * line_pitch, 0, 0
                     )
                     line_rect.setHeight(
-                        min(line_pitch + 8, bottom - top + 1)
+                        min(line_pitch, bottom - top + 1)
                     )
                     painter.drawText(line_rect, alignment, line)
         finally:
@@ -1666,11 +1715,13 @@ class TabBukuGudang(QWidget):
             )
 
         is_dark = self._tema_gelap_aktif()
+        zoom_level = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
         tabel.setItemDelegate(
             BukuGudangFastPaintDelegate(
                 tabel,
                 is_dark=is_dark,
                 status_role=self.ROLE_STATUS_HIGHLIGHT,
+                zoom_level=zoom_level,
             )
         )
         frozen = getattr(tabel, "frozen_table", None)
@@ -1680,6 +1731,7 @@ class TabBukuGudang(QWidget):
                     frozen,
                     is_dark=is_dark,
                     status_role=self.ROLE_STATUS_HIGHLIGHT,
+                    zoom_level=zoom_level,
                 )
             )
 
@@ -1964,18 +2016,34 @@ class TabBukuGudang(QWidget):
         try:
             self._sinkronkan_editor_inline(tabel)
 
-            zoom_helper.terapkan_zoom_tabel(
+            z = zoom_helper.dapatkan_zoom_level(self.__class__.__name__)
+            zoom_metrics = zoom_helper.dapatkan_metrik_zoom(z)
+            terapkan_tema_tabel(
                 tabel,
-                is_dark=is_dark,
-                z=zoom_helper.dapatkan_zoom_level(self.__class__.__name__),
-                update_geometry=False,
+                is_dark,
+                font_size_pt=zoom_metrics.font_base_pt,
                 extra_stylesheet=self._tooltip_qss(is_dark),
             )
+            perlu_geometri_awal = not getattr(
+                tabel,
+                "_buku_gudang_zoom_geometry_initialized",
+                False,
+            )
+            zoom_helper.terapkan_zoom_tabel(
+                tabel,
+                z=z,
+                update_geometry=perlu_geometri_awal,
+                row_height_base=BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT,
+                row_extra=BUKU_GUDANG_TABLE_ROW_EXTRA,
+            )
+            if perlu_geometri_awal:
+                tabel._buku_gudang_zoom_geometry_initialized = True
             for target in (tabel, getattr(tabel, "frozen_table", None)):
                 if target is None:
                     continue
                 delegate = target.itemDelegate()
                 if isinstance(delegate, BukuGudangFastPaintDelegate):
+                    delegate.set_zoom_level(z)
                     delegate.set_theme(is_dark)
 
             tabel._buku_gudang_theme_dark = bool(is_dark)
@@ -1988,11 +2056,28 @@ class TabBukuGudang(QWidget):
             self.__class__.__name__,
             level + int(arah),
         )
+        is_dark = self._tema_gelap_aktif()
+        zoom_metrics = zoom_helper.dapatkan_metrik_zoom(level)
+        for target in (tabel, getattr(tabel, "frozen_table", None)):
+            if target is None:
+                continue
+            delegate = target.itemDelegate()
+            if isinstance(delegate, BukuGudangFastPaintDelegate):
+                delegate.set_zoom_level(level)
+
+        terapkan_tema_tabel(
+            tabel,
+            is_dark,
+            font_size_pt=zoom_metrics.font_base_pt,
+            extra_stylesheet=self._tooltip_qss(is_dark),
+        )
         zoom_helper.terapkan_zoom_tabel(
             tabel,
-            is_dark=self._tema_gelap_aktif(),
             z=level,
+            row_height_base=BUKU_GUDANG_TABLE_ROW_BASE_HEIGHT,
+            row_extra=BUKU_GUDANG_TABLE_ROW_EXTRA,
         )
+        tabel._buku_gudang_zoom_geometry_initialized = True
         self._jadwalkan_tinggi_baris(tabel)
 
     def _on_wilayah_changed(self, _index):
@@ -2785,7 +2870,16 @@ class TabBukuGudang(QWidget):
             return
 
         base_height = max(1, tabel.verticalHeader().defaultSectionSize())
-        line_pitch = BukuGudangFastPaintDelegate.jarak_baris(tabel.fontMetrics())
+        delegate = tabel.itemDelegate()
+        minimum_gap = (
+            delegate.minimum_line_gap
+            if isinstance(delegate, BukuGudangFastPaintDelegate)
+            else BukuGudangFastPaintDelegate.BASE_MINIMUM_LINE_GAP
+        )
+        line_pitch = BukuGudangFastPaintDelegate.jarak_baris(
+            tabel.fontMetrics(),
+            minimum_gap,
+        )
         tabel._syncing_row_heights = True
         try:
             detail_count_at = getattr(model, "detailCountAt", None)
@@ -3716,6 +3810,7 @@ class BukuGudangEditDialog(QDialog):
 
         main.addWidget(QLabel("Detail Barang"))
         self.table_detail = QTableWidget(0, 4)
+        pasang_header_wrap(self.table_detail)
         self.table_detail.setItemDelegateForColumn(
             0, NamaBarangKapitalDelegate(self.table_detail)
         )

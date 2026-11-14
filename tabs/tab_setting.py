@@ -46,6 +46,7 @@ import services.numbering_service as numbering_service
 
 from themes.modules.setting import get_setting_styles
 from utils.input_style_helper import atur_tinggi_input, terapkan_style_input_global
+from utils.table_helper import pasang_header_wrap, pasang_style_tabel
 
 
 
@@ -340,6 +341,7 @@ class TabSettingSistem(QWidget):
         layout.addWidget(lbl_numbering)
 
         self.table_numbering = QTableWidget(0, 6)
+        pasang_header_wrap(self.table_numbering)
         self.table_numbering.setHorizontalHeaderLabels([
             "CABANG", "DOKUMEN", "SERI", "NOMOR AWAL", "TERAKHIR", "PADDING",
         ])
@@ -533,6 +535,7 @@ class TabSettingSistem(QWidget):
         action_bar.addStretch()
 
         self.table_user_access = QTableWidget()
+        pasang_header_wrap(self.table_user_access)
         self.table_user_access.setAlternatingRowColors(True)
         self.table_user_access.verticalHeader().setVisible(False)
         self.table_user_access.setSelectionBehavior(
@@ -1322,6 +1325,7 @@ class TabSettingSistem(QWidget):
         edit_widget.blockSignals(False)
 
     def setup_tabel_rekening(self, table: QTableWidget):
+        pasang_header_wrap(table)
         table.setHorizontalHeaderLabels(["BANK", "NO. REK", "ATAS NAMA", ""])
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1598,7 +1602,7 @@ class TabSettingSistem(QWidget):
                 combo_view.setFont(font_combo)
 
         for table in tabel_setting:
-            table.setStyleSheet(s['table'])
+            pasang_style_tabel(table, s['table'])
 
         for button in (
                 self.btn_tambah_user,

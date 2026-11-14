@@ -28,7 +28,7 @@ from utils.input_style_helper import (
 
 from utils.typography import get_font_weights, get_master_font, get_fixed_font_sizes_pt
 from utils.mixins import ZoomTableMixin
-from utils.table_helper import ModelTableView
+from utils.table_helper import ModelTableView, terapkan_tema_tabel
 import utils.zoom as zoom_helper
 
 _FONT_WEIGHTS = get_font_weights()
@@ -796,11 +796,13 @@ class SubTabTruk(QWidget, ZoomTableMixin):
 
             self._sedang_menerapkan_zoom = True
             try:
-                zoom_helper.terapkan_zoom_tabel(
+                zoom_metrics = zoom_helper.dapatkan_metrik_zoom(z)
+                terapkan_tema_tabel(
                     self.tabel_truk,
-                    is_dark=is_dark,
-                    z=z,
+                    is_dark,
+                    font_size_pt=zoom_metrics.font_base_pt,
                 )
+                zoom_helper.terapkan_zoom_tabel(self.tabel_truk, z=z)
             finally:
                 self._sedang_menerapkan_zoom = False
         finally:

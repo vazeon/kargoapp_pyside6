@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
 )
 
+from utils.table_helper import pasang_header_wrap
+
 
 _FROZEN_GEOMETRY_UPDATE_INTERVAL_MS = 16
 
@@ -129,6 +131,7 @@ class FrozenTableWidget(QTableWidget):
         )
         frozen.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         frozen.customContextMenuRequested.connect(self.customContextMenuRequested.emit)
+        pasang_header_wrap(self)
 
     def _konfigurasi_separator(self):
         """Siapkan garis pemisah native 2 px tanpa graphics effect."""
@@ -167,6 +170,9 @@ class FrozenTableWidget(QTableWidget):
         frozen_header.geometriesChanged.connect(self._sinkronkan_tinggi_header)
         main_header.sectionResized.connect(self.update_section_width)
         frozen_header.sectionResized.connect(self.update_main_section_width)
+        wrap_signal = getattr(main_header, "wrapHeightChanged", None)
+        if wrap_signal is not None:
+            wrap_signal.connect(self._jadwalkan_update_frozen_geometry)
 
         main_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_frozen)
         frozen_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_main)
@@ -416,6 +422,7 @@ class FrozenTableView(QTableView):
             Qt.ContextMenuPolicy.CustomContextMenu
         )
         frozen.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        pasang_header_wrap(self)
 
     def _konfigurasi_separator(self):
         """Siapkan garis pemisah native 2 px tanpa graphics effect."""
@@ -454,6 +461,9 @@ class FrozenTableView(QTableView):
         frozen_header.geometriesChanged.connect(self._jadwalkan_update_frozen_geometry)
         main_header.sectionResized.connect(self.update_section_width)
         frozen_header.sectionResized.connect(self.update_main_section_width)
+        wrap_signal = getattr(main_header, "wrapHeightChanged", None)
+        if wrap_signal is not None:
+            wrap_signal.connect(self._jadwalkan_update_frozen_geometry)
         main_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_frozen)
         frozen_vheader.sectionResized.connect(self._sinkronkan_tinggi_baris_ke_main)
         main_scroll.valueChanged.connect(frozen_scroll.setValue)
@@ -467,6 +477,7 @@ class FrozenTableView(QTableView):
         if model is None:
             return
         frozen.setModel(model)
+        pasang_header_wrap(self)
         selection_model = self.selectionModel()
         if selection_model is not None:
             frozen.setSelectionModel(selection_model)

@@ -88,6 +88,8 @@ def get_table_styles(
             font-weight: 600;
             padding-top: {metrics.header_v}px;
             padding-bottom: {metrics.header_v}px;
+            padding-left: {metrics.header_h}px;
+            padding-right: {metrics.header_h}px;
         }}
 
         QTableWidget::item:selected, 

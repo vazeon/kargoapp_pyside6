@@ -1,17 +1,89 @@
 # utils/table_helper.py
 from typing import Any, Iterable, Optional, Sequence
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QModelIndex,
+    QRect,
+    QSize,
+    QTimer,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
     QLineEdit,
+    QStyle,
+    QStyleOptionHeader,
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTableView,
 )
+
+
+def pasang_style_tabel(tabel, stylesheet: str) -> str:
+    """Pasang QSS tabel dan sinkronkan ke frozen overlay bila tersedia.
+
+    Fungsi ini hanya menerapkan stylesheet; aturan visual tetap didefinisikan
+    oleh themes/components/table.py atau theme module pemiliknya.
+    """
+    if tabel is None:
+        return ""
+
+    qss = str(stylesheet or "")
+    tabel.setStyleSheet(qss)
+
+    frozen = getattr(tabel, "frozen_table", None)
+    if frozen is not None and frozen.styleSheet() != qss:
+        frozen.setStyleSheet(qss)
+
+    return qss
+
+
+def terapkan_tema_tabel(
+    tabel,
+    is_dark: bool,
+    *,
+    metrics=None,
+    font_size_pt: Optional[float] = None,
+    ui_colors=None,
+    extra_stylesheet: str = "",
+    cell_editors: bool = False,
+) -> str:
+    """Bangun dan terapkan tema tabel dari komponen tema bersama.
+
+    Helper ini menjadi lapisan penerapan tema. Nilai font_size_pt dapat
+    diberikan oleh pemanggil yang memiliki konteks zoom; helper ini tidak
+    mengimpor atau menjalankan utils.zoom.
+    """
+    if tabel is None:
+        return ""
+
+    from dataclasses import replace
+    from themes.components.table import TableMetrics, get_table_styles
+
+    table_metrics = metrics or TableMetrics()
+    if font_size_pt is not None:
+        table_metrics = replace(
+            table_metrics,
+            font_size_pt=max(1.0, float(font_size_pt)),
+        )
+
+    stylesheet = get_table_styles(
+        is_dark,
+        metrics=table_metrics,
+        ui_colors=ui_colors,
+        cell_editors=cell_editors,
+    )
+    extra = str(extra_stylesheet or "").strip()
+    if extra:
+        stylesheet = f"{stylesheet.rstrip()}\n{extra}"
+
+    return pasang_style_tabel(tabel, stylesheet)
 
 
 def atur_editor_sel(widget: QLineEdit) -> None:
@@ -60,6 +132,309 @@ def buat_tabel_item(
     return item
 
 
+
+class WrappedHeaderView(QHeaderView):
+    """Header tabel yang membungkus teks pada batas kata saat kolom menyempit."""
+
+    wrapHeightChanged = Signal(int)
+
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None, *, manage_height=True):
+        super().__init__(orientation, parent)
+        self._manage_wrap_height = bool(manage_height)
+        self._bound_header_model = None
+        self._last_wrap_height = None
+        self._wrap_timer = QTimer(self)
+        self._wrap_timer.setSingleShot(True)
+        self._wrap_timer.timeout.connect(self._perbarui_geometri_wrap)
+        self.sectionResized.connect(self._jadwalkan_perbarui_wrap)
+        self.sectionCountChanged.connect(self._jadwalkan_perbarui_wrap)
+        self.geometriesChanged.connect(self._jadwalkan_perbarui_wrap)
+
+    def set_height_managed(self, enabled):
+        self._manage_wrap_height = bool(enabled)
+        self._jadwalkan_perbarui_wrap()
+
+    def bind_model(self, model):
+        if model is self._bound_header_model:
+            return
+        old_model = self._bound_header_model
+        if old_model is not None:
+            for signal_name in ("headerDataChanged", "modelReset", "columnsInserted", "columnsRemoved"):
+                signal = getattr(old_model, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.disconnect(self._jadwalkan_perbarui_wrap)
+                    except (RuntimeError, TypeError):
+                        pass
+        self._bound_header_model = model
+        if model is not None:
+            for signal_name in ("headerDataChanged", "modelReset", "columnsInserted", "columnsRemoved"):
+                signal = getattr(model, signal_name, None)
+                if signal is not None:
+                    signal.connect(self._jadwalkan_perbarui_wrap)
+        self._jadwalkan_perbarui_wrap()
+
+    def _jadwalkan_perbarui_wrap(self, *_args):
+        if not self._manage_wrap_height:
+            self.viewport().update()
+            return
+        if not self._wrap_timer.isActive():
+            self._wrap_timer.start(0)
+
+    def _teks_dan_font_section(self, logical_index):
+        model = self.model()
+        if model is None:
+            return "", self.font()
+        value = model.headerData(
+            logical_index,
+            self.orientation(),
+            Qt.ItemDataRole.DisplayRole,
+        )
+        text = "" if value is None else str(value)
+        section_font = model.headerData(
+            logical_index,
+            self.orientation(),
+            Qt.ItemDataRole.FontRole,
+        )
+        font = section_font if isinstance(section_font, QFont) else self.font()
+        return text, font
+
+    def _label_rect(self, logical_index, width, height):
+        option = QStyleOptionHeader()
+        self.initStyleOption(option)
+        self.initStyleOptionForIndex(option, logical_index)
+        option.rect = QRect(0, 0, max(1, int(width)), max(1, int(height)))
+        rect = self.style().subElementRect(
+            QStyle.SubElement.SE_HeaderLabel,
+            option,
+            self,
+        )
+        if not rect.isValid() or rect.width() <= 0:
+            rect = option.rect.adjusted(3, 2, -3, -2)
+        return rect
+
+    def _tinggi_teks_section(self, logical_index, base_height):
+        text, font = self._teks_dan_font_section(logical_index)
+        if not text:
+            return 0
+        width = self.sectionSize(logical_index)
+        if width <= 0:
+            return 0
+        label_rect = self._label_rect(logical_index, width, base_height)
+        available_width = max(1, label_rect.width())
+        metrics = QFontMetrics(font)
+        flags = int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter)
+        bounds = metrics.boundingRect(
+            QRect(0, 0, available_width, max(1000, base_height * 8)),
+            flags,
+            text,
+        )
+        return max(metrics.height(), bounds.height())
+
+    def sizeHint(self):
+        base = super().sizeHint()
+        if self.orientation() != Qt.Orientation.Horizontal or self.count() <= 0:
+            return base
+
+        max_extra = 0
+        base_height = max(1, base.height())
+        for logical_index in range(self.count()):
+            if self.isSectionHidden(logical_index):
+                continue
+            text_height = self._tinggi_teks_section(logical_index, base_height)
+            if text_height:
+                metrics = QFontMetrics(self._teks_dan_font_section(logical_index)[1])
+                max_extra = max(max_extra, text_height - metrics.height())
+
+        return base if max_extra <= 0 else base + QSize(0, max_extra)
+
+    def _bungkus_teks_section(self, text, width, font):
+        """Sisipkan line break pada spasi; kata tidak dipotong di tengah."""
+        metrics = QFontMetrics(font)
+        max_width = max(1, int(width))
+        lines = []
+        for paragraph in str(text or "").split("\n"):
+            words = paragraph.split()
+            if not words:
+                lines.append("")
+                continue
+            current = words[0]
+            for word in words[1:]:
+                candidate = f"{current} {word}"
+                if metrics.horizontalAdvance(candidate) <= max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+        return "\n".join(lines)
+
+    def paintSection(self, painter, rect, logicalIndex):
+        if self.orientation() != Qt.Orientation.Horizontal or not rect.isValid():
+            return super().paintSection(painter, rect, logicalIndex)
+
+        option = QStyleOptionHeader()
+        self.initStyleOption(option)
+        self.initStyleOptionForIndex(option, logicalIndex)
+        option.rect = rect
+
+        text = str(option.text or "")
+        if text:
+            label_rect = self.style().subElementRect(
+                QStyle.SubElement.SE_HeaderLabel,
+                option,
+                self,
+            )
+            if not label_rect.isValid() or label_rect.width() <= 0:
+                label_rect = rect.adjusted(3, 2, -3, -2)
+            _section_text, section_font = self._teks_dan_font_section(logicalIndex)
+            option.text = self._bungkus_teks_section(
+                text,
+                label_rect.width(),
+                section_font,
+            )
+
+        # Gunakan paint native QStyle agar warna, font QSS, state, border,
+        # ikon, dan indikator sorting tetap mengikuti tema aplikasi.
+        self.style().drawControl(
+            QStyle.ControlElement.CE_Header,
+            option,
+            painter,
+            self,
+        )
+
+    def _perbarui_geometri_wrap(self):
+        target_height = self.sizeHint().height()
+        changed = target_height != self._last_wrap_height
+        self._last_wrap_height = target_height
+
+        if self._manage_wrap_height and changed:
+            self.updateGeometry()
+            parent = self.parentWidget()
+            if parent is not None:
+                # QTableView mengatur viewport berdasarkan sizeHint header.
+                updater = getattr(parent, "updateGeometries", None)
+                if callable(updater):
+                    try:
+                        updater()
+                    except (AttributeError, RuntimeError, TypeError):
+                        pass
+                parent.updateGeometry()
+                parent.update()
+            self.wrapHeightChanged.emit(target_height)
+        self.viewport().update()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.FontChange,
+            QEvent.Type.ApplicationFontChange,
+            QEvent.Type.StyleChange,
+            QEvent.Type.PaletteChange,
+        ):
+            self._jadwalkan_perbarui_wrap()
+
+
+def _ambil_konfigurasi_header(header):
+    """Ambil state header sebelum widget header native diganti."""
+    return {
+        "default_alignment": header.defaultAlignment(),
+        "minimum_section_size": header.minimumSectionSize(),
+        "maximum_section_size": header.maximumSectionSize(),
+        "default_section_size": header.defaultSectionSize(),
+        "stretch_last_section": header.stretchLastSection(),
+        "highlight_sections": header.highlightSections(),
+        "sections_clickable": header.sectionsClickable(),
+        "sections_movable": header.sectionsMovable(),
+        "first_section_movable": header.isFirstSectionMovable(),
+        "cascading_resizes": header.cascadingSectionResizes(),
+        "sort_shown": header.isSortIndicatorShown(),
+        "sort_section": header.sortIndicatorSection() if header.isSortIndicatorShown() else -1,
+        "sort_order": header.sortIndicatorOrder() if header.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder,
+        "sections": tuple(
+            (
+                header.sectionResizeMode(index),
+                header.sectionSize(index),
+                header.isSectionHidden(index),
+            )
+            for index in range(header.count())
+        ),
+        "visual_order": tuple(
+            header.logicalIndex(visual_index)
+            for visual_index in range(header.count())
+        ),
+    }
+
+
+def _salin_konfigurasi_header(konfigurasi, header):
+    """Pulihkan perilaku header agar pemasangan wrap tidak mengubah tabel."""
+    header.setDefaultAlignment(konfigurasi["default_alignment"])
+    header.setMinimumSectionSize(konfigurasi["minimum_section_size"])
+    header.setMaximumSectionSize(konfigurasi["maximum_section_size"])
+    header.setDefaultSectionSize(konfigurasi["default_section_size"])
+    header.setStretchLastSection(konfigurasi["stretch_last_section"])
+    header.setHighlightSections(konfigurasi["highlight_sections"])
+    header.setSectionsClickable(konfigurasi["sections_clickable"])
+    header.setSectionsMovable(konfigurasi["sections_movable"])
+    header.setFirstSectionMovable(konfigurasi["first_section_movable"])
+    header.setCascadingSectionResizes(konfigurasi["cascading_resizes"])
+    header.setSortIndicatorShown(konfigurasi["sort_shown"])
+
+    jumlah = min(len(konfigurasi["sections"]), header.count())
+    for logical_index, section_state in enumerate(konfigurasi["sections"][:jumlah]):
+        resize_mode, width, hidden = section_state
+        header.setSectionResizeMode(logical_index, resize_mode)
+        header.resizeSection(logical_index, width)
+        header.setSectionHidden(logical_index, hidden)
+
+    if konfigurasi["sort_shown"]:
+        sort_section = konfigurasi["sort_section"]
+        if 0 <= sort_section < header.count():
+            header.setSortIndicator(sort_section, konfigurasi["sort_order"])
+
+    visual_order = konfigurasi["visual_order"][:jumlah]
+    for target_visual, logical_index in enumerate(visual_order):
+        if logical_index < 0 or logical_index >= header.count():
+            continue
+        current_visual = header.visualIndex(logical_index)
+        if current_visual != target_visual:
+            header.moveSection(current_visual, target_visual)
+
+
+def _pasang_header_wrap_satu_view(tabel, *, manage_height=True):
+    if tabel is None or not hasattr(tabel, "horizontalHeader"):
+        return None
+
+    header_lama = tabel.horizontalHeader()
+    if isinstance(header_lama, WrappedHeaderView):
+        header_lama.set_height_managed(manage_height)
+        header_lama.bind_model(tabel.model())
+        return header_lama
+
+    konfigurasi_header = _ambil_konfigurasi_header(header_lama)
+    header_baru = WrappedHeaderView(
+        Qt.Orientation.Horizontal,
+        tabel,
+        manage_height=manage_height,
+    )
+    tabel.setHorizontalHeader(header_baru)
+    _salin_konfigurasi_header(konfigurasi_header, header_baru)
+    header_baru.bind_model(tabel.model())
+    header_baru._jadwalkan_perbarui_wrap()
+    return header_baru
+
+
+def pasang_header_wrap(tabel, *, manage_height=True):
+    """Pasang header word-wrap; overlay frozen mengikuti tinggi header utama."""
+    header = _pasang_header_wrap_satu_view(
+        tabel,
+        manage_height=manage_height,
+    )
+    frozen = getattr(tabel, "frozen_table", None)
+    if frozen is not None and frozen is not tabel:
+        _pasang_header_wrap_satu_view(frozen, manage_height=False)
+    return header
+
 def setup_tabel_modern(
         tabel: QTableWidget,
         *,
@@ -83,7 +458,8 @@ def setup_tabel_modern(
     tabel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     tabel.setMouseTracking(False)
 
-    # 3. Konfigurasi Header Kolom (Horizontal)
+    # 3. Header kolom dengan pembungkusan teks otomatis.
+    pasang_header_wrap(tabel)
     h_header = tabel.horizontalHeader()
     h_header.setStretchLastSection(stretch_last_column)
     h_header.setHighlightSections(False)
@@ -354,6 +730,7 @@ class ModelTableView(QTableView):
         super().__init__(parent)
         self._table_model = ModelTableModel(headers, self)
         self.setModel(self._table_model)
+        pasang_header_wrap(self)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -434,6 +811,8 @@ __all__ = [
     "atur_editor_sel",
     "buat_tabel_item",
     "setup_tabel_modern",
+    "WrappedHeaderView",
+    "pasang_header_wrap",
     "ModelTableModel",
     "ModelTableView",
     "ModelCellProxy",

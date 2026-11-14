@@ -2,7 +2,6 @@
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from PySide6.QtGui import QFont
 from PySide6.QtCore import QSettings, QSignalBlocker, QSize, QTimer, QEvent, Qt, QObject
 from PySide6.QtWidgets import (
     QApplication,
@@ -13,9 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from utils import typography
-from utils.ui_metrics import dapatkan_ui_scale, skalakan_px
-from themes.components.table import get_table_styles, TableMetrics
-from themes.colors import get_theme_colors
+from utils.ui_metrics import dapatkan_ui_scale
 
 
 # Gunakan identitas QSettings yang sama dengan aplikasi utama.
@@ -44,7 +41,6 @@ MAX_ICON_RENDER_SIZE = 512
 _TABLE_VIEW_TYPES = (QTableView,)
 
 settings_ui = QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
-_FONT_WEIGHTS = typography.get_font_weights()
 
 
 class CtrlWheelZoomFilter(QObject):
@@ -181,21 +177,6 @@ def _skalakan(
     return _int_aman(hasil, minimum, minimum, maximum)
 
 
-def _skalakan_zoom_manual(
-    nilai: Any,
-    z: Any,
-    minimum: int = 0,
-    maximum: int = QT_GEOMETRY_MAX,
-) -> int:
-    """Scale untuk token QSS; responsive screen diterapkan ui_scaler."""
-    angka = _int_aman(nilai, minimum, minimum, maximum)
-    try:
-        hasil = round(angka * _faktor_zoom(z))
-    except (TypeError, ValueError, OverflowError):
-        hasil = minimum
-    return _int_aman(hasil, minimum, minimum, maximum)
-
-
 @dataclass(frozen=True)
 class ZoomMetrics:
     """Metrik zoom yang hanya relevan untuk tabel."""
@@ -206,8 +187,6 @@ class ZoomMetrics:
     row_height: int
     header_height: int
     icon_size: int
-    item_padding: int
-    header_padding_v: int
 
 
 def dapatkan_metrik_zoom(z: Any) -> ZoomMetrics:
@@ -226,8 +205,6 @@ def dapatkan_metrik_zoom(z: Any) -> ZoomMetrics:
             12,
             MAX_ICON_RENDER_SIZE,
         ),
-        item_padding=max(2, 4 + level),
-        header_padding_v=max(4, 6 + level),
     )
 
 
@@ -265,12 +242,6 @@ def _master_font() -> str:
             return family
 
     return str(getattr(typography, "DEFAULT_FONT", "Roboto") or "Roboto")
-
-
-def _font_family_qss() -> str:
-    return _master_font().replace("\\", "\\\\").replace("'", "\\'")
-
-
 
 
 
@@ -408,28 +379,29 @@ def sinkronkan_frozen_table(
 def _tinggi_view(
     font_height: Any,
     dasar: int,
-    padding: int,
+    ekstra: int,
     minimum: int,
+    z: Any,
 ) -> int:
-    padding_responsive = skalakan_px(padding, minimum=1)
-    ekstra_responsive = skalakan_px(8, minimum=4)
-    minimum_responsive = skalakan_px(minimum, minimum=18)
+    """Hitung tinggi view dengan faktor geometri yang sama seperti zoom.
+
+    Ruang tambahan dan batas minimum ikut zoom manual serta responsive scale.
+    Dengan begitu, tinggi sel/header tidak tertahan oleh padding tetap saat
+    zoom out dan tidak tertinggal saat zoom in.
+    """
+    ekstra_terskala = _skalakan(ekstra, z, 2, 10_000)
+    minimum_terskala = _skalakan(minimum, z, 18, 10_000)
     return _int_aman(
-        max(
-            dasar,
-            max(1, int(font_height)) + (padding_responsive * 2) + ekstra_responsive,
-        ),
+        max(dasar, max(1, int(font_height)) + ekstra_terskala),
         dasar,
-        minimum_responsive,
+        minimum_terskala,
         10_000,
     )
-
 
 def _header_font(header: QHeaderView, metrics: ZoomMetrics):
     font = header.font()
     font.setFamily(_master_font())
     font.setPointSizeF(metrics.font_base_pt)
-    font.setWeight(QFont.Weight(_FONT_WEIGHTS["bold"]))
     return font
 
 
@@ -442,82 +414,75 @@ def _terapkan_font_item_view(view: QAbstractItemView, metrics: ZoomMetrics) -> N
 
 
 def terapkan_zoom_tabel(
-        table: QAbstractItemView,
-        is_dark: bool = False,
-        z: int = 0,
-        update_geometry: bool = True,
-        *,
-        extra_stylesheet: str = "",
+    table: QAbstractItemView,
+    z: int = 0,
+    update_geometry: bool = True,
+    *,
+    row_height_base: Optional[int] = None,
+    row_extra: int = 16,
 ) -> None:
+    """Terapkan zoom font dan geometri tanpa mengatur stylesheet/tema tabel."""
     if table is None or not isinstance(table, _TABLE_VIEW_TYPES):
         return
 
-    zoom = _batasi_zoom(z)
     metrics_font = dapatkan_metrik_zoom(z)
     frozen = getattr(table, "frozen_table", None)
 
     # Hanya lepaskan kunci yang dipasang oleh pemanggilan ini. False dapat
     # diwarisi dari parent/batch luar; jangan mengubahnya menjadi kunci lokal.
-    # Frozen adalah child tabel dan otomatis mengikuti pembaruan parent.
     updates_main = table.updatesEnabled()
     if updates_main:
         table.setUpdatesEnabled(False)
 
     try:
-        # Rakit metrics dengan logika responsive UI
-        t_metrics = TableMetrics(
-            font_family=_font_family_qss(),
-            font_size_pt=metrics_font.font_base_pt,
-            item_pad=skalakan_px(max(2, 4 + zoom), minimum=2),
-            header_v=skalakan_px(max(4, 6 + zoom), minimum=3),
-            header_h=skalakan_px(max(6, 8 + (zoom * 2)), minimum=5),
-            indicator_size=skalakan_px(16 + (zoom * 2), minimum=10)
-        )
-
-        ui_colors = get_theme_colors(is_dark).get("ui", {})
-
-        # Terapkan styling terpusat. Modul pemilik tabel dapat menambahkan
-        # QSS khusus (misalnya tooltip) agar seluruh stylesheet dipasang sekali.
-        style_tabel = get_table_styles(is_dark, metrics=t_metrics, ui_colors=ui_colors)
-        qss_tambahan = str(extra_stylesheet or "").strip()
-        if qss_tambahan:
-            style_tabel = f"{style_tabel.rstrip()}\n{qss_tambahan}"
-
-        table.setStyleSheet(style_tabel)
-        if frozen is not None and frozen.styleSheet() != style_tabel:
-            # FrozenTableWidget menyinkronkan stylesheet melalui override
-            # setStyleSheet(). Hindari memasang QSS identik untuk kedua kalinya.
-            # Untuk widget biasa dengan frozen_table terpisah, tetap sinkronkan.
-            frozen.setStyleSheet(style_tabel)
-
-        # Pada pergantian tema, font dan geometri tidak berubah; pemanggil dapat
-        # meminta pembaruan warna/QSS saja untuk menghindari pemrosesan setiap
-        # tinggi baris dan sinkronisasi frozen table secara berulang. Pemanggilan
-        # zoom biasa tetap memakai update_geometry=True.
-        if not update_geometry:
-            return
-
+        # Zoom hanya mengatur font dan ukuran ikon. Warna, border, padding, dan
+        # stylesheet tabel diterapkan terpisah melalui utils.table_helper.
         _terapkan_font_item_view(table, metrics_font)
 
+        header_font = None
         if isinstance(table, QTableView):
             h_header = table.horizontalHeader()
             v_header = table.verticalHeader()
             header_font = _header_font(h_header, metrics_font)
-
             h_header.setFont(header_font)
             v_header.setFont(header_font)
 
+        if frozen is not None:
+            _terapkan_font_item_view(frozen, metrics_font)
+            if header_font is not None:
+                frozen.horizontalHeader().setFont(header_font)
+                frozen.verticalHeader().setFont(header_font)
+
+        # Tema dapat diperbarui tanpa menghitung ulang ukuran baris/kolom.
+        if not update_geometry:
+            return
+
+        if isinstance(table, QTableView):
+            h_header = table.horizontalHeader()
+            v_header = table.verticalHeader()
+
+            row_height_dasar = metrics_font.row_height
+            if row_height_base is not None:
+                row_height_dasar = _skalakan(
+                    row_height_base,
+                    metrics_font.level,
+                    18,
+                    10_000,
+                )
+
             row_height = _tinggi_view(
                 table.fontMetrics().height(),
-                metrics_font.row_height,
-                metrics_font.item_padding,
+                row_height_dasar,
+                row_extra,
                 24,
+                metrics_font.level,
             )
             header_height = _tinggi_view(
                 h_header.fontMetrics().height(),
                 metrics_font.header_height,
-                metrics_font.header_padding_v,
+                20,
                 26,
+                metrics_font.level,
             )
 
             if h_header.maximumHeight() < header_height:
@@ -530,7 +495,6 @@ def terapkan_zoom_tabel(
             table._zoom_current_row_height = row_height
             table._zoom_current_header_height = header_height
 
-            from PySide6.QtCore import QSignalBlocker
             blocker = QSignalBlocker(h_header)
             try:
                 skalakan_kolom_tableview(table, metrics_font.level)
@@ -543,12 +507,8 @@ def terapkan_zoom_tabel(
                     table.setRowHeight(row, row_height)
 
             if frozen is not None:
-                _terapkan_font_item_view(frozen, metrics_font)
-                frozen.horizontalHeader().setFont(header_font)
-                frozen.verticalHeader().setFont(header_font)
                 frozen.verticalHeader().setMinimumSectionSize(row_height)
                 frozen.verticalHeader().setDefaultSectionSize(row_height)
-
                 if model is not None:
                     for row in range(model.rowCount()):
                         frozen.setRowHeight(row, row_height)
@@ -559,7 +519,6 @@ def terapkan_zoom_tabel(
 
         if update_geometry and isinstance(table, QTableView):
             sinkronkan_frozen_table(table, tertunda=True)
-
 
 def _tabel_utama_dalam_container(container_widget: QWidget) -> list[QTableView]:
     """Ambil QTableView utama dan abaikan frozen child agar tidak di-zoom dua kali."""
