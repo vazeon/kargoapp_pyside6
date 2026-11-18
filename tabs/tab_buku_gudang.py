@@ -4,6 +4,7 @@ from enum import Enum
 from datetime import datetime
 import logging
 from time import perf_counter
+from decimal import Decimal, ROUND_HALF_UP
 from weakref import ref
 from PySide6.QtCore import (
     QAbstractTableModel,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -91,7 +93,7 @@ from themes.modules.buku_gudang import (
     get_buku_gudang_status_colors,
     get_dialog_pilih_penagih_styles,
 )
-from utils.input_style_helper import paksa_kapital_lineedit, terapkan_style_input_global
+from utils.input_style_helper import atur_tinggi_input, paksa_kapital_lineedit, terapkan_style_input_global
 
 BUKU_GUDANG_DIALOG_PENAGIH_MIN_WIDTH = 350
 BUKU_GUDANG_DIALOG_ACTION_GAP = 10
@@ -2582,6 +2584,7 @@ class TabBukuGudang(QWidget):
             header = snapshot["header"]
             data = {
                 **header,
+                "no_resi": no_resi,
                 "wilayah": getattr(self._ambil_tab_widget_dari_tabel(tabel), "wilayah", ""),
                 "keterangan": header.get("ket_buku_gudang") or "",
                 "detail_barang": snapshot["barang"],
@@ -2590,7 +2593,12 @@ class TabBukuGudang(QWidget):
             def simpan(hasil):
                 updates = {
                     key: hasil[key]
-                    for key in ("pengirim", "kota_asal", "penerima", "kota_tujuan", "total_ongkir")
+                    for key in (
+                        "pengirim", "hp_pengirim", "alamat_pengirim", "kota_asal",
+                        "penerima", "hp_penerima", "alamat_penerima", "kota_tujuan",
+                        "ongkir_per_kg", "ongkir_per_cbm", "total_ongkir",
+                        "jenis_pajak", "pembayaran",
+                    )
                 }
                 updates["ket_buku_gudang"] = hasil["keterangan"]
                 if not self._konfirmasi_edit_resi_terinvoice(no_resi, updates):
@@ -2606,6 +2614,8 @@ class TabBukuGudang(QWidget):
                         "Perubahan belum tersimpan. Resi mungkin sudah berubah atau database gagal diakses. "
                         "Isian tetap ada di editor. Jika resi sudah berubah, tutup editor dan muat ulang tabel.",
                     )
+                else:
+                    self._autocomplete_cache.pop(cabang, None)
                 return berhasil
 
             hasil = open_buku_gudang_edit_popup(self, data, on_save=simpan)
@@ -3771,23 +3781,35 @@ class BukuGudangEditDialog(QDialog):
         super().__init__(parent)
         terapkan_style_input_global(self)
         self.setWindowTitle("Edit Data Gudang")
-        self.resize(900, 600)
+        self.setMinimumSize(960, 720)
+        self.resize(1160, 860)
         self.data = data or {}
         self._on_save = on_save
         self._hasil = None
+        self._kode_cabang = str(
+            self.data.get("kode_cabang")
+            or CURRENT_SESSION.get("kode_cabang", "PUSAT")
+            or "PUSAT"
+        ).strip().upper()
+        self._pengirim_contact_name = str(self.data.get("pengirim") or "").strip().upper()
+        self._penerima_contact_name = str(self.data.get("penerima") or "").strip().upper()
+        self._pengirim_name_dirty = False
+        self._penerima_name_dirty = False
+        self._mode_total_ongkir = None
+        self._subtotal_manual_ongkir = 0
+        self._sedang_set_total_ongkir = False
+        try:
+            self._subtotal_awal_ongkir = max(0, int(float(self.data.get("subtotal_ongkir") or 0)))
+        except (TypeError, ValueError):
+            self._subtotal_awal_ongkir = 0
+        self._jenis_pajak_awal = str(self.data.get("jenis_pajak") or "NONPAJAK").strip().upper()
 
-        main = QVBoxLayout(self)
-
-        form = QFormLayout()
-        self.pengirim = QLineEdit(str(self.data.get("pengirim") or ""))
-        self.kota_asal = QLineEdit(str(self.data.get("kota_asal") or ""))
-        self.penerima = QLineEdit(str(self.data.get("penerima") or ""))
         tujuan = str(self.data.get("kota_tujuan") or "").strip()
         self._wilayah_tujuan = ""
         wilayah_list = list(DATA_CLIENT.get("provinsi_tujuan") or [])
         wilayah_list.append(self.data.get("wilayah") or "")
         for wilayah in sorted(set(wilayah_list), key=len, reverse=True):
-            wilayah = wilayah.strip()
+            wilayah = str(wilayah or "").strip()
             if not wilayah or not tujuan.casefold().startswith(wilayah.casefold()):
                 continue
             sisa = tujuan[len(wilayah):].lstrip()
@@ -3795,47 +3817,223 @@ class BukuGudangEditDialog(QDialog):
                 self._wilayah_tujuan = wilayah.upper()
                 tujuan = sisa.removeprefix("-").strip()
                 break
+
+        main = QVBoxLayout(self)
+        main.setContentsMargins(10, 10, 10, 10)
+        # Jarak antarkontainer dibuat lebih rapat agar form lebih kompak.
+        main.setSpacing(4)
+
+        # Baris judul mengikuti pola Tab Resi: judul, tanggal, dan nomor resi.
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 4)
+        lbl_title = QLabel("Form Edit Surat Jalan")
+        font_title = lbl_title.font()
+        font_title.setBold(True)
+        lbl_title.setFont(font_title)
+        top_bar.addWidget(lbl_title)
+        top_bar.addStretch(1)
+        tanggal = str(self.data.get("tanggal_masuk") or "").strip()
+        try:
+            tanggal_tampil = format_tanggal_ke_ui(tanggal) if tanggal else ""
+        except Exception:
+            tanggal_tampil = tanggal
+        lbl_tanggal = QLabel(tanggal_tampil)
+        lbl_tanggal.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_tanggal.setMinimumWidth(150)
+        top_bar.addWidget(lbl_tanggal)
+        top_bar.addStretch(1)
+        top_bar.addWidget(QLabel("No. Resi:"))
+        lbl_no_resi = QLabel(str(self.data.get("no_resi") or "-"))
+        lbl_no_resi.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_no_resi.setMinimumWidth(170)
+        lbl_no_resi.setStyleSheet("font-weight: 600; padding: 5px 10px; border: 1px solid #8ab4f8; border-radius: 4px;")
+        top_bar.addWidget(lbl_no_resi)
+        main.addLayout(top_bar)
+
+        # Dua panel identitas berdampingan, mengikuti form Tab Resi.
+        cards = QHBoxLayout()
+        # Hilangkan margin default layout horizontal yang menambah jarak
+        # vertikal antara panel Pengirim/Penerima dan tabel detail.
+        cards.setContentsMargins(0, 0, 0, 0)
+        cards.setSpacing(8)
+
+        self.group_pengirim = QWidget()  # Panel polos tanpa outline
+        grid_pengirim = QGridLayout(self.group_pengirim)
+        grid_pengirim.setContentsMargins(0, 0, 0, 0)
+        grid_pengirim.setHorizontalSpacing(8)
+        grid_pengirim.setVerticalSpacing(8)
+        self.pengirim = QLineEdit(str(self.data.get("pengirim") or ""))
+        self.hp_pengirim = QLineEdit(str(self.data.get("hp_pengirim") or ""))
+        self.alamat_pengirim = QLineEdit(str(self.data.get("alamat_pengirim") or ""))
+        self.kota_asal = QLineEdit(str(self.data.get("kota_asal") or ""))
+        self._atur_input_popup(self.pengirim, "Nama pengirim/perusahaan/toko ...")
+        self._atur_input_popup(self.hp_pengirim, "08xx xxxx ...", uppercase=False)
+        self._atur_input_popup(self.alamat_pengirim, "Masukkan alamat lengkap ...")
+        self._atur_input_popup(self.kota_asal, "Kota asal ...")
+        grid_pengirim.addWidget(QLabel("Pengirim:"), 0, 0)
+        grid_pengirim.addWidget(self.pengirim, 0, 1)
+        grid_pengirim.addWidget(QLabel("No. HP:"), 0, 2)
+        grid_pengirim.addWidget(self.hp_pengirim, 0, 3)
+        grid_pengirim.addWidget(QLabel("Alamat:"), 1, 0)
+        grid_pengirim.addWidget(self.alamat_pengirim, 1, 1, 1, 3)
+        grid_pengirim.addWidget(QLabel("Asal:"), 2, 0)
+        grid_pengirim.addWidget(self.kota_asal, 2, 1, 1, 3)
+        grid_pengirim.setColumnStretch(1, 6)
+        grid_pengirim.setColumnStretch(3, 4)
+
+        self.group_penerima = QWidget()  # Panel polos tanpa outline
+        grid_penerima = QGridLayout(self.group_penerima)
+        grid_penerima.setContentsMargins(0, 0, 0, 0)
+        grid_penerima.setHorizontalSpacing(8)
+        grid_penerima.setVerticalSpacing(8)
+        self.penerima = QLineEdit(str(self.data.get("penerima") or ""))
+        self.hp_penerima = QLineEdit(str(self.data.get("hp_penerima") or ""))
+        self.alamat_penerima = QLineEdit(str(self.data.get("alamat_penerima") or ""))
         self.kota_tujuan = QLineEdit(tujuan)
-        for widget in (self.pengirim, self.kota_asal, self.penerima, self.kota_tujuan):
-            paksa_kapital_lineedit(widget)
-            widget.setValidator(UppercaseValidator(widget))
-        self.total_ongkir = QLineEdit(format_ke_rupiah(self.data.get("total_ongkir") or 0))
+        self._atur_input_popup(self.penerima, "Nama penerima/perusahaan/toko ...")
+        self._atur_input_popup(self.hp_penerima, "08xx xxxx ...", uppercase=False)
+        self._atur_input_popup(self.alamat_penerima, "Masukkan alamat lengkap ...")
+        self._atur_input_popup(self.kota_tujuan, "Kota tujuan ...")
+        self.cb_provinsi_tujuan = QComboBox()
+        atur_tinggi_input(self.cb_provinsi_tujuan, 36)
+        daftar_wilayah = []
+        for nilai in wilayah_list:
+            teks = str(nilai or "").strip().upper()
+            if teks and teks.casefold() not in {x.casefold() for x in daftar_wilayah}:
+                daftar_wilayah.append(teks)
+        if self._wilayah_tujuan and self._wilayah_tujuan.casefold() not in {x.casefold() for x in daftar_wilayah}:
+            daftar_wilayah.insert(0, self._wilayah_tujuan)
+        self.cb_provinsi_tujuan.addItems(daftar_wilayah)
+        self.cb_provinsi_tujuan.setCurrentIndex(-1)
+        if self._wilayah_tujuan:
+            self._atur_wilayah_tujuan(self._wilayah_tujuan)
+        self.cb_provinsi_tujuan.currentTextChanged.connect(self._ubah_wilayah_tujuan)
 
-        form.addRow("Pengirim", self.pengirim)
-        form.addRow("Kota Asal", self.kota_asal)
-        form.addRow("Penerima", self.penerima)
-        form.addRow("Kota Tujuan", self.kota_tujuan)
-        form.addRow("Total Ongkir (Rp)", self.total_ongkir)
-        main.addLayout(form)
+        grid_penerima.addWidget(QLabel("Penerima:"), 0, 0)
+        grid_penerima.addWidget(self.penerima, 0, 1)
+        grid_penerima.addWidget(QLabel("No. HP:"), 0, 2)
+        grid_penerima.addWidget(self.hp_penerima, 0, 3)
+        grid_penerima.addWidget(QLabel("Alamat:"), 1, 0)
+        grid_penerima.addWidget(self.alamat_penerima, 1, 1, 1, 3)
+        grid_penerima.addWidget(QLabel("Tujuan:"), 2, 0)
+        tujuan_layout = QHBoxLayout()
+        tujuan_layout.setContentsMargins(0, 0, 0, 0)
+        tujuan_layout.setSpacing(8)
+        tujuan_layout.addWidget(self.kota_tujuan, 3)
+        tujuan_layout.addWidget(self.cb_provinsi_tujuan, 2)
+        grid_penerima.addLayout(tujuan_layout, 2, 1, 1, 3)
+        grid_penerima.setColumnStretch(1, 6)
+        grid_penerima.setColumnStretch(3, 4)
 
-        main.addWidget(QLabel("Detail Barang"))
-        self.table_detail = QTableWidget(0, 4)
+        cards.addWidget(self.group_pengirim, 1)
+        cards.addWidget(self.group_penerima, 1)
+        main.addLayout(cards)
+
+        self._pasang_autocomplete_kontak()
+        self._isi_kontak_awal_dari_master()
+
+        # Tabel detail dengan penomoran seperti tabel input Tab Resi.
+        self.group_detail = QWidget()  # Panel polos tanpa outline
+        detail_layout = QVBoxLayout(self.group_detail)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(8)
+        self.table_detail = QTableWidget(0, 5)
         pasang_header_wrap(self.table_detail)
         self.table_detail.setItemDelegateForColumn(
-            0, NamaBarangKapitalDelegate(self.table_detail)
+            1, NamaBarangKapitalDelegate(self.table_detail)
         )
         self.table_detail.setHorizontalHeaderLabels([
-            "Nama Barang", "Koli", "Berat (kg)", "Kubik (m³)"
+            "NO.", "NAMA BARANG", "KOLI", "BERAT (Kg)", "KUBIK (m³)"
         ])
-        self.table_detail.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        main.addWidget(self.table_detail)
-        main.addWidget(QLabel("Gunakan koma untuk desimal, contoh: 1,5."))
+        header = self.table_detail.horizontalHeader()
+        header.setHighlightSections(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table_detail.setColumnWidth(0, 48)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in (2, 3, 4):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self.table_detail.setColumnWidth(column, 115)
+        self.table_detail.verticalHeader().setVisible(False)
+        self.table_detail.setMinimumHeight(250)
+        detail_layout.addWidget(self.table_detail, 1)
+        detail_actions = QHBoxLayout()
+        self.btn_tambah = QPushButton("＋ Tambah Baris")
+        self.btn_hapus = QPushButton("－ Hapus Baris")
+        self.btn_tambah.clicked.connect(lambda: self.tambah_detail())
+        self.btn_hapus.clicked.connect(self.hapus_detail)
+        detail_actions.addWidget(self.btn_tambah)
+        detail_actions.addWidget(self.btn_hapus)
+        detail_actions.addStretch(1)
+        detail_actions.addWidget(QLabel("Gunakan koma untuk desimal, contoh: 1,5."))
+        detail_layout.addLayout(detail_actions)
+        main.addWidget(self.group_detail, 1)
+
+        # Area finansial mengikuti Tab Resi, tanpa kartu rekening.
+        self.group_finance = QWidget()  # Panel polos tanpa outline
+        finance_grid = QGridLayout(self.group_finance)
+        finance_grid.setContentsMargins(0, 0, 0, 0)
+        finance_grid.setHorizontalSpacing(8)
+        finance_grid.setVerticalSpacing(8)
+        self.ongkir_per_kg = QLineEdit(format_ke_rupiah(self.data.get("ongkir_per_kg") or 0))
+        self.ongkir_per_cbm = QLineEdit(format_ke_rupiah(self.data.get("ongkir_per_cbm") or 0))
+        self.total_ongkir = QLineEdit(format_ke_rupiah(self.data.get("total_ongkir") or 0))
+        self._atur_input_popup(self.ongkir_per_kg, "Ongkir /kg", uppercase=False)
+        self._atur_input_popup(self.ongkir_per_cbm, "Ongkir /m³", uppercase=False)
+        self._atur_input_popup(self.total_ongkir, "Total ongkir", uppercase=False)
+        self.cb_jenis_pajak = QComboBox()
+        atur_tinggi_input(self.cb_jenis_pajak, 36)
+        self.cb_jenis_pajak.addItems(["NONPAJAK", "PAJAK (PPN 1,1%)"])
+        if str(self.data.get("jenis_pajak") or "NONPAJAK").strip().upper().startswith("PAJAK"):
+            self.cb_jenis_pajak.setCurrentIndex(1)
+        self.cb_pembayaran = QComboBox()
+        atur_tinggi_input(self.cb_pembayaran, 36)
+        self.cb_pembayaran.addItems(["TF / INVOICE", "CASH"])
+        pembayaran_awal = str(self.data.get("pembayaran") or "TF / INVOICE").strip().upper()
+        if self.cb_pembayaran.findText(pembayaran_awal, Qt.MatchFlag.MatchFixedString) < 0 and pembayaran_awal:
+            self.cb_pembayaran.addItem(pembayaran_awal)
+        self.cb_pembayaran.setCurrentText(pembayaran_awal or "TF / INVOICE")
+
+        finance_grid.addWidget(QLabel("Ongkir per Kg (Rp):"), 0, 0)
+        finance_grid.addWidget(self.ongkir_per_kg, 0, 1)
+        finance_grid.addWidget(QLabel("Ongkir per m³ (Rp):"), 0, 2)
+        finance_grid.addWidget(self.ongkir_per_cbm, 0, 3)
+        finance_grid.addWidget(QLabel("Total Ongkir (Rp):"), 1, 0)
+        finance_grid.addWidget(self.total_ongkir, 1, 1)
+        finance_grid.addWidget(QLabel("Jenis Transaksi:"), 1, 2)
+        finance_grid.addWidget(self.cb_jenis_pajak, 1, 3)
+        finance_grid.addWidget(QLabel("Metode Payment:"), 2, 0)
+        finance_grid.addWidget(self.cb_pembayaran, 2, 1)
+
+        # Keterangan ditempatkan di sisi kanan, tepat di bawah Jenis Transaksi.
+        keterangan_awal = " ".join(
+            str(self.data.get("keterangan", "") or "").splitlines()
+        ).strip()
+        self.keterangan = QLineEdit(keterangan_awal)
+        self._atur_input_popup(self.keterangan, "Keterangan ...")
+        finance_grid.addWidget(QLabel("Keterangan:"), 2, 2)
+        finance_grid.addWidget(self.keterangan, 2, 3)
+
+        finance_grid.setColumnStretch(1, 1)
+        finance_grid.setColumnStretch(3, 1)
+        main.addWidget(self.group_finance)
 
         for item in self.data.get("detail_barang", []):
             self.tambah_detail(item)
+        self.table_detail.itemChanged.connect(self._detail_diubah)
 
-        row_btn = QHBoxLayout()
-        self.btn_tambah = QPushButton("+ Tambah Barang")
-        self.btn_hapus = QPushButton("- Hapus Barang")
-        self.btn_tambah.clicked.connect(lambda: self.tambah_detail())
-        self.btn_hapus.clicked.connect(self.hapus_detail)
-        row_btn.addWidget(self.btn_tambah)
-        row_btn.addWidget(self.btn_hapus)
-        main.addLayout(row_btn)
-
-        self.keterangan = QTextEdit(str(self.data.get("keterangan", "")))
-        main.addWidget(QLabel("Keterangan"))
-        main.addWidget(self.keterangan)
+        # Kalkulasi otomatis hanya aktif setelah pengguna mengubah tarif/detail;
+        # nilai lama tidak ditimpa pada saat dialog pertama kali dibuka.
+        self.ongkir_per_kg.textEdited.connect(self._tarif_ongkir_diubah)
+        self.ongkir_per_cbm.textEdited.connect(self._tarif_ongkir_diubah)
+        self.total_ongkir.textEdited.connect(self._total_ongkir_manual_diubah)
+        self.total_ongkir.editingFinished.connect(self._terapkan_total_manual)
+        self.ongkir_per_kg.editingFinished.connect(
+            lambda: self._format_input_ongkir(self.ongkir_per_kg)
+        )
+        self.ongkir_per_cbm.editingFinished.connect(
+            lambda: self._format_input_ongkir(self.ongkir_per_cbm)
+        )
+        self.cb_jenis_pajak.currentTextChanged.connect(self._jenis_pajak_diubah)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save |
@@ -3845,6 +4043,301 @@ class BukuGudangEditDialog(QDialog):
         buttons.rejected.connect(self.reject)
         main.addWidget(buttons)
         terapkan_style_input_global(self)
+
+    @staticmethod
+    def _atur_input_popup(editor, placeholder, uppercase=True):
+        editor.setPlaceholderText(placeholder)
+        atur_tinggi_input(editor, 36)
+        if uppercase:
+            paksa_kapital_lineedit(editor)
+            editor.setValidator(UppercaseValidator(editor))
+
+    def _ubah_wilayah_tujuan(self, wilayah):
+        self._wilayah_tujuan = str(wilayah or "").strip().upper()
+
+    def _atur_wilayah_tujuan(self, wilayah):
+        teks = str(wilayah or "").strip().upper()
+        if not teks:
+            self.cb_provinsi_tujuan.setCurrentIndex(-1)
+            self._wilayah_tujuan = ""
+            return
+        index = self.cb_provinsi_tujuan.findText(teks, Qt.MatchFlag.MatchFixedString)
+        if index < 0:
+            self.cb_provinsi_tujuan.addItem(teks)
+            index = self.cb_provinsi_tujuan.count() - 1
+        self.cb_provinsi_tujuan.setCurrentIndex(index)
+        self._wilayah_tujuan = teks
+
+    def _format_input_ongkir(self, editor):
+        angka = rupiah_to_int(editor.text())
+        editor.setText(format_ke_rupiah(angka) if angka else "")
+
+    def _set_total_ongkir_programatis(self, nilai):
+        self._sedang_set_total_ongkir = True
+        try:
+            self.total_ongkir.setText(format_ke_rupiah(int(nilai)) if nilai else "")
+        finally:
+            self._sedang_set_total_ongkir = False
+
+    def _total_setelah_ppn(self, subtotal):
+        pengali = Decimal("1.011") if self.cb_jenis_pajak.currentIndex() == 1 else Decimal("1")
+        return int((Decimal(str(subtotal or 0)) * pengali).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        ))
+
+    def _total_ongkir_manual_diubah(self, teks):
+        if self._sedang_set_total_ongkir:
+            return
+        self._mode_total_ongkir = "manual"
+        self._subtotal_manual_ongkir = max(0, rupiah_to_int(teks))
+
+    def _terapkan_total_manual(self):
+        if self._mode_total_ongkir != "manual":
+            return
+        self._set_total_ongkir_programatis(
+            self._total_setelah_ppn(self._subtotal_manual_ongkir)
+        )
+
+    def _jenis_pajak_diubah(self, _teks=None):
+        if self._mode_total_ongkir == "manual":
+            self._terapkan_total_manual()
+        elif self._mode_total_ongkir == "auto":
+            self._kalkulasi_ongkir_otomatis()
+            return
+        else:
+            # Saat pengguna mengganti jenis pajak tanpa mengubah tarif, gunakan
+            # subtotal tersimpan agar total tidak dihitung dari angka total lama.
+            subtotal = self._subtotal_awal_ongkir
+            total_lama = rupiah_to_int(self.total_ongkir.text())
+            if subtotal <= 0 and total_lama > 0:
+                if self._jenis_pajak_awal.startswith("PAJAK"):
+                    subtotal = int((Decimal(total_lama) / Decimal("1.011")).quantize(
+                        Decimal("1"), rounding=ROUND_HALF_UP
+                    ))
+                else:
+                    subtotal = total_lama
+            if subtotal > 0:
+                self._mode_total_ongkir = "manual"
+                self._subtotal_manual_ongkir = subtotal
+                self._terapkan_total_manual()
+        self._jenis_pajak_awal = (
+            "PAJAK" if self.cb_jenis_pajak.currentIndex() == 1 else "NONPAJAK"
+        )
+
+    def _tarif_ongkir_diubah(self, _teks=None):
+        self._mode_total_ongkir = "auto"
+        self._kalkulasi_ongkir_otomatis()
+
+    def _detail_diubah(self, item):
+        if item is not None and item.column() in (3, 4):
+            if rupiah_to_int(self.ongkir_per_kg.text()) or rupiah_to_int(self.ongkir_per_cbm.text()):
+                self._mode_total_ongkir = "auto"
+                self._kalkulasi_ongkir_otomatis()
+
+    def _kalkulasi_ongkir_otomatis(self):
+        try:
+            total_berat = Decimal("0")
+            total_volume = Decimal("0")
+            for row in range(self.table_detail.rowCount()):
+                berat = self.table_detail.item(row, 3)
+                cbm = self.table_detail.item(row, 4)
+                if berat:
+                    total_berat += angka_indonesia_to_decimal(berat.text())
+                if cbm:
+                    total_volume += angka_indonesia_to_decimal(cbm.text())
+
+            tarif_kg = Decimal(rupiah_to_int(self.ongkir_per_kg.text()))
+            tarif_cbm = Decimal(rupiah_to_int(self.ongkir_per_cbm.text()))
+            subtotal = None
+            if tarif_kg > 0 and total_berat > 0:
+                subtotal = total_berat * tarif_kg
+            elif tarif_cbm > 0 and total_volume > 0:
+                subtotal = total_volume * tarif_cbm
+
+            if subtotal is None:
+                if self._mode_total_ongkir == "auto":
+                    self._set_total_ongkir_programatis(None)
+                    self._mode_total_ongkir = None
+                return
+            self._mode_total_ongkir = "auto"
+            self._set_total_ongkir_programatis(self._total_setelah_ppn(subtotal))
+        except Exception:
+            logger.exception("[Buku Gudang] Gagal menghitung ongkir popup")
+
+    @staticmethod
+    def _normalisasi_nama_kontak(nama):
+        return str(nama or "").strip().upper()
+
+    def _buat_completer_kontak(self, editor, daftar_nama, callback):
+        if not daftar_nama:
+            return None
+        completer = QCompleter(
+            sorted({str(nama).strip().upper() for nama in daftar_nama if str(nama).strip()}),
+            editor,
+        )
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.setMaxVisibleItems(BUKU_GUDANG_AUTOCOMPLETE_MAX_VISIBLE_ITEMS)
+        completer.activated[str].connect(callback)
+        editor.setCompleter(completer)
+        editor.textEdited.connect(
+            lambda text, c=completer: c.complete() if str(text).strip() else None
+        )
+        return completer
+
+    def _pasang_autocomplete_kontak(self):
+        try:
+            daftar_pengirim, daftar_penerima = db_service.ambil_data_autocomplete(
+                self._kode_cabang
+            )
+        except Exception:
+            logger.exception("[Buku Gudang] Gagal memuat autocomplete kontak")
+            daftar_pengirim, daftar_penerima = [], []
+
+        self._completer_pengirim = self._buat_completer_kontak(
+            self.pengirim, daftar_pengirim, self._pilih_pengirim_master
+        )
+        self._completer_penerima = self._buat_completer_kontak(
+            self.penerima, daftar_penerima, self._pilih_penerima_master
+        )
+        self.pengirim.textEdited.connect(self._tandai_nama_pengirim_berubah)
+        self.penerima.textEdited.connect(self._tandai_nama_penerima_berubah)
+        self.pengirim.editingFinished.connect(self._autofill_pengirim_jika_cocok)
+        self.penerima.editingFinished.connect(self._autofill_penerima_jika_cocok)
+
+    def _tandai_nama_pengirim_berubah(self, _text):
+        self._pengirim_name_dirty = True
+
+    def _tandai_nama_penerima_berubah(self, _text):
+        self._penerima_name_dirty = True
+
+    def _isi_kontak_awal_dari_master(self):
+        """Isi field kosong dari master tanpa menimpa nilai yang tersimpan pada resi."""
+        nama_pengirim = self._normalisasi_nama_kontak(self.pengirim.text())
+        if nama_pengirim:
+            detail = db_service.ambil_detail_pengirim(nama_pengirim, self._kode_cabang)
+            if detail:
+                nilai = (detail[0], detail[1], detail[2])
+                for editor, value in zip(
+                    (self.hp_pengirim, self.alamat_pengirim, self.kota_asal), nilai
+                ):
+                    if not editor.text().strip() and value:
+                        editor.setText(str(value).strip().upper() if editor is not self.hp_pengirim else str(value).strip())
+
+        nama_penerima = self._normalisasi_nama_kontak(self.penerima.text())
+        if nama_penerima:
+            detail = db_service.ambil_detail_penerima(nama_penerima, self._kode_cabang)
+            if detail:
+                hp, alamat, kota, provinsi = detail
+                if not self.hp_penerima.text().strip() and hp:
+                    self.hp_penerima.setText(str(hp).strip())
+                if not self.alamat_penerima.text().strip() and alamat:
+                    self.alamat_penerima.setText(str(alamat).strip().upper())
+                if not self.kota_tujuan.text().strip() and kota:
+                    self.kota_tujuan.setText(str(kota).strip().upper())
+                if not self._wilayah_tujuan and provinsi:
+                    self._atur_wilayah_tujuan(provinsi)
+
+    def _pilih_pengirim_master(self, nama):
+        nama = self._normalisasi_nama_kontak(nama)
+        self.pengirim.setText(nama)
+        if nama != self._pengirim_contact_name:
+            self.hp_pengirim.clear()
+            self.alamat_pengirim.clear()
+            self.kota_asal.clear()
+        detail = db_service.ambil_detail_pengirim(nama, self._kode_cabang)
+        if not detail:
+            return
+        hp, alamat, kota = detail
+        if hp:
+            self.hp_pengirim.setText(str(hp).strip())
+        if alamat:
+            self.alamat_pengirim.setText(str(alamat).strip().upper())
+        if kota:
+            self.kota_asal.setText(str(kota).strip().upper())
+        self._pengirim_contact_name = nama
+        self._pengirim_name_dirty = False
+
+    def _pilih_penerima_master(self, nama):
+        nama = self._normalisasi_nama_kontak(nama)
+        self.penerima.setText(nama)
+        if nama != self._penerima_contact_name:
+            self.hp_penerima.clear()
+            self.alamat_penerima.clear()
+            self.kota_tujuan.clear()
+            self._atur_wilayah_tujuan("")
+        detail = db_service.ambil_detail_penerima(nama, self._kode_cabang)
+        if not detail:
+            return
+        hp, alamat, kota, provinsi = detail
+        if hp:
+            self.hp_penerima.setText(str(hp).strip())
+        if alamat:
+            self.alamat_penerima.setText(str(alamat).strip().upper())
+        if kota:
+            self.kota_tujuan.setText(str(kota).strip().upper())
+        if provinsi:
+            self._atur_wilayah_tujuan(provinsi)
+        self._penerima_contact_name = nama
+        self._penerima_name_dirty = False
+
+    def _autofill_pengirim_jika_cocok(self):
+        nama = self._normalisasi_nama_kontak(self.pengirim.text())
+        if not self._pengirim_name_dirty:
+            return
+        if not nama:
+            self.hp_pengirim.clear()
+            self.alamat_pengirim.clear()
+            self.kota_asal.clear()
+            self._pengirim_contact_name = ""
+            self._pengirim_name_dirty = False
+            return
+        if nama == self._pengirim_contact_name:
+            self._pengirim_name_dirty = False
+            return
+        detail = db_service.ambil_detail_pengirim(nama, self._kode_cabang)
+        if detail:
+            self._pilih_pengirim_master(nama)
+        else:
+            self.hp_pengirim.clear()
+            self.alamat_pengirim.clear()
+            self.kota_asal.clear()
+            self._pengirim_contact_name = nama
+            self._pengirim_name_dirty = False
+
+    def _autofill_penerima_jika_cocok(self):
+        nama = self._normalisasi_nama_kontak(self.penerima.text())
+        if not self._penerima_name_dirty:
+            return
+        if not nama:
+            self.hp_penerima.clear()
+            self.alamat_penerima.clear()
+            self.kota_tujuan.clear()
+            self._atur_wilayah_tujuan("")
+            self._penerima_contact_name = ""
+            self._penerima_name_dirty = False
+            return
+        if nama == self._penerima_contact_name:
+            self._penerima_name_dirty = False
+            return
+        detail = db_service.ambil_detail_penerima(nama, self._kode_cabang)
+        if detail:
+            self._pilih_penerima_master(nama)
+        else:
+            self.hp_penerima.clear()
+            self.alamat_penerima.clear()
+            self.kota_tujuan.clear()
+            self._atur_wilayah_tujuan("")
+            self._penerima_contact_name = nama
+            self._penerima_name_dirty = False
+
+    def _perbarui_nomor_detail(self):
+        for row in range(self.table_detail.rowCount()):
+            nomor = QTableWidgetItem(str(row + 1))
+            nomor.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            nomor.setFlags(nomor.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table_detail.setItem(row, 0, nomor)
 
     def tambah_detail(self, item=None):
         row = self.table_detail.rowCount()
@@ -3856,28 +4349,31 @@ class BukuGudangEditDialog(QDialog):
             format_decimal_indonesia(values.get("berat") or 0),
             format_decimal_indonesia(values.get("cbm") or 0),
         ]
-        for col, value in enumerate(data):
+        self._perbarui_nomor_detail()
+        for col, value in enumerate(data, start=1):
             self.table_detail.setItem(row, col, QTableWidgetItem(str(value)))
         if item is None:
-            self.table_detail.setCurrentCell(row, 0)
+            self.table_detail.setCurrentCell(row, 1)
             self.table_detail.scrollToItem(
-                self.table_detail.item(row, 0),
+                self.table_detail.item(row, 1),
                 QAbstractItemView.ScrollHint.PositionAtBottom,
             )
             self.table_detail.setFocus()
-            self.table_detail.editItem(self.table_detail.item(row, 0))
+            self.table_detail.editItem(self.table_detail.item(row, 1))
 
     def hapus_detail(self):
         row = self.table_detail.currentRow()
         if row >= 0:
             self.table_detail.removeRow(row)
+            self._perbarui_nomor_detail()
+            self._detail_diubah(self.table_detail.item(0, 3) if self.table_detail.rowCount() else None)
 
     def get_data(self):
         from math import isfinite
         locale = QLocale(QLocale.Language.Indonesian, QLocale.Country.Indonesia)
 
         def angka(teks, label, bulat=False):
-            teks = teks.strip()
+            teks = str(teks or "").strip()
             if teks in ("", "-"):
                 return 0
             value, valid = locale.toLongLong(teks) if bulat else locale.toDouble(teks)
@@ -3889,7 +4385,7 @@ class BukuGudangEditDialog(QDialog):
         for row in range(self.table_detail.rowCount()):
             values = [
                 self.table_detail.item(row, col).text().strip() if self.table_detail.item(row, col) else ""
-                for col in range(4)
+                for col in range(1, 5)
             ]
             koli = angka(values[1], f"Koli baris {row + 1}", bulat=True)
             berat = angka(values[2], f"Berat baris {row + 1}")
@@ -3902,18 +4398,31 @@ class BukuGudangEditDialog(QDialog):
                     "cbm": cbm,
                 })
 
+        wilayah = self.cb_provinsi_tujuan.currentText().strip().upper()
         tujuan = self.kota_tujuan.text().strip().upper()
-        if self._wilayah_tujuan:
-            tujuan = f"{self._wilayah_tujuan} - {tujuan}" if tujuan else self._wilayah_tujuan
+        if wilayah:
+            tujuan = f"{wilayah} - {tujuan}" if tujuan else wilayah
+
+        tarif_kg = angka(self.ongkir_per_kg.text(), "Ongkir per Kg", bulat=True)
+        tarif_cbm = angka(self.ongkir_per_cbm.text(), "Ongkir per m³", bulat=True)
+        total_ongkir = angka(self.total_ongkir.text(), "Total Ongkir", bulat=True)
 
         return {
             "pengirim": self.pengirim.text().strip().upper(),
+            "hp_pengirim": self.hp_pengirim.text().strip(),
+            "alamat_pengirim": self.alamat_pengirim.text().strip().upper(),
             "kota_asal": self.kota_asal.text().strip().upper(),
             "penerima": self.penerima.text().strip().upper(),
+            "hp_penerima": self.hp_penerima.text().strip(),
+            "alamat_penerima": self.alamat_penerima.text().strip().upper(),
             "kota_tujuan": tujuan,
-            "total_ongkir": angka(self.total_ongkir.text(), "Total Ongkir", bulat=True),
+            "ongkir_per_kg": tarif_kg if tarif_kg > 0 else "",
+            "ongkir_per_cbm": tarif_cbm if tarif_cbm > 0 else "",
+            "total_ongkir": total_ongkir,
+            "jenis_pajak": "PAJAK" if self.cb_jenis_pajak.currentIndex() == 1 else "NONPAJAK",
+            "pembayaran": self.cb_pembayaran.currentText().strip().upper(),
             "detail_barang": detail,
-            "keterangan": self.keterangan.toPlainText().strip().upper(),
+            "keterangan": self.keterangan.text().strip().upper(),
         }
 
     def _simpan(self):
@@ -3930,7 +4439,6 @@ class BukuGudangEditDialog(QDialog):
             return
         self._hasil = hasil
         self.accept()
-
 
 def open_buku_gudang_edit_popup(parent=None, data=None, on_save=None):
     dialog = BukuGudangEditDialog(parent, data, on_save=on_save)

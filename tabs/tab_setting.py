@@ -556,9 +556,10 @@ class TabSettingSistem(QWidget):
         )
 
         self.lbl_user_access_hint = QLabel(
-            "💡 SUPER dapat membuat/edit/reset/nonaktifkan user. ADMIN hanya "
-            "dapat melihat. HOME selalu aktif. Role pusat memakai akses AUTO ke "
-            "seluruh cabang bisnis. User tidak dihapus agar histori tetap utuh."
+            "💡 SUPER dapat membuat/edit/reset/nonaktifkan user. OWNER dan ADMIN "
+            "dapat melihat daftar user, tetapi tidak dapat mengubahnya. HOME "
+            "selalu aktif. Role pusat memakai akses AUTO ke seluruh cabang bisnis. "
+            "User tidak dihapus agar histori tetap utuh."
         )
         self.lbl_user_access_hint.setWordWrap(True)
         self.lbl_user_access_hint.setProperty("setting_hint_italic", True)

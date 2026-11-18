@@ -28,6 +28,8 @@ except Exception:
 
 _SETTINGS_GROUP = "Session"
 _SETTINGS_KEY = "last_login"
+_LAST_LOGIN_DPAPI_PREFIX = "dpapi:v1:"
+_LAST_LOGIN_FERNET_PREFIX = "fernet:v1:"
 
 _OFFLINE_AUTH_GROUP = "OfflineAuthV1"
 _OFFLINE_AUTH_KEY = "accounts"
@@ -232,7 +234,7 @@ def clear_offline_login_cache(identifier: str | None = None) -> None:
 
 
 def _machine_key() -> bytes:
-    """Bangun key lokal deterministik untuk mengenkripsi sesi terakhir."""
+    """Bangun key lokal deterministik untuk blob cache login offline lama."""
     material = "|".join(
         (
             platform.node(),
@@ -256,8 +258,146 @@ def _settings() -> QSettings:
     return QSettings(ORGANIZATION_NAME, APPLICATION_NAME)
 
 
+def _is_windows() -> bool:
+    """True bila aplikasi berjalan di Windows."""
+    return os.name == "nt"
+
+
+def _dpapi_crypt(data: bytes, *, decrypt: bool) -> bytes:
+    """Lindungi/buka blob dengan Windows DPAPI pada akun Windows saat ini.
+
+    DPAPI mengikat data ke profil pengguna Windows. Tidak memakai flag
+    LOCAL_MACHINE, sehingga akun Windows lain tidak otomatis dapat membukanya.
+    Fungsi ini sengaja tidak menyediakan fallback kriptografi yang lebih lemah
+    ketika DPAPI gagal pada Windows.
+    """
+    if not _is_windows():
+        raise RuntimeError("Windows DPAPI hanya tersedia pada Windows.")
+
+    import ctypes
+    from ctypes import wintypes
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_byte)),
+        ]
+
+    if not isinstance(data, (bytes, bytearray)):
+        raise TypeError("Data DPAPI harus berupa bytes.")
+    raw = bytes(data)
+    if not raw:
+        raise ValueError("Data DPAPI tidak boleh kosong.")
+
+    input_buffer = ctypes.create_string_buffer(raw, len(raw))
+    input_blob = DATA_BLOB(
+        len(raw),
+        ctypes.cast(input_buffer, ctypes.POINTER(ctypes.c_byte)),
+    )
+    output_blob = DATA_BLOB()
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+
+    flags = 0x1  # CRYPTPROTECT_UI_FORBIDDEN
+    description = wintypes.LPWSTR()
+
+    if decrypt:
+        function = crypt32.CryptUnprotectData
+        function.argtypes = [
+            ctypes.POINTER(DATA_BLOB),
+            ctypes.POINTER(wintypes.LPWSTR),
+            ctypes.POINTER(DATA_BLOB),
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(DATA_BLOB),
+        ]
+        function.restype = wintypes.BOOL
+        ok = function(
+            ctypes.byref(input_blob),
+            ctypes.byref(description),
+            None,
+            None,
+            None,
+            flags,
+            ctypes.byref(output_blob),
+        )
+    else:
+        function = crypt32.CryptProtectData
+        function.argtypes = [
+            ctypes.POINTER(DATA_BLOB),
+            wintypes.LPCWSTR,
+            ctypes.POINTER(DATA_BLOB),
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(DATA_BLOB),
+        ]
+        function.restype = wintypes.BOOL
+        ok = function(
+            ctypes.byref(input_blob),
+            "Kargo saved login",
+            None,
+            None,
+            None,
+            flags,
+            ctypes.byref(output_blob),
+        )
+
+    try:
+        if not ok:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "Windows DPAPI gagal memproses kredensial.")
+        return ctypes.string_at(output_blob.pbData, output_blob.cbData)
+    finally:
+        if output_blob.pbData:
+            local_free(ctypes.cast(output_blob.pbData, wintypes.HLOCAL))
+        if decrypt and description:
+            local_free(ctypes.cast(description, wintypes.HLOCAL))
+
+
+def _protect_last_login(payload: bytes) -> str:
+    """Buat token sesi terakhir dengan DPAPI di Windows."""
+    if _is_windows():
+        protected = _dpapi_crypt(payload, decrypt=False)
+        encoded = base64.urlsafe_b64encode(protected).decode("ascii")
+        return _LAST_LOGIN_DPAPI_PREFIX + encoded
+
+    # Fallback untuk pengembangan/non-Windows agar perilaku lintas platform
+    # tetap kompatibel. Build produksi Kargo di Windows selalu memakai DPAPI.
+    encrypted = _fernet().encrypt(payload).decode("ascii")
+    return _LAST_LOGIN_FERNET_PREFIX + encrypted
+
+
+def _unprotect_last_login(token: str) -> tuple[bytes, bool]:
+    """Kembalikan payload dan flag apakah token memakai format lama."""
+    if token.startswith(_LAST_LOGIN_DPAPI_PREFIX):
+        if not _is_windows():
+            # Jangan hapus blob DPAPI hanya karena sedang dibaca di OS lain.
+            raise RuntimeError("Kredensial sesi ini hanya dapat dibuka di Windows.")
+        encoded = token[len(_LAST_LOGIN_DPAPI_PREFIX):]
+        protected = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        return _dpapi_crypt(protected, decrypt=True), False
+
+    if token.startswith(_LAST_LOGIN_FERNET_PREFIX):
+        encrypted = token[len(_LAST_LOGIN_FERNET_PREFIX):]
+    else:
+        # Format Fernet tanpa prefix adalah format versi aplikasi sebelumnya.
+        encrypted = token
+    payload = _fernet().decrypt(encrypted.encode("ascii"))
+    return payload, True
+
+
 def save_last_login(identifier: str, password: str) -> None:
-    """Simpan identifier + password sesi terakhir secara terenkripsi."""
+    """Simpan kredensial sesi; DPAPI user-scope dipakai pada Windows.
+
+    Kegagalan DPAPI tidak menggagalkan login aplikasi, tetapi auto-login tidak
+    disimpan. Pada Windows tidak ada downgrade diam-diam ke key buatan sendiri.
+    """
     identifier = str(identifier or "").strip()
     password = str(password or "")
     if not identifier or not password:
@@ -268,7 +408,18 @@ def save_last_login(identifier: str, password: str) -> None:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    token = _fernet().encrypt(payload).decode("ascii")
+
+    try:
+        token = _protect_last_login(payload)
+    except Exception as exc:
+        # Jangan meninggalkan credential lama dengan proteksi yang lebih lemah.
+        clear_last_login()
+        print(
+            "[SESSION] Auto-login tidak disimpan karena proteksi kredensial "
+            f"gagal: {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return
 
     settings = _settings()
     settings.beginGroup(_SETTINGS_GROUP)
@@ -278,7 +429,7 @@ def save_last_login(identifier: str, password: str) -> None:
 
 
 def load_last_login() -> Optional[Dict[str, str]]:
-    """Ambil sesi terakhir yang tersimpan; None bila tidak ada/tidak valid."""
+    """Ambil sesi terakhir; token lama dimigrasikan ke proteksi terbaru."""
     settings = _settings()
     settings.beginGroup(_SETTINGS_GROUP)
     token = str(settings.value(_SETTINGS_KEY, "") or "").strip()
@@ -287,10 +438,26 @@ def load_last_login() -> Optional[Dict[str, str]]:
         return None
 
     try:
-        payload = _fernet().decrypt(token.encode("ascii"))
+        payload, is_legacy = _unprotect_last_login(token)
         data = json.loads(payload.decode("utf-8"))
-    except (InvalidToken, ValueError, TypeError, json.JSONDecodeError):
+    except RuntimeError as exc:
+        # Contoh: blob DPAPI dibuka pada OS non-Windows. Pertahankan nilai agar
+        # tidak terhapus hanya karena aplikasi dijalankan pada OS berbeda.
+        if token.startswith(_LAST_LOGIN_DPAPI_PREFIX) and not _is_windows():
+            return None
         clear_last_login()
+        print(f"[SESSION] Kredensial sesi tidak dapat dibuka: {exc}", flush=True)
+        return None
+    except (InvalidToken, ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        clear_last_login()
+        return None
+    except OSError as exc:
+        clear_last_login()
+        print(
+            "[SESSION] DPAPI tidak dapat membuka kredensial sesi: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
         return None
 
     if not isinstance(data, dict):
@@ -301,6 +468,12 @@ def load_last_login() -> Optional[Dict[str, str]]:
     if not identifier or not password:
         clear_last_login()
         return None
+
+    # Migrasi otomatis token Fernet lama. Login yang tersimpan tetap dapat
+    # dipakai sekali, lalu ditulis ulang dengan DPAPI pada Windows.
+    if is_legacy:
+        save_last_login(identifier, password)
+
     return {"identifier": identifier, "password": password}
 
 

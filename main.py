@@ -1173,11 +1173,13 @@ class MainWindow(QMainWindow):
         self.lbl_info_cabang.setToolTip("")
 
         role_aktif = str(CURRENT_SESSION.get('role', '')).strip().upper()
-        self.btn_setting.setToolTip(
-            "Pengaturan Sistem (Super Admin / Owner)"
-            if role_aktif in {"SUPER_ADMIN", "OWNER"}
-            else "Pengaturan Sistem (View-Only)"
-        )
+        if role_aktif in {"SUPER", "SUPER_ADMIN"}:
+            tooltip_setting = "Pengaturan Sistem (Super Admin - Edit)"
+        elif role_aktif == "OWNER":
+            tooltip_setting = "Pengaturan Sistem (Owner - View-Only)"
+        else:
+            tooltip_setting = "Pengaturan Sistem (View-Only)"
+        self.btn_setting.setToolTip(tooltip_setting)
 
         self._cache_tema_tab.clear()
 

@@ -256,10 +256,14 @@ class LoginWindow(QWidget):
         self._set_login_busy(self._sedang_login)
 
     def _input_login(self):
-        return self.txt_user.text().strip(), self.txt_pwd.text().strip()
+        # Username dinormalisasi, tetapi password harus diteruskan persis
+        # seperti yang diketik (termasuk spasi di awal/akhir).
+        return self.txt_user.text().strip(), self.txt_pwd.text()
 
     def _peringatkan_input_kosong(self, user, pwd):
-        if user and pwd:
+        # Password yang seluruhnya whitespace tetap dianggap kosong, tanpa
+        # memangkas password valid yang memiliki spasi di tepinya.
+        if user and str(pwd or '').strip():
             return False
         QMessageBox.warning(
             self,

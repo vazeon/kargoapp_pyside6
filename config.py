@@ -971,8 +971,10 @@ def verifikasi_login_sistem(
     """
     login_identifier = str(username_input or "").strip()
     username = login_identifier.upper()
-    password = str(password_input or "").strip()
-    if not username or not password:
+    # Password bersifat case/whitespace-sensitive: jangan trim nilai yang
+    # akan diverifikasi ke Supabase, database lokal, atau cache offline.
+    password = str(password_input or "")
+    if not username or not password.strip():
         return False, None, None
 
     # Setiap login menentukan target DB lebih dahulu agar pergantian

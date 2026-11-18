@@ -162,8 +162,6 @@ SYNC_REQUIRED = {
 
 def _db_path() -> str:
     return str(CURRENT_SESSION.get("db_name") or "database_cargo.db")
-    print(f"[SYNC DB PATH] {os.path.abspath(path)}")
-    return path
 
 
 def _connect():
@@ -366,6 +364,22 @@ def _json_payload(table_name: str, value: Any) -> Dict[str, Any]:
         )
 
     payload = {key: value[key] for key in allowed if key in value}
+
+    # SQLite CURRENT_TIMESTAMP menyimpan waktu UTC tanpa offset. Jangan kirim
+    # string naif ke kolom timestamptz Supabase karena PostgreSQL dapat
+    # menafsirkannya memakai timezone sesi (mis. Asia/Jakarta). Serialisasikan
+    # semua timestamp sinkronisasi sebagai UTC eksplisit agar instant-nya tetap.
+    for timestamp_key in ("created_at", "updated_at", "deleted_at"):
+        raw_timestamp = payload.get(timestamp_key)
+        if raw_timestamp in (None, ""):
+            continue
+        parsed_timestamp = _parse_dt(raw_timestamp)
+        if parsed_timestamp is not None:
+            payload[timestamp_key] = (
+                parsed_timestamp.astimezone(timezone.utc)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
 
     required = SYNC_REQUIRED.get(table, set())
     missing = sorted(key for key in required if not str(payload.get(key) or "").strip())
@@ -1667,6 +1681,34 @@ def _parse_dt(value: Any):
     return dt
 
 
+def _same_master_creation_timestamp(local_value: Any, remote_value: Any) -> bool:
+    """Kenali created_at master yang sama meski offset legacy berbeda.
+
+    Versi lama mengirim SQLite CURRENT_TIMESTAMP (UTC tanpa offset) langsung
+    ke Supabase. Pada sesi PostgreSQL Asia/Jakarta, string itu dapat tersimpan
+    sebagai timestamptz +07 dengan jam dinding yang sama. Keduanya menunjuk
+    instant berbeda akibat interpretasi timezone, tetapi merupakan snapshot
+    INSERT lokal yang sama. Cocokkan wall-clock hanya untuk pasangan naif/aware;
+    timestamp aware/aware tetap harus cocok sebagai instant UTC.
+    """
+    if local_value in (None, "") or remote_value in (None, ""):
+        return False
+    try:
+        local_raw = datetime.fromisoformat(str(local_value).strip().replace("Z", "+00:00"))
+        remote_raw = datetime.fromisoformat(str(remote_value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+
+    if local_raw.tzinfo is None and remote_raw.tzinfo is not None:
+        return local_raw == remote_raw.replace(tzinfo=None)
+    if remote_raw.tzinfo is None and local_raw.tzinfo is not None:
+        return remote_raw == local_raw.replace(tzinfo=None)
+
+    local_utc = _parse_dt(local_value)
+    remote_utc = _parse_dt(remote_value)
+    return local_utc is not None and remote_utc is not None and local_utc == remote_utc
+
+
 def _server_master_row(table_name: str, sync_id: str) -> Optional[Dict[str, Any]]:
     if table_name not in MASTER_TABLES or not sync_id:
         return None
@@ -1689,18 +1731,14 @@ def _master_remote_newer_than_payload(
     if not isinstance(remote, dict) or not remote:
         return None
 
-    local_created = _parse_dt(payload.get("created_at"))
-    remote_created = _parse_dt(remote.get("created_at"))
     local_updated = _parse_dt(payload.get("updated_at"))
     remote_updated = _parse_dt(remote.get("updated_at"))
 
     # A freshly inserted master can get a slightly newer server-side updated_at
     # while still being the exact same record we just pushed. Do not manufacture
     # a conflict in that case.
-    if (
-        local_created is not None
-        and remote_created is not None
-        and local_created == remote_created
+    if _same_master_creation_timestamp(
+        payload.get("created_at"), remote.get("created_at")
     ):
         return None
 
@@ -1775,9 +1813,9 @@ def _heal_false_master_conflicts(conn) -> int:
 
     A master row inserted locally carries its original created_at into Supabase.
     Older sync attempts could nevertheless mark a follow-up local UPDATE as a
-    conflict because Supabase had a slightly newer updated_at. Once we know both
-    payloads share the same created_at and sync_id, that is not a real competing
-    edit; reopen the local outbox entry so it can be pushed normally.
+    conflict because the naive SQLite UTC timestamp was interpreted in the
+    Supabase session timezone. When sync_id and creation timestamp fingerprint
+    match, reopen the local outbox entry; the next push sends explicit UTC.
     """
     rows = conn.execute(
         """
@@ -1798,11 +1836,11 @@ def _heal_false_master_conflicts(conn) -> int:
 
         local_sid = str(local.get('sync_id') or '').strip()
         remote_sid = str(remote.get('sync_id') or '').strip()
-        local_created = _parse_dt(local.get('created_at'))
-        remote_created = _parse_dt(remote.get('created_at'))
         if not local_sid or not remote_sid or local_sid != remote_sid:
             continue
-        if local_created is None or remote_created is None or local_created != remote_created:
+        if not _same_master_creation_timestamp(
+            local.get('created_at'), remote.get('created_at')
+        ):
             continue
 
         # Reopen only the affected local outbox rows; they will be rechecked by
@@ -3140,22 +3178,6 @@ def _ensure_buku_gudang_local_schema(conn) -> None:
     ]) + ")"
     payload_old = payload_new.replace("NEW.", "OLD.")
 
-    for name in (
-        "trg_local_buku_gudang_outbox_insert",
-        "trg_local_buku_gudang_outbox_update",
-        "trg_local_buku_gudang_outbox_delete",
-    ):
-        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
-
-    conn.execute(f"""
-        CREATE TRIGGER trg_local_buku_gudang_outbox_insert
-        AFTER INSERT ON buku_gudang
-        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
-        BEGIN
-            INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
-            VALUES('buku_gudang',NEW.sync_id,'INSERT',{payload_new});
-        END
-    """)
     changed = " OR ".join(
         f"NEW.{c} IS NOT OLD.{c}" for c in (
             "id_gudang", "kode_cabang", "tanggal", "no_resi", "jenis",
@@ -3164,25 +3186,66 @@ def _ensure_buku_gudang_local_schema(conn) -> None:
             "updated_by_user_id", "updated_by_username", "updated_by_name",
         )
     )
-    conn.execute(f"""
-        CREATE TRIGGER trg_local_buku_gudang_outbox_update
-        AFTER UPDATE ON buku_gudang
-        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
-         AND ({changed})
-        BEGIN
-            INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
-            VALUES('buku_gudang',NEW.sync_id,'UPDATE',{payload_new});
-        END
-    """)
-    conn.execute(f"""
-        CREATE TRIGGER trg_local_buku_gudang_outbox_delete
-        AFTER DELETE ON buku_gudang
-        WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
-        BEGIN
-            INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
-            VALUES('buku_gudang',OLD.sync_id,'DELETE',{payload_old});
-        END
-    """)
+
+    # Buat trigger hanya jika belum ada atau definisinya berubah. _connect()
+    # dipakai oleh banyak jalur sync; DROP/CREATE setiap koneksi menaikkan
+    # schema_version SQLite dan menambah penulisan schema yang tidak perlu.
+    trigger_definitions = {
+        "trg_local_buku_gudang_outbox_insert": f"""
+            CREATE TRIGGER trg_local_buku_gudang_outbox_insert
+            AFTER INSERT ON buku_gudang
+            WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+            BEGIN
+                INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+                VALUES('buku_gudang',NEW.sync_id,'INSERT',{payload_new});
+            END
+        """,
+        "trg_local_buku_gudang_outbox_update": f"""
+            CREATE TRIGGER trg_local_buku_gudang_outbox_update
+            AFTER UPDATE ON buku_gudang
+            WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+             AND ({changed})
+            BEGIN
+                INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+                VALUES('buku_gudang',NEW.sync_id,'UPDATE',{payload_new});
+            END
+        """,
+        "trg_local_buku_gudang_outbox_delete": f"""
+            CREATE TRIGGER trg_local_buku_gudang_outbox_delete
+            AFTER DELETE ON buku_gudang
+            WHEN COALESCE((SELECT suppress_outbox FROM sync_control WHERE id=1),0)=0
+            BEGIN
+                INSERT INTO sync_outbox(table_name,record_key,operation,payload_json)
+                VALUES('buku_gudang',OLD.sync_id,'DELETE',{payload_old});
+            END
+        """,
+    }
+
+    trigger_names = tuple(trigger_definitions)
+    placeholders = ",".join("?" for _ in trigger_names)
+    existing_triggers = {
+        str(name): sql
+        for name, sql in conn.execute(
+            f"SELECT name, sql FROM sqlite_master "
+            f"WHERE type='trigger' AND name IN ({placeholders})",
+            trigger_names,
+        ).fetchall()
+    }
+
+    def _normalize_trigger_sql(sql: str) -> str:
+        return " ".join(str(sql or "").strip().rstrip(";").split()).casefold()
+
+    for name, definition in trigger_definitions.items():
+        current_definition = existing_triggers.get(name)
+        if current_definition and (
+            _normalize_trigger_sql(current_definition)
+            == _normalize_trigger_sql(definition)
+        ):
+            continue
+        if current_definition:
+            # Hanya trigger yang definisinya berbeda yang diperbarui.
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute(definition)
     conn.commit()
 
 

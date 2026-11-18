@@ -1094,9 +1094,153 @@ def _refresh_total_transaksi_master_penerima(cursor, nama, kode_cabang):
         UPDATE master_penerima
         SET total_transaksi = ?, is_synced = 0, updated_at = CURRENT_TIMESTAMP
         WHERE kode_cabang = ? AND TRIM(UPPER(COALESCE(nama, ''))) = ?
+          AND COALESCE(total_transaksi, 0) <> ?
         """,
-        (total, kode_cabang, nama),
+        (total, kode_cabang, nama, total),
     )
+
+def _upsert_master_pengirim_dari_buku_gudang(cursor, data, kode_cabang):
+    """Upsert data kontak pengirim dari popup Buku Gudang.
+
+    Input HP/alamat sekarang eksplisit tersedia di popup. Nilai tersebut disimpan
+    ke resi dan master; kota kosong tetap tidak menghapus kota master lama.
+    """
+    nama = str(data.get("pengirim") or "").strip().upper()
+    if not nama:
+        return
+
+    no_hp = str(data.get("hp_pengirim") or "").strip() or None
+    alamat = str(data.get("alamat_pengirim") or "").strip().upper() or None
+    kota = str(data.get("kota_asal") or "").strip().upper() or None
+    row = cursor.execute(
+        """
+        SELECT id_pengirim, no_hp, alamat, kota, sync_id
+        FROM master_pengirim
+        WHERE kode_cabang = ? AND TRIM(UPPER(COALESCE(nama, ''))) = ?
+        ORDER BY updated_at DESC LIMIT 1
+        """,
+        (kode_cabang, nama),
+    ).fetchone()
+    if row:
+        id_pengirim, hp_lama, alamat_lama, kota_lama, sync_id_lama = row
+        if not kota:
+            kota = str(kota_lama or "").strip().upper() or None
+        sync_id = str(sync_id_lama or uuid.uuid4())
+        berubah = (
+            str(hp_lama or "").strip() or None,
+            str(alamat_lama or "").strip().upper() or None,
+            str(kota_lama or "").strip().upper() or None,
+        ) != (no_hp, alamat, kota) or not sync_id_lama
+        if berubah:
+            cursor.execute(
+                """
+                UPDATE master_pengirim
+                SET nama = ?, no_hp = ?, alamat = ?, kota = ?, sync_id = ?,
+                    is_synced = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE id_pengirim = ? AND kode_cabang = ?
+                """,
+                (nama, no_hp, alamat, kota, sync_id, id_pengirim, kode_cabang),
+            )
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO master_pengirim (
+            id_pengirim, kode_cabang, nama, no_hp, alamat, kota, is_synced, sync_id
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+        """,
+        (
+            f"SHP-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama,
+            no_hp, alamat, kota, str(uuid.uuid4()),
+        ),
+    )
+
+
+def _upsert_master_penerima_dari_buku_gudang(cursor, data, kode_cabang):
+    """Upsert kontak penerima dari popup, termasuk HP dan alamat lengkap."""
+    nama = str(data.get("penerima") or "").strip().upper()
+    if not nama:
+        return
+
+    tujuan = str(data.get("kota_tujuan") or "").strip().upper()
+    if " - " in tujuan:
+        provinsi, kota = [part.strip() for part in tujuan.split(" - ", 1)]
+    else:
+        provinsi, kota = "", tujuan
+    kota = kota or None
+    provinsi = provinsi or None
+    no_hp = str(data.get("hp_penerima") or "").strip() or None
+    alamat = str(data.get("alamat_penerima") or "").strip().upper() or None
+
+    total = cursor.execute(
+        """
+        SELECT COUNT(*) FROM data_resi
+        WHERE kode_cabang = ? AND TRIM(UPPER(COALESCE(penerima, ''))) = ?
+        """,
+        (kode_cabang, nama),
+    ).fetchone()[0]
+    row = cursor.execute(
+        """
+        SELECT id_penerima, no_hp, alamat, kota, provinsi,
+               total_transaksi, sync_id
+        FROM master_penerima
+        WHERE kode_cabang = ? AND TRIM(UPPER(COALESCE(nama, ''))) = ?
+        ORDER BY updated_at DESC LIMIT 1
+        """,
+        (kode_cabang, nama),
+    ).fetchone()
+    if row:
+        (
+            id_penerima, hp_lama, alamat_lama, kota_lama, provinsi_lama,
+            total_lama, sync_id_lama,
+        ) = row
+        # Tidak menghapus kota/provinsi master bila tujuan pada resi kosong.
+        if not kota:
+            kota = str(kota_lama or "").strip().upper() or None
+        if not provinsi:
+            provinsi = str(provinsi_lama or "").strip().upper() or None
+        sync_id = str(sync_id_lama or uuid.uuid4())
+        nilai_lama = (
+            str(hp_lama or "").strip() or None,
+            str(alamat_lama or "").strip().upper() or None,
+            str(kota_lama or "").strip().upper() or None,
+            str(provinsi_lama or "").strip().upper() or None,
+            int(total_lama or 0),
+        )
+        nilai_baru = (
+            no_hp, alamat, kota, provinsi, int(total or 0),
+        )
+        if nilai_lama != nilai_baru or not sync_id_lama:
+            cursor.execute(
+                """
+                UPDATE master_penerima
+                SET nama = ?, no_hp = ?, alamat = ?, kota = ?, provinsi = ?,
+                    total_transaksi = ?, sync_id = ?, is_synced = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id_penerima = ? AND kode_cabang = ?
+                """,
+                (
+                    nama, no_hp, alamat, kota, provinsi, int(total or 0),
+                    sync_id, id_penerima, kode_cabang,
+                ),
+            )
+        return
+
+    cursor.execute(
+        """
+        INSERT INTO master_penerima (
+            id_penerima, kode_cabang, nama, no_hp, alamat, kota, provinsi,
+            total_transaksi, pembayaran, is_synced, sync_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        """,
+        (
+            f"CNE-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama,
+            no_hp, alamat, kota, provinsi, int(total or 0),
+            str(data.get("pembayaran") or "TF / INVOICE").strip().upper(),
+            str(uuid.uuid4()),
+        ),
+    )
+
 
 def _normalisasi_rincian_ringkas(data):
     """Bangun satu baris rincian dari kolom ringkasan data_resi.
@@ -2150,7 +2294,9 @@ def ambil_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih, filters=None):
 
 _BUKU_GUDANG_HEADER_FIELDS = {
     "tanggal_masuk", "tanggal_keluar", "status_resi", "truk",
-    "pengirim", "kota_asal", "penerima", "kota_tujuan",
+    "pengirim", "hp_pengirim", "alamat_pengirim", "kota_asal",
+    "penerima", "hp_penerima", "alamat_penerima", "kota_tujuan",
+    "ongkir_per_kg", "ongkir_per_cbm", "jenis_pajak",
     "total_ongkir", "pembayaran", "ket_buku_gudang",
     "no_manifest", "ket_manifest",
 }
@@ -2296,7 +2442,8 @@ def _update_buku_gudang_cursor(
         if lama["revision"] != expected_revision:
             return False
 
-    _sesuaikan_subtotal_buku_gudang(safe_updates, lama["jenis_pajak"])
+    jenis_pajak_efektif = safe_updates.get("jenis_pajak", lama["jenis_pajak"])
+    _sesuaikan_subtotal_buku_gudang(safe_updates, jenis_pajak_efektif)
 
     if safe_updates:
         fields = [f"{column} = ?" for column in safe_updates]
@@ -2360,13 +2507,46 @@ def _update_buku_gudang_cursor(
     penerima_baru = str(
         safe_updates.get("penerima", lama["penerima"]) or ""
     ).strip().upper()
-    if penerima_lama:
+
+    # Popup Buku Gudang menjadi sumber data kontak master juga. Field nama,
+    # HP, alamat, dan kota yang diedit di popup disinkronkan ke master dalam
+    # transaksi yang sama. Jalur update status massal tidak menyentuh master.
+    master_fields = {
+        "pengirim", "hp_pengirim", "alamat_pengirim", "kota_asal",
+        "penerima", "hp_penerima", "alamat_penerima", "kota_tujuan",
+    }
+    if master_fields.intersection(safe_updates):
+        master_row = cursor.execute(
+            """
+            SELECT pengirim, hp_pengirim, alamat_pengirim, kota_asal,
+                   penerima, hp_penerima, alamat_penerima, kota_tujuan, pembayaran
+            FROM data_resi
+            WHERE no_resi = ? AND kode_cabang = ?
+            LIMIT 1
+            """,
+            (no_resi, kode_cabang),
+        ).fetchone()
+        if master_row:
+            master_data = dict(zip(
+                (
+                    "pengirim", "hp_pengirim", "alamat_pengirim", "kota_asal",
+                    "penerima", "hp_penerima", "alamat_penerima",
+                    "kota_tujuan", "pembayaran",
+                ),
+                master_row,
+            ))
+            _upsert_master_pengirim_dari_buku_gudang(
+                cursor, master_data, kode_cabang
+            )
+            _upsert_master_penerima_dari_buku_gudang(
+                cursor, master_data, kode_cabang
+            )
+
+    # Saat nama penerima berubah, hitung ulang master lama. Master penerima
+    # baru sudah dihitung satu kali oleh helper di atas.
+    if penerima_lama and penerima_lama != penerima_baru:
         _refresh_total_transaksi_master_penerima(
             cursor, penerima_lama, kode_cabang
-        )
-    if penerima_baru and penerima_baru != penerima_lama:
-        _refresh_total_transaksi_master_penerima(
-            cursor, penerima_baru, kode_cabang
         )
 
     snapshot_audit_baru = _snapshot_resi_untuk_audit(

@@ -335,6 +335,14 @@ def _kota_penerima_html(data: dict) -> str:
     return ""
 
 
+def _kota_pengirim_html(data: dict) -> str:
+    """Format kota asal pada blok pengirim di preview/cetak resi."""
+    kota_asal = str(data.get("kota_asal", "") or "").strip()
+    if kota_asal and kota_asal.lower() != "none" and kota_asal != "-":
+        return "<br>" f"{_esc(kota_asal.upper())}"
+    return ""
+
+
 def _nama_admin_cetak(data: dict | None = None) -> str:
     data = data or {}
     nama_admin = str(
@@ -360,6 +368,7 @@ def cetak_resi_ke_printer(
     teks_tarif_satuan = _buat_teks_tarif_satuan(data, tipe_pajak)
     html_kolom_tagihan = _buat_html_kolom_tagihan(data, teks_tarif_satuan)
     str_kota = _kota_penerima_html(data)
+    str_kota_asal = _kota_pengirim_html(data)
     nama_admin = _nama_admin_cetak(data)
     font_dokumen = get_master_font()
 
@@ -562,6 +571,7 @@ def cetak_resi_ke_printer(
                     </strong><br>
                     {_esc(data.get('pengirim_telp', ''))}<br>
                     {_esc(data.get('pengirim_alamat', ''))}
+                    {str_kota_asal}
                 </td>
                 <td width="50%" valign="top"
                     style="padding-left: 1px;">
