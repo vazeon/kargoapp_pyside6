@@ -9,6 +9,12 @@ from PySide6.QtGui import QPageLayout, QPageSize
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QWidget
 
+from .invoice_page_setup import (
+    muat_page_setup,
+    normalisasi_page_setup,
+    simpan_page_setup,
+    InvoicePageSetupDialog,
+)
 from .common import (
     JENIS_INVOICE,
     JendelaPreviewCustom,
@@ -128,16 +134,58 @@ def _normalisasi_tipe_kertas(tipe_kertas: str) -> str:
 
 def _konfigurasi_printer_invoice(
     printer: QPrinter,
-    tipe_kertas: str,
+    tipe_kertas: str | None = None,
+    page_setup: dict | None = None,
 ) -> str:
-    """Konfigurasi printer khusus Invoice tanpa memengaruhi Resi/Manifest.
+    """Terapkan pengaturan halaman Invoice ke QPrinter.
 
-    Untuk NCR 9.5 x 5.5 inci, QPageSize disimpan sebagai 5.5 x 9.5 inci
-    lalu orientasi printer diatur Landscape. Ini mengikuti cara kerja Qt dan
-    memastikan QPrintPreviewWidget mengenali media sebagai landscape.
+    Jika page_setup diberikan, ukuran, orientasi, dan empat margin diambil
+    dari konfigurasi Page Setup. Parameter tipe_kertas lama tetap didukung
+    untuk pemanggil yang belum dimigrasikan.
     """
-    tipe = _normalisasi_tipe_kertas(tipe_kertas)
+    if isinstance(page_setup, dict):
+        setup = normalisasi_page_setup(page_setup)
+        paper = setup["paper_size"]
+        if paper in {"A3", "A4"}:
+            page_id = QPageSize.PageSizeId.A3 if paper == "A3" else QPageSize.PageSizeId.A4
+            page_size = QPageSize(page_id)
+            style_type = "A4"
+        elif paper == "NCR":
+            page_size = QPageSize(
+                QSizeF(5.5, 9.5),
+                QPageSize.Unit.Inch,
+                "NCR 9.5 x 5.5 in",
+            )
+            style_type = "NCR"
+        else:
+            page_size = QPageSize(
+                QSizeF(setup["width_mm"], setup["height_mm"]),
+                QPageSize.Unit.Millimeter,
+                "Custom Invoice",
+            )
+            style_type = setup["style_preset"]
 
+        printer.setPageSize(page_size)
+        orientation = (
+            QPageLayout.Orientation.Landscape
+            if setup["orientation"] == "landscape"
+            else QPageLayout.Orientation.Portrait
+        )
+        printer.setPageOrientation(orientation)
+        margins = setup["margins"]
+        printer.setPageMargins(
+            QMarginsF(
+                margins["left"],
+                margins["top"],
+                margins["right"],
+                margins["bottom"],
+            ),
+            QPageLayout.Unit.Millimeter,
+        )
+        return style_type
+
+    # Backward compatibility untuk pemanggil lama.
+    tipe = _normalisasi_tipe_kertas(tipe_kertas)
     if tipe == "NCR":
         ncr_size = QPageSize(
             QSizeF(5.5, 9.5),
@@ -152,7 +200,6 @@ def _konfigurasi_printer_invoice(
         )
     else:
         konfigurasi_printer(printer, JENIS_INVOICE, "A4")
-
     return tipe
 
 
@@ -205,11 +252,45 @@ def _paksa_struktur_qt_full_width(html_content: str) -> str:
     return html_text
 
 
-def _sesuaikan_html_kertas(html_content: str, tipe_kertas: str) -> str:
-    """Menyiapkan HTML Invoice sesuai media NCR/A4 tanpa mengubah datanya."""
+def _sesuaikan_html_kertas(
+    html_content: str,
+    tipe_kertas: str,
+    page_setup: dict | None = None,
+) -> str:
+    """Menyiapkan style HTML sesuai ukuran media yang sedang dicetak."""
     tipe = _normalisasi_tipe_kertas(tipe_kertas)
     html_text = _paksa_struktur_qt_full_width(html_content)
-    deklarasi = _PAGE_DECLARATION[tipe]
+
+    if isinstance(page_setup, dict):
+        setup = normalisasi_page_setup(page_setup)
+        if setup["paper_size"] in {"A3", "A4"}:
+            ukuran_css = setup["paper_size"]
+        elif setup["paper_size"] == "NCR":
+            ukuran_css = (
+                "9.5in 5.5in"
+                if setup["orientation"] == "landscape"
+                else "5.5in 9.5in"
+            )
+        else:
+            width = float(setup["width_mm"])
+            height = float(setup["height_mm"])
+            if setup["orientation"] == "landscape" and width < height:
+                width, height = height, width
+            elif setup["orientation"] == "portrait" and width > height:
+                width, height = height, width
+            ukuran_css = f"{width:g}mm {height:g}mm"
+        if setup["paper_size"] in {"A3", "A4"}:
+            orientasi_css = f" {setup['orientation']}"
+        else:
+            orientasi_css = ""
+        margins = setup["margins"]
+        margin_css = (
+            f"{margins['top']:g}mm {margins['right']:g}mm "
+            f"{margins['bottom']:g}mm {margins['left']:g}mm"
+        )
+        deklarasi = f"@page {{ size: {ukuran_css}{orientasi_css}; margin: {margin_css}; }}"
+    else:
+        deklarasi = _PAGE_DECLARATION[tipe]
 
     if _PAGE_PATTERN.search(html_text):
         html_text = _PAGE_PATTERN.sub(deklarasi, html_text, count=1)
@@ -236,11 +317,15 @@ def _nama_invoice_aman(suggested_name: str) -> str:
     return bersihkan_nama_file(nama, default="invoice_draft")
 
 
-def _buat_printer_invoice_pdf(output_path: str, tipe_kertas: str) -> QPrinter:
+def _buat_printer_invoice_pdf(
+    output_path: str,
+    tipe_kertas: str = DEFAULT_TIPE_KERTAS_INVOICE,
+    page_setup: dict | None = None,
+) -> QPrinter:
     printer = QPrinter(QPrinter.PrinterMode.HighResolution)
     printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
     printer.setOutputFileName(output_path)
-    _konfigurasi_printer_invoice(printer, tipe_kertas)
+    _konfigurasi_printer_invoice(printer, tipe_kertas, page_setup)
     return printer
 
 
@@ -248,9 +333,10 @@ def _buat_dokumen_invoice(
     html_content: str,
     tipe_kertas: str,
     printer: QPrinter,
+    page_setup: dict | None = None,
 ):
-    tipe = _konfigurasi_printer_invoice(printer, tipe_kertas)
-    html_siap = _sesuaikan_html_kertas(html_content, tipe)
+    tipe = _konfigurasi_printer_invoice(printer, tipe_kertas, page_setup)
+    html_siap = _sesuaikan_html_kertas(html_content, tipe, page_setup)
     return buat_dokumen_html(html_siap, printer, margin=0)
 
 
@@ -258,6 +344,7 @@ def simpan_html_ke_pdf(
     html_content: str,
     output_path: str,
     tipe_kertas: str = DEFAULT_TIPE_KERTAS_INVOICE,
+    page_setup: dict | None = None,
 ) -> str:
     """Menyimpan HTML Invoice langsung ke file PDF."""
     output_path = pastikan_ekstensi(output_path, ".pdf")
@@ -265,8 +352,8 @@ def simpan_html_ke_pdf(
         raise ValueError("Lokasi penyimpanan PDF tidak valid.")
 
     tipe = _normalisasi_tipe_kertas(tipe_kertas)
-    printer = _buat_printer_invoice_pdf(output_path, tipe)
-    document = _buat_dokumen_invoice(html_content, tipe, printer)
+    printer = _buat_printer_invoice_pdf(output_path, tipe, page_setup)
+    document = _buat_dokumen_invoice(html_content, tipe, printer, page_setup)
     document.print_(printer)
     return output_path
 
@@ -276,6 +363,7 @@ def simpan_invoice_pdf(
     suggested_name: str,
     parent: Optional[QWidget] = None,
     tipe_kertas: str = DEFAULT_TIPE_KERTAS_INVOICE,
+    page_setup: dict | None = None,
 ) -> Optional[str]:
     """Memilih lokasi penyimpanan lalu mengekspor Invoice ke PDF."""
     nama_file = pastikan_ekstensi(_nama_invoice_aman(suggested_name), ".pdf")
@@ -293,6 +381,7 @@ def simpan_invoice_pdf(
             html_content,
             output_path,
             tipe_kertas=tipe_kertas,
+            page_setup=page_setup,
         )
         QMessageBox.information(
             parent,
@@ -309,25 +398,27 @@ def cetak_invoice_langsung(
     html_content: str,
     parent: Optional[QWidget] = None,
     tipe_kertas: str = DEFAULT_TIPE_KERTAS_INVOICE,
+    page_setup: dict | None = None,
 ) -> bool:
-    """Mencetak Invoice ke printer fisik memakai engine yang sama dengan preview."""
-    tipe = _normalisasi_tipe_kertas(tipe_kertas)
+    """Mencetak Invoice memakai konfigurasi halaman yang sama dengan preview/PDF."""
     printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-    _konfigurasi_printer_invoice(printer, tipe)
+    _konfigurasi_printer_invoice(printer, tipe_kertas, page_setup)
 
     dialog = QPrintDialog(printer, parent)
-    dialog.setWindowTitle(
-        "Pilih Printer - Invoice NCR"
-        if tipe == "NCR"
-        else "Pilih Printer - Invoice A4"
-    )
+    dialog.setWindowTitle("Pilih Printer - Invoice")
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return False
 
     try:
-        # Ukuran media tetap ditegakkan setelah dialog printer ditutup.
-        _konfigurasi_printer_invoice(printer, tipe)
-        document = _buat_dokumen_invoice(html_content, tipe, printer)
+        # Terapkan ulang geometri halaman agar driver printer tidak mengganti
+        # ukuran/margin Page Setup yang dipilih pengguna.
+        _konfigurasi_printer_invoice(printer, tipe_kertas, page_setup)
+        document = _buat_dokumen_invoice(
+            html_content,
+            tipe_kertas,
+            printer,
+            page_setup,
+        )
         document.print_(printer)
         QMessageBox.information(
             parent,
@@ -349,18 +440,25 @@ class InvoicePreviewDialog(JendelaPreviewCustom):
         suggested_name: str,
         parent: Optional[QWidget] = None,
         tipe_kertas: str = DEFAULT_TIPE_KERTAS_INVOICE,
+        page_setup: dict | None = None,
     ):
         self.html_content = str(html_content or "")
         self.suggested_name = _nama_invoice_aman(suggested_name)
-        self.tipe_invoice = _normalisasi_tipe_kertas(tipe_kertas)
+        self.page_setup = normalisasi_page_setup(page_setup) if isinstance(page_setup, dict) else None
+        self.tipe_invoice = (
+            self.page_setup["style_preset"]
+            if self.page_setup is not None
+            else _normalisasi_tipe_kertas(tipe_kertas)
+        )
 
         printer = QPrinter()
         printer.setResolution(96)
-        _konfigurasi_printer_invoice(printer, self.tipe_invoice)
+        _konfigurasi_printer_invoice(printer, self.tipe_invoice, self.page_setup)
         document = _buat_dokumen_invoice(
             self.html_content,
             self.tipe_invoice,
             printer,
+            self.page_setup,
         )
         super().__init__(
             printer=printer,
@@ -372,9 +470,24 @@ class InvoicePreviewDialog(JendelaPreviewCustom):
         )
         self.setWindowTitle(f"Preview Invoice - {self.suggested_name}")
 
+    def buka_dialog_setting_printer(self) -> None:
+        """Tombol pengaturan pada preview membuka Page Setup Invoice."""
+        dialog = InvoicePageSetupDialog(self.page_setup or muat_page_setup(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.page_setup = simpan_page_setup(dialog.page_setup())
+        self.tipe_invoice = self.page_setup["style_preset"]
+        self.tipe_kertas = self.tipe_invoice
+        self._sinkronkan_printer(self.printer_terikat)
+        if self.printer_terikat.pageLayout().orientation() == QPageLayout.Orientation.Landscape:
+            self.widget_preview.setLandscapeOrientation()
+        else:
+            self.widget_preview.setPortraitOrientation()
+        self.widget_preview.updatePreview()
+
     def _sinkronkan_printer(self, printer: QPrinter) -> None:
-        """Override sync bersama agar geometri NCR Invoice tidak dirotasi ulang."""
-        _konfigurasi_printer_invoice(printer, self.tipe_invoice)
+        """Override sync bersama agar geometri Page Setup Invoice tidak diubah."""
+        _konfigurasi_printer_invoice(printer, self.tipe_invoice, self.page_setup)
         sinkronkan_ukuran_dokumen(self.doc_terikat, printer)
 
     def aksi_simpan_pdf(self) -> None:
@@ -384,6 +497,7 @@ class InvoicePreviewDialog(JendelaPreviewCustom):
             suggested_name=self.suggested_name,
             parent=self,
             tipe_kertas=self.tipe_invoice,
+            page_setup=self.page_setup,
         )
 
     def simpan_pdf(self) -> None:
@@ -396,6 +510,7 @@ def tampilkan_preview_invoice(
     suggested_name: str,
     parent: Optional[QWidget] = None,
     tipe_kertas: str = DEFAULT_TIPE_KERTAS_INVOICE,
+    page_setup: dict | None = None,
 ) -> None:
     """Menampilkan preview Invoice secara modal."""
     dialog = InvoicePreviewDialog(
@@ -403,5 +518,6 @@ def tampilkan_preview_invoice(
         suggested_name=suggested_name,
         parent=parent,
         tipe_kertas=tipe_kertas,
+        page_setup=page_setup,
     )
     dialog.exec()

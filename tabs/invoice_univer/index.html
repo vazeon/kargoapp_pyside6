@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' qrc: data: blob:; script-src 'self' 'unsafe-eval' qrc: blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: blob:; connect-src 'self' qrc:; worker-src 'self' blob: qrc:;" />
+  <title>Kargo Invoice Spreadsheet</title>
+  <!-- Univer's own styles -->
+  <link rel="stylesheet" href="vendor/invoice_univer.css" />
+  <!-- Kargo host sizing/theme styles -->
+  <link rel="stylesheet" href="invoice_univer.css" />
+</head>
+<body>
+  <!-- The mount element must exist before the Univer bundle executes. -->
+  <div id="univer-app"></div>
+
+  <!-- Load Qt's bridge before the Univer application bundle. -->
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="vendor/invoice_univer.js"></script>
+</body>
+</html>

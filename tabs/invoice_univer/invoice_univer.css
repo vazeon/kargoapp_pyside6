@@ -1,0 +1,218 @@
+/* Font aplikasi yang dibundel Kargo untuk dipakai oleh Chromium/Univer. */
+@font-face {
+  font-family: "Roboto";
+  src: url("../../assets/fonts/Roboto-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Roboto";
+  src: url("../../assets/fonts/Roboto-Medium.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Roboto";
+  src: url("../../assets/fonts/Roboto-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Roboto";
+  src: url("../../assets/fonts/Roboto-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Open Sans";
+  src: url("../../assets/fonts/OpenSans-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Open Sans";
+  src: url("../../assets/fonts/OpenSans-Medium.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Open Sans";
+  src: url("../../assets/fonts/OpenSans-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Open Sans";
+  src: url("../../assets/fonts/OpenSans-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Aptos Narrow";
+  src: url("../../assets/fonts/Aptos-Narrow.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Aptos Narrow";
+  src: url("../../assets/fonts/Aptos-Narrow-Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Aptos Narrow";
+  src: url("../../assets/fonts/Aptos-Narrow-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  /* Fallback awal mengikuti font default helper Kargo; akan dioverride
+     secara dinamis oleh QApplication melalui QWebChannel. */
+  --kargo-font-family: "Roboto", Arial, sans-serif;
+  --kargo-font-size: 13px;
+  --kargo-bg: #ffffff;
+  --kargo-text: #202124;
+  --kargo-border: #d8dde5;
+  font-family: var(--kargo-font-family);
+  font-size: var(--kargo-font-size);
+}
+
+* { box-sizing: border-box; }
+html, body, #univer-app {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+body {
+  color: var(--kargo-text);
+  background: var(--kargo-bg);
+  font-family: var(--kargo-font-family);
+}
+
+/* Prevent browser-native menus from sitting on top of Univer's own menus. */
+body { user-select: none; }
+#univer-app { position: relative; }
+
+/* Match the Kargo desktop typography without overriding the spreadsheet grid. */
+#univer-app button,
+#univer-app input,
+#univer-app select,
+#univer-app textarea {
+  font-family: var(--kargo-font-family);
+}
+
+body.kargo-dark {
+  color-scheme: dark;
+  background: #1f2329;
+}
+
+body.kargo-locked #univer-app {
+  cursor: default;
+}
+
+/*
+ * Kargo Invoice: subtle native Univer control-size adjustment.
+ * Keep the original Univer layout and worksheet scale unchanged.
+ */
+#univer-app [data-u-comp="ribbon-header-menu"] {
+  min-height: 34px !important;
+  height: 34px !important;
+  font-size: 12px !important;
+}
+
+#univer-app [data-u-comp="ribbon-header-menu"] button,
+#univer-app [data-u-comp="ribbon-header-menu"] [role="tab"] {
+  min-height: 28px !important;
+  padding-inline: 7px !important;
+  font-size: 11.5px !important;
+  line-height: 1.2 !important;
+}
+
+#univer-app [data-u-comp="ribbon-header-menu"] svg {
+  width: 15px !important;
+  height: 15px !important;
+}
+
+#univer-app [data-u-comp="ribbon-toolbar"] {
+  font-size: 11.5px !important;
+}
+
+#univer-app [data-u-comp="ribbon-toolbar"] button,
+#univer-app [data-u-comp="ribbon-toolbar"] [data-u-command],
+#univer-app [data-u-comp="ribbon-toolbar"] .univer-toolbar-selector-root,
+#univer-app [data-u-comp="ribbon-toolbar"] .univer-toolbar-button-selector-root,
+#univer-app [data-u-comp="ribbon-toolbar"] .univer-toolbar-button-selector-main {
+  min-height: 28px !important;
+  height: 28px !important;
+  font-size: 11.5px !important;
+  line-height: 1.2 !important;
+}
+
+#univer-app [data-u-comp="ribbon-toolbar"] button,
+#univer-app [data-u-comp="ribbon-toolbar"] [data-u-command] {
+  min-width: 28px !important;
+  padding-inline: 4px !important;
+}
+
+#univer-app [data-u-comp="ribbon-toolbar"] .univer-toolbar-button-selector-trigger {
+  min-height: 28px !important;
+  height: 28px !important;
+  min-width: 21px !important;
+  width: 21px !important;
+}
+
+#univer-app [data-u-comp="ribbon-toolbar"] svg {
+  width: 15px !important;
+  height: 15px !important;
+}
+
+#univer-app [data-u-comp="ribbon-toolbar"] input,
+#univer-app [data-u-comp="ribbon-toolbar"] select {
+  min-height: 26px !important;
+  height: 26px !important;
+  font-size: 11.5px !important;
+}
+
+#univer-app [data-u-comp="formula-bar"] {
+  min-height: 27px !important;
+  font-size: 11.5px !important;
+}
+
+#univer-app [data-u-comp="formula-bar"] input,
+#univer-app [data-u-comp="formula-bar"] button,
+#univer-app [data-u-comp="formula-bar"] [data-u-comp="button"] {
+  min-height: 25px !important;
+  font-size: 11.5px !important;
+}
+
+#univer-app [data-u-comp="formula-bar"] svg {
+  width: 14px !important;
+  height: 14px !important;
+}
+
+#univer-app [role="menu"],
+#univer-app [role="menu"] *,
+#univer-app [role="menuitem"],
+#univer-app [role="option"],
+body [role="menu"],
+body [role="menu"] *,
+body [role="menuitem"],
+body [role="option"] {
+  font-family: var(--kargo-font-family) !important;
+  font-size: 11.5px !important;
+  line-height: 1.3 !important;
+}

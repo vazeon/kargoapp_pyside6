@@ -2621,9 +2621,17 @@ class TabBukuGudang(QWidget):
             hasil = open_buku_gudang_edit_popup(self, data, on_save=simpan)
             if hasil is None:
                 return
+            try:
+                no_resi_akhir = db_service.sesuaikan_nomor_resi_dengan_pajak(
+                    no_resi, hasil.get("jenis_pajak")
+                ) or no_resi
+            except Exception:
+                logger.exception("Gagal menentukan nomor Resi akhir setelah edit Buku Gudang")
+                no_resi_akhir = no_resi
             self.refresh_session_ui()
             QMessageBox.information(
-                self, "Edit Data", f"Data dan detail barang Resi {no_resi} berhasil disimpan.",
+                self, "Edit Data",
+                f"Data dan detail barang Resi {no_resi_akhir} berhasil disimpan.",
             )
         except Exception as exc:
             QMessageBox.critical(self, "Edit Data", str(exc))
@@ -3843,11 +3851,11 @@ class BukuGudangEditDialog(QDialog):
         top_bar.addWidget(lbl_tanggal)
         top_bar.addStretch(1)
         top_bar.addWidget(QLabel("No. Resi:"))
-        lbl_no_resi = QLabel(str(self.data.get("no_resi") or "-"))
-        lbl_no_resi.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_no_resi.setMinimumWidth(170)
-        lbl_no_resi.setStyleSheet("font-weight: 600; padding: 5px 10px; border: 1px solid #8ab4f8; border-radius: 4px;")
-        top_bar.addWidget(lbl_no_resi)
+        self.lbl_no_resi = QLabel(str(self.data.get("no_resi") or "-"))
+        self.lbl_no_resi.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_no_resi.setMinimumWidth(170)
+        self.lbl_no_resi.setStyleSheet("font-weight: 600; padding: 5px 10px; border: 1px solid #8ab4f8; border-radius: 4px;")
+        top_bar.addWidget(self.lbl_no_resi)
         main.addLayout(top_bar)
 
         # Dua panel identitas berdampingan, mengikuti form Tab Resi.
@@ -4034,6 +4042,10 @@ class BukuGudangEditDialog(QDialog):
             lambda: self._format_input_ongkir(self.ongkir_per_cbm)
         )
         self.cb_jenis_pajak.currentTextChanged.connect(self._jenis_pajak_diubah)
+        self.cb_jenis_pajak.currentTextChanged.connect(
+            self._perbarui_preview_nomor_resi
+        )
+        self._perbarui_preview_nomor_resi()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save |
@@ -4123,6 +4135,21 @@ class BukuGudangEditDialog(QDialog):
         self._jenis_pajak_awal = (
             "PAJAK" if self.cb_jenis_pajak.currentIndex() == 1 else "NONPAJAK"
         )
+
+    def _perbarui_preview_nomor_resi(self, _teks=None):
+        """Tampilkan suffix Resi yang akan dipakai setelah jenis pajak disimpan."""
+        nomor_awal = str(self.data.get("no_resi") or "").strip().upper()
+        jenis_pajak = (
+            "PAJAK" if self.cb_jenis_pajak.currentIndex() == 1 else "NONPAJAK"
+        )
+        try:
+            nomor_tampil = db_service.sesuaikan_nomor_resi_dengan_pajak(
+                nomor_awal, jenis_pajak
+            )
+        except Exception:
+            logger.exception("Gagal memperbarui preview nomor Resi pada popup Buku Gudang")
+            nomor_tampil = nomor_awal
+        self.lbl_no_resi.setText(nomor_tampil or nomor_awal or "-")
 
     def _tarif_ongkir_diubah(self, _teks=None):
         self._mode_total_ongkir = "auto"

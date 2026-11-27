@@ -241,6 +241,7 @@ class TabResi(QWidget):
 
         self._mode_total_ongkir = None
         self._subtotal_manual_ongkir = 0
+        self._subtotal_auto_ongkir = None
         self._sedang_set_total_ongkir = False
         self._sedang_simpan = False
         self._read_generation = {"history": 0, "autocomplete": 0}
@@ -1401,33 +1402,52 @@ class TabResi(QWidget):
             nama_penerima, self.txt_penerima, self.eksekusi_autofill_penerima
         )
 
+    def _bersihkan_detail_autofill_pengirim(self):
+        """Hapus detail kontak lama saat nama pengirim tidak memiliki master."""
+        self.txt_hp_pengirim.clear()
+        self.txt_alamat_pengirim.clear()
+        self.txt_kota_pengirim.clear()
+
+    def _bersihkan_detail_autofill_penerima(self):
+        """Hapus detail kontak lama saat nama penerima tidak memiliki master."""
+        self.txt_hp_penerima.clear()
+        self.txt_alamat_penerima.clear()
+        self.txt_kota_penerima.clear()
+        if hasattr(self, "cb_provinsi"):
+            self.cb_provinsi.setCurrentIndex(-1)
+
     def eksekusi_autofill_penerima(self, nama_penerima):
         nama_penerima = str(nama_penerima or "").strip().upper()
         self.kode_cabang = self._kode_cabang_aktif()
 
         if not nama_penerima:
+            self._bersihkan_detail_autofill_penerima()
             return
 
         try:
             detail = db_service.ambil_detail_penerima(nama_penerima, self.kode_cabang)
-            if detail:
-                hp_master, alamat_master, kota_master, provinsi_master = detail
+            if not detail:
+                self._bersihkan_detail_autofill_penerima()
+                return
 
-                self.txt_hp_penerima.setText(str(hp_master) if hp_master else "")
-                self.txt_kota_penerima.setText(
-                    str(kota_master).strip().upper() if kota_master else "",
-                )
-                self.txt_alamat_penerima.setText(
-                    str(alamat_master).strip().upper() if alamat_master else "",
-                )
+            hp_master, alamat_master, kota_master, provinsi_master = detail
+            self.txt_hp_penerima.setText(str(hp_master) if hp_master else "")
+            self.txt_kota_penerima.setText(
+                str(kota_master).strip().upper() if kota_master else "",
+            )
+            self.txt_alamat_penerima.setText(
+                str(alamat_master).strip().upper() if alamat_master else "",
+            )
 
-                if provinsi_master and hasattr(self, 'cb_provinsi'):
-                    provinsi_clean = str(provinsi_master).strip().upper()
+            if hasattr(self, "cb_provinsi"):
+                provinsi_clean = str(provinsi_master or "").strip().upper()
+                if not provinsi_clean:
+                    self.cb_provinsi.setCurrentIndex(-1)
+                else:
                     index = self.cb_provinsi.findText(
                         provinsi_clean,
                         Qt.MatchFlag.MatchFixedString,
                     )
-
                     if index >= 0:
                         self.cb_provinsi.setCurrentIndex(index)
                     else:
@@ -1435,6 +1455,8 @@ class TabResi(QWidget):
                         self.cb_provinsi.setCurrentIndex(self.cb_provinsi.count() - 1)
 
         except Exception:
+            # Jangan kosongkan input pengguna ketika query master gagal; kegagalan
+            # membaca database tidak sama dengan nama yang tidak ditemukan.
             logger.exception("Gagal menjalankan autofill penerima")
 
     def reset_filter_histori(self):
@@ -1795,6 +1817,11 @@ class TabResi(QWidget):
         if self._sedang_set_total_ongkir:
             return
 
+        if not str(teks or "").strip():
+            self._mode_total_ongkir = None
+            self._subtotal_manual_ongkir = 0
+            return
+
         self._mode_total_ongkir = "manual"
         self._subtotal_manual_ongkir = max(0, rupiah_to_int(teks))
 
@@ -1816,6 +1843,7 @@ class TabResi(QWidget):
     def _reset_status_kalkulator_ongkir(self):
         self._mode_total_ongkir = None
         self._subtotal_manual_ongkir = 0
+        self._subtotal_auto_ongkir = None
         self._sedang_set_total_ongkir = False
 
     def kalkulator_finansial_otomatis(self):
@@ -1844,10 +1872,15 @@ class TabResi(QWidget):
 
             if subtotal_ongkir is not None:
                 self._mode_total_ongkir = "auto"
+                # Simpan dasar ongkir asli selama kalkulasi berlangsung.
+                # Jangan merekonstruksinya dari total setelah PPN karena
+                # pembulatan per Resi dapat menggeser subtotal Rp1.
+                self._subtotal_auto_ongkir = subtotal_ongkir
                 total_akhir = self._total_setelah_ppn(subtotal_ongkir)
                 self._set_total_ongkir_programatis(total_akhir)
             elif self._mode_total_ongkir == "auto":
                 self._mode_total_ongkir = None
+                self._subtotal_auto_ongkir = None
                 self._set_total_ongkir_programatis(None)
 
         except Exception:
@@ -2089,19 +2122,25 @@ class TabResi(QWidget):
         self.kode_cabang = self._kode_cabang_aktif()
 
         if not name_clean:
+            self._bersihkan_detail_autofill_pengirim()
             return
 
         try:
             row = db_service.ambil_detail_pengirim(name_clean, self.kode_cabang)
-            if row:
-                self.txt_hp_pengirim.setText(str(row[0]) if row[0] else "")
-                self.txt_alamat_pengirim.setText(
-                    str(row[1]).strip().upper() if row[1] else "",
-                )
-                self.txt_kota_pengirim.setText(
-                    str(row[2]).strip().upper() if row[2] else "",
-                )
+            if not row:
+                self._bersihkan_detail_autofill_pengirim()
+                return
+
+            self.txt_hp_pengirim.setText(str(row[0]) if row[0] else "")
+            self.txt_alamat_pengirim.setText(
+                str(row[1]).strip().upper() if row[1] else "",
+            )
+            self.txt_kota_pengirim.setText(
+                str(row[2]).strip().upper() if row[2] else "",
+            )
         except Exception:
+            # Jangan kosongkan input pengguna ketika query master gagal; kegagalan
+            # membaca database tidak sama dengan nama yang tidak ditemukan.
             logger.exception("Gagal autofill pengirim")
 
     def otomatisasi_nomor_resi(self):
@@ -2180,7 +2219,9 @@ class TabResi(QWidget):
                 self.txt_resi_display.text(), format_tanggal_ke_db(tanggal_transaksi)
             )
             try:
-                sukses, pesan_error = db_service.simpan_transaksi_resi(ctx["payload"])
+                sukses, pesan_error, no_resi_final = db_service.simpan_transaksi_resi(
+                    ctx["payload"], return_final_number=True
+                )
             except Exception as exc:
                 logger.exception("Gagal menyimpan resi %s", self.txt_resi_display.text())
                 QMessageBox.critical(self, "Error Database", f"Gagal menyimpan resi: {exc}")
@@ -2189,6 +2230,16 @@ class TabResi(QWidget):
                 self._tampilkan_error_simpan(pesan_error)
                 return
             self._transaksi_tersimpan = True
+            no_resi_final = str(no_resi_final or "").strip().upper()
+            if not no_resi_final:
+                raise RuntimeError(
+                    "Database melaporkan penyimpanan berhasil, tetapi nomor Resi final tidak dikembalikan. "
+                    "Gunakan Histori Resi untuk memeriksa data; jangan simpan ulang."
+                )
+            # Nomor yang dicetak harus persis nomor yang dialokasikan dan disimpan
+            # di dalam transaksi SQLite, bukan hasil peek yang bisa kedaluwarsa.
+            ctx["payload"]["no_resi"] = no_resi_final
+            self.txt_resi_display.setText(no_resi_final)
             self._cetak_setelah_database_tersimpan(ctx)
             self._selesaikan_simpan_sukses()
         except (ValueError, TypeError, ArithmeticError) as exc:
@@ -2304,19 +2355,34 @@ class TabResi(QWidget):
         return data_cetak
 
     def _subtotal_ongkir_untuk_simpan(self, total_ongkir):
-        if self._mode_total_ongkir == "manual":
-            return max(0, int(self._subtotal_manual_ongkir or 0))
-
+        """Kembalikan subtotal jika ongkir diisi; None berarti nominal belum ditentukan."""
         total_ongkir = max(0, int(total_ongkir or 0))
-        if total_ongkir <= 0:
-            return 0
-        if self._transaksi_kena_ppn():
-            return int(
-                (Decimal(str(total_ongkir)) / Decimal("1.011")).quantize(
+
+        if self._mode_total_ongkir == "manual":
+            subtotal = max(0, int(self._subtotal_manual_ongkir or 0))
+        elif self._mode_total_ongkir == "auto":
+            if self._subtotal_auto_ongkir is None:
+                raise ValueError(
+                    "Subtotal ongkir otomatis belum terbentuk. Periksa berat, volume, dan tarif."
+                )
+            subtotal = int(
+                Decimal(str(self._subtotal_auto_ongkir)).quantize(
                     Decimal("1"), rounding=ROUND_HALF_UP
                 )
             )
-        return total_ongkir
+        elif total_ongkir == 0:
+            return None
+        else:
+            raise ValueError(
+                "Sumber subtotal ongkir tidak diketahui. Masukkan nominal secara manual "
+                "atau lengkapi tarif dan berat/volume agar subtotal dapat dihitung."
+            )
+
+        if subtotal < 0 or (total_ongkir > 0 and subtotal == 0):
+            raise ValueError("Subtotal ongkir harus lebih besar dari nol untuk transaksi berongkir.")
+        if total_ongkir == 0 and subtotal == 0:
+            return None
+        return subtotal
 
     def _buat_konteks_atomic_resi(self):
         provinsi = self.cb_provinsi.currentText().strip().upper()
@@ -2816,11 +2882,34 @@ class TabResi(QWidget):
         self.txt_ongkir_m3.setText(_format_ongkir_aman(ongkir_m3))
         self._set_total_ongkir_programatis(total_ongkir)
 
-        subtotal_db = int(row[19] or 0) if len(row) > 19 else 0
+        subtotal_raw = row[19] if len(row) > 19 else None
+        if subtotal_raw is None:
+            if total_ongkir > 0:
+                raise ValueError(
+                    "Resi memiliki total_ongkir tetapi subtotal_ongkir kosong. "
+                    "Periksa nominal sumber sebelum mengedit."
+                )
+            self._mode_total_ongkir = None
+            self._subtotal_manual_ongkir = 0
+            self._subtotal_auto_ongkir = None
+            return
+
+        subtotal_db = int(subtotal_raw)
+        if subtotal_db < 0 or (total_ongkir > 0 and subtotal_db == 0):
+            raise ValueError(
+                f"Resi ini memiliki subtotal_ongkir tidak valid (subtotal={subtotal_db}, "
+                f"total={total_ongkir}). Data harus diperbaiki sebelum diedit."
+            )
+        if subtotal_db == 0 and total_ongkir == 0:
+            self._mode_total_ongkir = None
+            self._subtotal_manual_ongkir = 0
+            self._subtotal_auto_ongkir = None
+            return
+
         kg_rate = Decimal(rupiah_to_int(ongkir_kg))
         m3_rate = Decimal(rupiah_to_int(ongkir_m3))
-        berat_db = angka_indonesia_to_decimal(row[9] if len(row) > 9 else 0)
-        cbm_db = angka_indonesia_to_decimal(row[11] if len(row) > 11 else 0)
+        berat_db = angka_indonesia_to_decimal(row[9])
+        cbm_db = angka_indonesia_to_decimal(row[11])
 
         subtotal_auto = None
         if kg_rate > 0 and berat_db > 0:
@@ -2829,19 +2918,16 @@ class TabResi(QWidget):
             subtotal_auto = cbm_db * m3_rate
 
         total_auto = self._total_setelah_ppn(subtotal_auto) if subtotal_auto is not None else None
-        if total_auto is not None and total_auto == total_ongkir:
+        subtotal_auto_bulat = (
+            int(Decimal(str(subtotal_auto)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            if subtotal_auto is not None else None
+        )
+        if total_auto == total_ongkir and subtotal_auto_bulat == subtotal_db:
             self._mode_total_ongkir = "auto"
-        elif total_ongkir > 0:
+            self._subtotal_auto_ongkir = subtotal_auto
+        else:
             self._mode_total_ongkir = "manual"
-            if subtotal_db > 0:
-                self._subtotal_manual_ongkir = subtotal_db
-            else:
-                pembagi = Decimal("1.011") if is_pajak else Decimal("1")
-                self._subtotal_manual_ongkir = int(
-                    (Decimal(str(total_ongkir)) / pembagi).quantize(
-                        Decimal("1"), rounding=ROUND_HALF_UP
-                    )
-                )
+            self._subtotal_manual_ongkir = subtotal_db
 
     def mulai_edit_resi(self, item):
         no_resi = self._ambil_no_resi_dari_item(item)

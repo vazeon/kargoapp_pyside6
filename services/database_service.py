@@ -970,35 +970,66 @@ def _upsert_buku_gudang_resi(cursor, data, no_resi, kode_cabang):
     )
 
 def _upsert_master_pengirim_resi(cursor, data, kode_cabang):
+    """Upsert master pengirim tanpa menghapus detail lama atau menulis ulang nilai sama.
+
+    Field kosong mempertahankan nilai master lama. UPDATE hanya dijalankan jika
+    ada nilai kontak yang benar-benar berubah atau sync_id lama belum tersedia.
+    """
     nama = str(data.get("pengirim", "")).strip().upper()
     if not nama:
         return
 
+    no_hp_input = str(data.get("hp_pengirim", "")).strip() or None
+    alamat_input = str(data.get("alamat_pengirim", "")).strip().upper() or None
+    kota_input = str(data.get("kota_asal", "")).strip().upper() or None
+
     row = cursor.execute(
         """
-        SELECT id_pengirim FROM master_pengirim
+        SELECT id_pengirim, nama, no_hp, alamat, kota, sync_id
+        FROM master_pengirim
         WHERE kode_cabang = ? AND TRIM(UPPER(nama)) = TRIM(UPPER(?))
         ORDER BY updated_at DESC LIMIT 1
         """,
         (kode_cabang, nama),
     ).fetchone()
-    values = (
-        nama,
-        str(data.get("hp_pengirim", "")).strip() or None,
-        str(data.get("alamat_pengirim", "")).strip().upper(),
-        str(data.get("kota_asal", "")).strip().upper(),
-    )
+
     if row:
-        cursor.execute(
-            """
-            UPDATE master_pengirim
-            SET nama = ?, no_hp = ?, alamat = ?, kota = ?,
-                sync_id = COALESCE(NULLIF(sync_id, ''), ?),
-                is_synced = 0, updated_at = CURRENT_TIMESTAMP
-            WHERE id_pengirim = ? AND kode_cabang = ?
-            """,
-            values + (str(uuid.uuid4()), row[0], kode_cabang),
+        id_pengirim, nama_lama, hp_lama, alamat_lama, kota_lama, sync_id_lama = row
+        # COALESCE secara konseptual: input kosong tidak menghapus data master.
+        no_hp = no_hp_input if no_hp_input is not None else hp_lama
+        alamat = alamat_input if alamat_input is not None else alamat_lama
+        kota = kota_input if kota_input is not None else kota_lama
+        sync_id = str(sync_id_lama or uuid.uuid4())
+
+        def _norm_hp(value):
+            return str(value or "").strip() or None
+
+        def _norm_upper(value):
+            return str(value or "").strip().upper() or None
+
+        nilai_lama = (
+            _norm_upper(nama_lama),
+            _norm_hp(hp_lama),
+            _norm_upper(alamat_lama),
+            _norm_upper(kota_lama),
         )
+        nilai_baru = (
+            nama,
+            _norm_hp(no_hp),
+            _norm_upper(alamat),
+            _norm_upper(kota),
+        )
+
+        if nilai_lama != nilai_baru or not sync_id_lama:
+            cursor.execute(
+                """
+                UPDATE master_pengirim
+                SET nama = ?, no_hp = ?, alamat = ?, kota = ?, sync_id = ?,
+                    is_synced = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE id_pengirim = ? AND kode_cabang = ?
+                """,
+                (nama, no_hp, alamat, kota, sync_id, id_pengirim, kode_cabang),
+            )
         return
 
     cursor.execute(
@@ -1008,11 +1039,41 @@ def _upsert_master_pengirim_resi(cursor, data, kode_cabang):
             is_synced, sync_id
         ) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
         """,
-        (f"SHP-{uuid.uuid4().hex[:12].upper()}", kode_cabang)
-        + values + (str(uuid.uuid4()),),
+        (
+            f"SHP-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama,
+            no_hp_input, alamat_input, kota_input, str(uuid.uuid4()),
+        ),
     )
 
+def _hitung_total_transaksi_penerima_cursor(cursor, nama, kode_cabang):
+    """Hitung transaksi penerima yang masih aktif pada cabang terkait.
+
+    Resi soft-delete tetap disimpan untuk sinkronisasi/audit, tetapi tidak lagi
+    dihitung sebagai transaksi aktif pada Master Penerima.
+    """
+    nama = _upper(nama)
+    cabang = _kode_cabang_aktif(kode_cabang)
+    if not nama:
+        return 0
+    row = cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM data_resi
+        WHERE kode_cabang = ?
+          AND TRIM(UPPER(COALESCE(penerima, ''))) = ?
+          AND COALESCE(TRIM(deleted_at), '') = ''
+        """,
+        (cabang, nama),
+    ).fetchone()
+    return int((row[0] if row else 0) or 0)
+
+
 def _upsert_master_penerima_resi(cursor, data, kode_cabang):
+    """Upsert master penerima tanpa menghapus detail lama atau menulis ulang nilai sama.
+
+    Field kontak/pembayaran kosong mempertahankan nilai master lama. UPDATE hanya
+    dijalankan jika kontak, pembayaran, total transaksi, atau sync_id berubah.
+    """
     nama = str(data.get("penerima", "")).strip().upper()
     if not nama:
         return
@@ -1023,48 +1084,84 @@ def _upsert_master_penerima_resi(cursor, data, kode_cabang):
     else:
         provinsi_dari_kota, kota = "", kota_tujuan
 
-    provinsi = (
+    provinsi_input = (
         str(data.get("provinsi_tujuan", "")).strip().upper()
         or provinsi_dari_kota
         or None
     )
-    hp = str(data.get("hp_penerima", "")).strip() or None
-    alamat = str(data.get("alamat_penerima", "")).strip().upper()
-    pembayaran = (
-        str(data.get("pembayaran", "TF / INVOICE")).strip().upper()
-        or "TF / INVOICE"
-    )
+    hp_input = str(data.get("hp_penerima", "")).strip() or None
+    alamat_input = str(data.get("alamat_penerima", "")).strip().upper() or None
+    kota_input = kota or None
+    pembayaran_input = str(data.get("pembayaran", "")).strip().upper() or None
+
     row = cursor.execute(
         """
-        SELECT id_penerima FROM master_penerima
+        SELECT id_penerima, nama, no_hp, alamat, kota, provinsi,
+               pembayaran, total_transaksi, sync_id
+        FROM master_penerima
         WHERE kode_cabang = ? AND TRIM(UPPER(nama)) = TRIM(UPPER(?))
         ORDER BY updated_at DESC LIMIT 1
         """,
         (kode_cabang, nama),
     ).fetchone()
-    total_transaksi = cursor.execute(
-        """
-        SELECT COUNT(*) FROM data_resi
-        WHERE kode_cabang = ? AND TRIM(UPPER(penerima)) = TRIM(UPPER(?))
-        """,
-        (kode_cabang, nama),
-    ).fetchone()[0]
+    total_transaksi = _hitung_total_transaksi_penerima_cursor(
+        cursor, nama, kode_cabang
+    )
 
     if row:
-        cursor.execute(
-            """
-            UPDATE master_penerima
-            SET nama = ?, no_hp = ?, alamat = ?, kota = ?, provinsi = ?,
-                pembayaran = ?, total_transaksi = ?,
-                sync_id = COALESCE(NULLIF(sync_id, ''), ?),
-                is_synced = 0, updated_at = CURRENT_TIMESTAMP
-            WHERE id_penerima = ? AND kode_cabang = ?
-            """,
-            (nama, hp, alamat, kota, provinsi, pembayaran,
-             total_transaksi, str(uuid.uuid4()), row[0], kode_cabang),
+        (
+            id_penerima, nama_lama, hp_lama, alamat_lama, kota_lama,
+            provinsi_lama, pembayaran_lama, total_lama, sync_id_lama,
+        ) = row
+        hp = hp_input if hp_input is not None else hp_lama
+        alamat = alamat_input if alamat_input is not None else alamat_lama
+        kota = kota_input if kota_input is not None else kota_lama
+        provinsi = provinsi_input if provinsi_input is not None else provinsi_lama
+        pembayaran = pembayaran_input if pembayaran_input is not None else pembayaran_lama
+        sync_id = str(sync_id_lama or uuid.uuid4())
+
+        def _norm_hp(value):
+            return str(value or "").strip() or None
+
+        def _norm_upper(value):
+            return str(value or "").strip().upper() or None
+
+        nilai_lama = (
+            _norm_upper(nama_lama),
+            _norm_hp(hp_lama),
+            _norm_upper(alamat_lama),
+            _norm_upper(kota_lama),
+            _norm_upper(provinsi_lama),
+            _norm_upper(pembayaran_lama),
+            int(total_lama or 0),
         )
+        nilai_baru = (
+            nama,
+            _norm_hp(hp),
+            _norm_upper(alamat),
+            _norm_upper(kota),
+            _norm_upper(provinsi),
+            _norm_upper(pembayaran),
+            total_transaksi,
+        )
+
+        if nilai_lama != nilai_baru or not sync_id_lama:
+            cursor.execute(
+                """
+                UPDATE master_penerima
+                SET nama = ?, no_hp = ?, alamat = ?, kota = ?, provinsi = ?,
+                    pembayaran = ?, total_transaksi = ?, sync_id = ?,
+                    is_synced = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE id_penerima = ? AND kode_cabang = ?
+                """,
+                (
+                    nama, hp, alamat, kota, provinsi, pembayaran,
+                    total_transaksi, sync_id, id_penerima, kode_cabang,
+                ),
+            )
         return
 
+    pembayaran_baru = pembayaran_input or "TF / INVOICE"
     cursor.execute(
         """
         INSERT INTO master_penerima (
@@ -1072,8 +1169,11 @@ def _upsert_master_penerima_resi(cursor, data, kode_cabang):
             provinsi, total_transaksi, pembayaran, is_synced, sync_id
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
-        (f"CNE-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama, hp,
-         alamat, kota, provinsi, total_transaksi, pembayaran, str(uuid.uuid4())),
+        (
+            f"CNE-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama,
+            hp_input, alamat_input, kota_input, provinsi_input,
+            total_transaksi, pembayaran_baru, str(uuid.uuid4()),
+        ),
     )
 
 def _refresh_total_transaksi_master_penerima(cursor, nama, kode_cabang):
@@ -1082,13 +1182,9 @@ def _refresh_total_transaksi_master_penerima(cursor, nama, kode_cabang):
     if not nama:
         return
 
-    total = cursor.execute(
-        """
-        SELECT COUNT(*) FROM data_resi
-        WHERE kode_cabang = ? AND TRIM(UPPER(COALESCE(penerima, ''))) = ?
-        """,
-        (kode_cabang, nama),
-    ).fetchone()[0]
+    total = _hitung_total_transaksi_penerima_cursor(
+        cursor, nama, kode_cabang
+    )
     cursor.execute(
         """
         UPDATE master_penerima
@@ -1100,18 +1196,17 @@ def _refresh_total_transaksi_master_penerima(cursor, nama, kode_cabang):
     )
 
 def _upsert_master_pengirim_dari_buku_gudang(cursor, data, kode_cabang):
-    """Upsert data kontak pengirim dari popup Buku Gudang.
+    """Upsert kontak pengirim dari popup tanpa menghapus field master yang kosong.
 
-    Input HP/alamat sekarang eksplisit tersedia di popup. Nilai tersebut disimpan
-    ke resi dan master; kota kosong tetap tidak menghapus kota master lama.
+    Nilai HP, alamat, dan kota yang tidak diisi mempertahankan nilai master lama.
     """
     nama = str(data.get("pengirim") or "").strip().upper()
     if not nama:
         return
 
-    no_hp = str(data.get("hp_pengirim") or "").strip() or None
-    alamat = str(data.get("alamat_pengirim") or "").strip().upper() or None
-    kota = str(data.get("kota_asal") or "").strip().upper() or None
+    no_hp_input = str(data.get("hp_pengirim") or "").strip() or None
+    alamat_input = str(data.get("alamat_pengirim") or "").strip().upper() or None
+    kota_input = str(data.get("kota_asal") or "").strip().upper() or None
     row = cursor.execute(
         """
         SELECT id_pengirim, no_hp, alamat, kota, sync_id
@@ -1123,14 +1218,17 @@ def _upsert_master_pengirim_dari_buku_gudang(cursor, data, kode_cabang):
     ).fetchone()
     if row:
         id_pengirim, hp_lama, alamat_lama, kota_lama, sync_id_lama = row
-        if not kota:
-            kota = str(kota_lama or "").strip().upper() or None
+        no_hp = no_hp_input or (str(hp_lama or "").strip() or None)
+        alamat = alamat_input or (str(alamat_lama or "").strip().upper() or None)
+        kota = kota_input or (str(kota_lama or "").strip().upper() or None)
         sync_id = str(sync_id_lama or uuid.uuid4())
         berubah = (
-            str(hp_lama or "").strip() or None,
-            str(alamat_lama or "").strip().upper() or None,
-            str(kota_lama or "").strip().upper() or None,
-        ) != (no_hp, alamat, kota) or not sync_id_lama
+            (str(hp_lama or "").strip() or None,
+             str(alamat_lama or "").strip().upper() or None,
+             str(kota_lama or "").strip().upper() or None)
+            != (no_hp, alamat, kota)
+            or not sync_id_lama
+        )
         if berubah:
             cursor.execute(
                 """
@@ -1151,34 +1249,29 @@ def _upsert_master_pengirim_dari_buku_gudang(cursor, data, kode_cabang):
         """,
         (
             f"SHP-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama,
-            no_hp, alamat, kota, str(uuid.uuid4()),
+            no_hp_input, alamat_input, kota_input, str(uuid.uuid4()),
         ),
     )
 
-
 def _upsert_master_penerima_dari_buku_gudang(cursor, data, kode_cabang):
-    """Upsert kontak penerima dari popup, termasuk HP dan alamat lengkap."""
+    """Upsert kontak penerima dari popup tanpa menghapus field master yang kosong."""
     nama = str(data.get("penerima") or "").strip().upper()
     if not nama:
         return
 
     tujuan = str(data.get("kota_tujuan") or "").strip().upper()
     if " - " in tujuan:
-        provinsi, kota = [part.strip() for part in tujuan.split(" - ", 1)]
+        provinsi_input, kota_input = [part.strip() for part in tujuan.split(" - ", 1)]
     else:
-        provinsi, kota = "", tujuan
-    kota = kota or None
-    provinsi = provinsi or None
-    no_hp = str(data.get("hp_penerima") or "").strip() or None
-    alamat = str(data.get("alamat_penerima") or "").strip().upper() or None
+        provinsi_input, kota_input = "", tujuan
+    kota_input = kota_input or None
+    provinsi_input = provinsi_input or None
+    no_hp_input = str(data.get("hp_penerima") or "").strip() or None
+    alamat_input = str(data.get("alamat_penerima") or "").strip().upper() or None
 
-    total = cursor.execute(
-        """
-        SELECT COUNT(*) FROM data_resi
-        WHERE kode_cabang = ? AND TRIM(UPPER(COALESCE(penerima, ''))) = ?
-        """,
-        (kode_cabang, nama),
-    ).fetchone()[0]
+    total = _hitung_total_transaksi_penerima_cursor(
+        cursor, nama, kode_cabang
+    )
     row = cursor.execute(
         """
         SELECT id_penerima, no_hp, alamat, kota, provinsi,
@@ -1194,11 +1287,10 @@ def _upsert_master_penerima_dari_buku_gudang(cursor, data, kode_cabang):
             id_penerima, hp_lama, alamat_lama, kota_lama, provinsi_lama,
             total_lama, sync_id_lama,
         ) = row
-        # Tidak menghapus kota/provinsi master bila tujuan pada resi kosong.
-        if not kota:
-            kota = str(kota_lama or "").strip().upper() or None
-        if not provinsi:
-            provinsi = str(provinsi_lama or "").strip().upper() or None
+        no_hp = no_hp_input or (str(hp_lama or "").strip() or None)
+        alamat = alamat_input or (str(alamat_lama or "").strip().upper() or None)
+        kota = kota_input or (str(kota_lama or "").strip().upper() or None)
+        provinsi = provinsi_input or (str(provinsi_lama or "").strip().upper() or None)
         sync_id = str(sync_id_lama or uuid.uuid4())
         nilai_lama = (
             str(hp_lama or "").strip() or None,
@@ -1207,9 +1299,7 @@ def _upsert_master_penerima_dari_buku_gudang(cursor, data, kode_cabang):
             str(provinsi_lama or "").strip().upper() or None,
             int(total_lama or 0),
         )
-        nilai_baru = (
-            no_hp, alamat, kota, provinsi, int(total or 0),
-        )
+        nilai_baru = (no_hp, alamat, kota, provinsi, int(total or 0))
         if nilai_lama != nilai_baru or not sync_id_lama:
             cursor.execute(
                 """
@@ -1235,12 +1325,11 @@ def _upsert_master_penerima_dari_buku_gudang(cursor, data, kode_cabang):
         """,
         (
             f"CNE-{uuid.uuid4().hex[:12].upper()}", kode_cabang, nama,
-            no_hp, alamat, kota, provinsi, int(total or 0),
+            no_hp_input, alamat_input, kota_input, provinsi_input, int(total or 0),
             str(data.get("pembayaran") or "TF / INVOICE").strip().upper(),
             str(uuid.uuid4()),
         ),
     )
-
 
 def _normalisasi_rincian_ringkas(data):
     """Bangun satu baris rincian dari kolom ringkasan data_resi.
@@ -1640,21 +1729,30 @@ def ambil_audit_resi(no_resi, kode_cabang=None, limit=200):
             conn.commit()
             conn.close()
 
-def simpan_transaksi_resi(data):
-    """Menyimpan resi, buku gudang, serta master pengirim/penerima dalam satu transaksi."""
+def simpan_transaksi_resi(data, *, return_final_number=False):
+    """Simpan Resi dan, bila diminta, kembalikan nomor final hasil allocator.
+
+    Kontrak lama ``(sukses, error)`` tetap dipertahankan untuk caller lain.
+    Caller yang perlu mencetak nomor yang benar-benar tersimpan dapat meminta
+    ``return_final_number=True`` untuk menerima ``(sukses, error, no_resi_final)``.
+    """
+    def _hasil(sukses, error, nomor_final=None):
+        if return_final_number:
+            return sukses, error, nomor_final
+        return sukses, error
 
     no_resi = str(data.get("no_resi", "")).strip().upper()
     kode_cabang = str(
         data.get("kode_cabang") or CURRENT_SESSION.get("kode_cabang", "PUSAT")
     ).strip().upper()
     if not no_resi:
-        return False, KesalahanTransaksiResi(KODE_DB_ERROR, "Nomor resi tidak boleh kosong.")
+        return _hasil(False, KesalahanTransaksiResi(KODE_DB_ERROR, "Nomor resi tidak boleh kosong."))
     if not kode_cabang:
-        return False, KesalahanTransaksiResi(KODE_DB_ERROR, "Kode cabang tidak boleh kosong.")
+        return _hasil(False, KesalahanTransaksiResi(KODE_DB_ERROR, "Kode cabang tidak boleh kosong."))
     try:
         _pastikan_boleh_tulis_cabang(kode_cabang)
     except PermissionError as exc:
-        return False, KesalahanTransaksiResi(KODE_DB_ERROR, str(exc))
+        return _hasil(False, KesalahanTransaksiResi(KODE_DB_ERROR, str(exc)))
 
     conn = None
     try:
@@ -1670,28 +1768,28 @@ def simpan_transaksi_resi(data):
         )
         if not no_resi:
             conn.rollback()
-            return False, KesalahanTransaksiResi(
+            return _hasil(False, KesalahanTransaksiResi(
                 KODE_DB_ERROR, "Nomor resi tidak boleh kosong."
-            )
+            ))
 
         if cursor.execute(
             "SELECT 1 FROM data_resi WHERE no_resi = ? LIMIT 1", (no_resi,)
         ).fetchone():
             conn.rollback()
-            return False, KesalahanTransaksiResi(
+            return _hasil(False, KesalahanTransaksiResi(
                 KODE_RESI_DUPLIKAT, "Nomor resi sudah ada di database."
-            )
+            ))
 
         varian_aktif = _cari_varian_resi_lokal_cursor(
             cursor, no_resi, kode_cabang
         )
         if varian_aktif:
             conn.rollback()
-            return False, KesalahanTransaksiResi(
+            return _hasil(False, KesalahanTransaksiResi(
                 KODE_RESI_DUPLIKAT,
                 "Resi dengan nomor dasar yang sama sudah ada sebagai varian "
                 f"pajak/nonpajak: {', '.join(varian_aktif)}. Satu nomor dasar hanya boleh memiliki satu Resi aktif.",
-            )
+            ))
 
         _insert_resi_baru(cursor, data, no_resi, kode_cabang)
         _ganti_rincian_resi(cursor, no_resi, data)
@@ -1700,23 +1798,23 @@ def simpan_transaksi_resi(data):
         _upsert_master_pengirim_resi(cursor, data, kode_cabang)
         _upsert_master_penerima_resi(cursor, data, kode_cabang)
         conn.commit()
-        return True, ""
+        return _hasil(True, "", no_resi)
 
     except sqlite3.IntegrityError as exc:
         _rollback(conn)
         message = str(exc)
         if "data_resi.no_resi" in message:
-            return False, KesalahanTransaksiResi(
+            return _hasil(False, KesalahanTransaksiResi(
                 KODE_RESI_DUPLIKAT, "Nomor resi sudah ada di database."
-            )
+            ))
         logger.exception("IntegrityError saat menyimpan transaksi resi")
-        return False, KesalahanTransaksiResi(
+        return _hasil(False, KesalahanTransaksiResi(
             KODE_DB_ERROR, f"Gagal menyimpan karena aturan database: {message}"
-        )
+        ))
     except Exception as exc:
         _rollback(conn)
         logger.exception("Gagal menyimpan transaksi resi")
-        return False, KesalahanTransaksiResi(KODE_DB_ERROR, f"Gagal menyimpan resi: {exc}")
+        return _hasil(False, KesalahanTransaksiResi(KODE_DB_ERROR, f"Gagal menyimpan resi: {exc}"))
     finally:
         _close(conn)
 
@@ -2036,6 +2134,7 @@ def _ambil_peta_status_penagihan_batch(no_resi_list):
             FROM invoice_resi ir
             INNER JOIN invoice_header h ON h.no_invoice = ir.no_invoice
             WHERE ir.no_resi COLLATE NOCASE IN ({placeholders})
+              AND UPPER(COALESCE(h.status, '')) <> 'BATAL'
             ORDER BY h.updated_at DESC, h.id DESC
             """,
             daftar,
@@ -2166,6 +2265,7 @@ def ambil_fingerprint_data_buku_gudang(kode_cabang, wilayah, tahun_terpilih):
             FROM invoice_resi AS ir
             INNER JOIN invoice_header AS h ON h.no_invoice = ir.no_invoice
             WHERE (ir.kode_cabang = ? OR ir.kode_cabang IS NULL)
+              AND UPPER(COALESCE(h.status, '')) <> 'BATAL'
               AND EXISTS (
                   SELECT 1
                   FROM data_resi AS r
@@ -2411,6 +2511,8 @@ def _update_buku_gudang_cursor(
     detail_barang=None,
 ):
     """Jalankan isi transaksi edit Buku Gudang memakai cursor aktif."""
+    no_resi_lama = str(no_resi or "").strip().upper()
+    no_resi = no_resi_lama
     row_lama = cursor.execute(
         """
         SELECT tanggal_masuk, status_resi, penerima, jenis_pajak, revision
@@ -2444,6 +2546,19 @@ def _update_buku_gudang_cursor(
 
     jenis_pajak_efektif = safe_updates.get("jenis_pajak", lama["jenis_pajak"])
     _sesuaikan_subtotal_buku_gudang(safe_updates, jenis_pajak_efektif)
+
+    # Samakan perilaku popup Buku Gudang dengan Tab Resi: suffix nomor Resi
+    # mengikuti jenis pajak. Rename dilakukan dalam transaksi yang sama agar
+    # parent, detail, Buku Gudang, relasi Invoice, dan outbox tetap konsisten.
+    # Jalankan hanya ketika field jenis_pajak memang dikirim oleh editor.
+    if "jenis_pajak" in safe_updates:
+        no_resi_target = sesuaikan_nomor_resi_dengan_pajak(
+            no_resi_lama, jenis_pajak_efektif
+        )
+        if no_resi_target and no_resi_target != no_resi_lama:
+            no_resi = _rename_resi_aman(
+                cursor, no_resi_lama, no_resi_target, kode_cabang
+            )
 
     if safe_updates:
         fields = [f"{column} = ?" for column in safe_updates]
@@ -2555,7 +2670,7 @@ def _update_buku_gudang_cursor(
     _catat_audit_resi(
         cursor,
         kode_cabang=kode_cabang,
-        no_resi_lama=no_resi,
+        no_resi_lama=no_resi_lama,
         no_resi_baru=no_resi,
         sumber="BUKU_GUDANG",
         snapshot_lama=snapshot_audit_lama,
@@ -2724,6 +2839,10 @@ def update_baris_buku_gudang(
             return False
         conn.commit()
         return True
+    except KesalahanTransaksiResi as exc:
+        _rollback(conn)
+        logger.warning("[Buku Gudang] Perubahan nomor Resi ditolak: %s", exc)
+        raise
     except sqlite3.Error as exc:
         _rollback(conn)
         logger.error("[Buku Gudang] Gagal memperbarui resi: %s", exc)
@@ -3222,7 +3341,14 @@ def _kumpulkan_nomor_resi_snapshot(value, *, izinkan_fallback=True):
     return fallback if izinkan_fallback else set()
 
 def ambil_invoice_terkait_resi(no_resi):
-    """Ambil Invoice terkait Resi; prioritaskan relasi invoice_resi, fallback snapshot."""
+    """Ambil Invoice terkait Resi; error baca harus diteruskan ke pemanggil.
+
+    Relasi ``invoice_resi`` adalah sumber utama. Fallback snapshot hanya dipakai
+    untuk database legacy yang memang belum memiliki tabel ``invoice_resi`` atau
+    ketika relasi tersedia tetapi belum berisi hasil. Kesalahan database lain
+    tidak boleh disamarkan sebagai daftar kosong karena dapat membuka edit Resi
+    yang sebenarnya sudah dipakai pada Invoice.
+    """
 
     kandidat = _varian_nomor_resi_pajak(no_resi)
     if not kandidat:
@@ -3240,12 +3366,23 @@ def ambil_invoice_terkait_resi(no_resi):
                 FROM invoice_header AS h
                 INNER JOIN invoice_resi AS ir ON ir.no_invoice = h.no_invoice
                 WHERE UPPER(ir.no_resi) IN ({placeholders})
+                  AND UPPER(COALESCE(h.status, '')) <> 'BATAL'
                 ORDER BY h.updated_at DESC, h.id DESC
                 """,
                 tuple(kandidat),
             ).fetchall()
-        except sqlite3.OperationalError:
-            rows_relasi = []
+        except sqlite3.OperationalError as exc:
+            pesan_error = str(exc).lower()
+            tabel_relasi_belum_tersedia = (
+                "no such table" in pesan_error
+                and "invoice_resi" in pesan_error
+            )
+            if not tabel_relasi_belum_tersedia:
+                raise
+            logger.info(
+                "[Invoice] Tabel invoice_resi belum tersedia; memakai fallback snapshot legacy."
+            )
+            rows_relasi = None
 
         if rows_relasi:
             return [
@@ -3259,6 +3396,8 @@ def ambil_invoice_terkait_resi(no_resi):
             ]
 
         # Fallback kompatibilitas untuk invoice legacy yang belum berhasil dibackfill.
+        # Semua error pada query ini diteruskan; hasil kosong hanya berarti query
+        # berhasil dan memang tidak menemukan snapshot yang memuat nomor Resi.
         rows = conn.execute(
             """
             SELECT h.no_invoice, h.status, h.tanggal,
@@ -3266,6 +3405,7 @@ def ambil_invoice_terkait_resi(no_resi):
             FROM invoice_header AS h
             INNER JOIN invoice_detail AS d
                 ON d.no_invoice = h.no_invoice
+            WHERE UPPER(COALESCE(h.status, '')) <> 'BATAL'
             ORDER BY h.updated_at DESC, h.id DESC, d.nomor_urut ASC
             """
         ).fetchall()
@@ -3299,8 +3439,12 @@ def ambil_invoice_terkait_resi(no_resi):
                 })
         return hasil
     except sqlite3.Error as exc:
-        logger.error("[Invoice] Gagal memeriksa keterkaitan Resi %s: %s", no_resi, exc)
-        return []
+        logger.error(
+            "[Invoice] Verifikasi keterkaitan Resi %s gagal; pemeriksaan harus dibatalkan: %s",
+            no_resi,
+            exc,
+        )
+        raise
     finally:
         _close(conn)
 
@@ -3338,18 +3482,18 @@ def _nomor_resi_snapshot_invoice_cursor(cursor, no_invoice):
     return hasil
 
 def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
-    """Ubah status tagihan Invoice secara atomic.
+    """Ubah status Invoice secara atomic.
 
-    ``LUNAS`` juga menandai seluruh Resi aktif yang tersimpan pada snapshot
-    Invoice sebagai ``SELESAI``. ``MACET`` dan ``BELUM LUNAS`` tidak mengubah
-    status operasional Resi.
+    ``LUNAS`` menandai Resi terkait sebagai ``SELESAI``. ``BATAL`` melepas
+    relasi operasional Resi, tetapi tetap mempertahankan header, detail, dan
+    metadata Invoice sebagai arsip. ``LUNAS`` dan ``BATAL`` bersifat terminal.
     """
 
     invoice = str(no_invoice or "").strip().upper()
     status = str(status_baru or "").strip().upper()
     if not invoice:
         return False, "Nomor invoice tidak boleh kosong."
-    if status not in {"BELUM LUNAS", "LUNAS", "MACET"}:
+    if status not in {"BELUM LUNAS", "LUNAS", "MACET", "BATAL"}:
         return False, "Status penagihan tidak valid."
 
     cabang = str(
@@ -3364,13 +3508,29 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
-        exists = cursor.execute(
-            "SELECT 1 FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+        existing = cursor.execute(
+            "SELECT status FROM invoice_header WHERE no_invoice = ? LIMIT 1",
             (invoice,),
         ).fetchone()
-        if not exists:
+        if not existing:
             conn.rollback()
             return False, f"Invoice {invoice} tidak ditemukan."
+
+        status_lama = str(existing[0] or "").strip().upper()
+        if status_lama == status:
+            conn.rollback()
+            return True, f"Invoice {invoice} sudah berstatus {status}."
+        if status_lama == "LUNAS":
+            conn.rollback()
+            return False, (
+                f"Invoice {invoice} sudah LUNAS dan tidak dapat dibatalkan "
+                "atau dikembalikan ke status penagihan sebelumnya."
+            )
+        if status_lama == "BATAL":
+            conn.rollback()
+            return False, (
+                f"Invoice {invoice} sudah BATAL dan statusnya tidak dapat diaktifkan kembali."
+            )
 
         cursor.execute(
             """
@@ -3380,6 +3540,15 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
             """,
             (status, invoice),
         )
+
+        if status == "BATAL":
+            # invoice_detail dan metadata_json tetap menjadi arsip snapshot.
+            # Relasi invoice_resi adalah relasi operasional aktif, sehingga dilepas
+            # agar Resi dapat kembali ke Billing Queue dan ditautkan ke Invoice baru.
+            cursor.execute(
+                "DELETE FROM invoice_resi WHERE no_invoice = ?",
+                (invoice,),
+            )
 
         if status == "LUNAS":
             snapshot_resi = _nomor_resi_snapshot_invoice_cursor(cursor, invoice)
@@ -3547,7 +3716,7 @@ def ambil_resi_belum_ditagihkan(
     tanggal_akhir=None,
     limit=1000,
 ):
-    """Ambil Resi yang belum mempunyai relasi Invoice untuk Billing Queue."""
+    """Ambil Resi yang belum terhubung ke Invoice aktif untuk Billing Queue."""
 
     cabang = str(
         kode_cabang or CURRENT_SESSION.get("kode_cabang", "PUSAT") or "PUSAT"
@@ -3559,11 +3728,21 @@ def ambil_resi_belum_ditagihkan(
         batas = 1000
 
     where = [
+        "COALESCE(TRIM(r.deleted_at), '') = ''",
         """
         NOT EXISTS (
             SELECT 1
             FROM invoice_resi AS ir
+            LEFT JOIN invoice_header AS ih ON ih.no_invoice = ir.no_invoice
             WHERE UPPER(ir.no_resi) = UPPER(r.no_resi)
+              AND (
+                  UPPER(COALESCE(ir.kode_cabang, '')) = UPPER(r.kode_cabang)
+                  OR ir.kode_cabang IS NULL
+              )
+              AND (
+                  ih.no_invoice IS NULL
+                  OR UPPER(COALESCE(ih.status, '')) <> 'BATAL'
+              )
         )
         """
     ]
@@ -3617,7 +3796,7 @@ def ambil_resi_belum_ditagihkan(
                    COALESCE(r.cbm, 0),
                    COALESCE(r.total_ongkir, 0),
                    COALESCE(r.jenis_pajak, 'NONPAJAK'),
-                   COALESCE(r.subtotal_ongkir, r.total_ongkir, 0),
+                   r.subtotal_ongkir,
                    COALESCE(r.status_resi, ''),
                    COALESCE(r.revision, 0)
             FROM data_resi AS r
@@ -3643,8 +3822,8 @@ def ambil_resi_belum_ditagihkan(
                 # tetapi Invoice akan memakai subtotal_ongkir sebagai dasar pajak.
                 "ongkir": str(row[10] if row[10] is not None else "0"),
                 "jenis_pajak": str(row[11] or "NONPAJAK").strip().upper(),
-                "subtotal_ongkir": str(
-                    row[12] if row[12] is not None else row[10] if row[10] is not None else "0"
+                "subtotal_ongkir": (
+                    None if row[12] is None else str(row[12])
                 ),
                 "status_resi": str(row[13] or "").strip().upper(),
                 "revision": int(row[14] or 0),
@@ -3653,13 +3832,56 @@ def ambil_resi_belum_ditagihkan(
         ]
     except sqlite3.Error as exc:
         logger.error("[Invoice] Gagal memuat Billing Queue: %s", exc)
-        return []
+        raise
     finally:
         _close(conn)
 
 
-def _resolve_resi_aktif_cursor(cursor, nomor_resi):
+def _item_invoice_memiliki_kolom_resi(items):
+    """True jika snapshot detail memuat field identitas Resi."""
+    for item in items or []:
+        raw = item.get("data_kolom") if isinstance(item, dict) else None
+        if isinstance(raw, dict):
+            data = raw
+        else:
+            try:
+                data = json.loads(str(raw or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                data = {}
+        if isinstance(data, dict) and any(
+            str(key or "").strip().casefold() in {"resi", "no_resi", "nomor_resi"}
+            for key in data
+        ):
+            return True
+    return False
+
+
+def _sumber_resi_dari_item_invoice(items):
+    """Ambil nomor Resi eksplisit dari kolom RESI pada detail Invoice."""
+    hasil = {}
+    for item in items or []:
+        raw = item.get("data_kolom") if isinstance(item, dict) else None
+        if isinstance(raw, dict):
+            data = raw
+        else:
+            try:
+                data = json.loads(str(raw or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            if str(key or "").strip().casefold() not in {"resi", "no_resi", "nomor_resi"}:
+                continue
+            nomor = str(value or "").strip().upper()
+            if nomor:
+                hasil[nomor] = {"no_resi": nomor, "kode_cabang": None, "revision": None}
+    return list(hasil.values())
+
+
+def _resolve_resi_aktif_cursor(cursor, nomor_resi, kode_cabang=None):
     nomor = str(nomor_resi or "").strip().upper()
+    cabang = str(kode_cabang or "").strip().upper()
     if not nomor:
         return None
     kandidat = [nomor]
@@ -3668,69 +3890,66 @@ def _resolve_resi_aktif_cursor(cursor, nomor_resi):
         if varian not in kandidat
     )
     for kandidat_nomor in kandidat:
-        row = cursor.execute(
-            """
+        query = """
             SELECT no_resi, kode_cabang
             FROM data_resi
             WHERE UPPER(no_resi) = UPPER(?)
-            LIMIT 1
-            """,
-            (kandidat_nomor,),
-        ).fetchone()
-        if row:
-            return (
-                str(row[0] or "").strip().upper(),
-                str(row[1] or "").strip().upper() or None,
+              AND COALESCE(TRIM(deleted_at), '') = ''
+        """
+        params = [kandidat_nomor]
+        if cabang:
+            query += " AND UPPER(kode_cabang) = ?"
+            params.append(cabang)
+        rows = cursor.execute(query, params).fetchall()
+        if len(rows) > 1:
+            raise ValueError(
+                f"Nomor Resi {nomor} ditemukan di beberapa cabang. Cantumkan cabang sumber yang benar."
             )
-    return nomor, None
+        if rows:
+            return (
+                str(rows[0][0] or "").strip().upper(),
+                str(rows[0][1] or "").strip().upper() or None,
+            )
+    return None
 
 
 def _sinkronkan_invoice_resi_cursor(cursor, no_invoice, items, source_resi=None):
-    """Sinkronkan relasi operasional Invoice-Resi hanya dari metadata sumber.
+    """Sinkronkan relasi operasional Invoice-Resi dalam transaksi yang sama.
 
-    ``source_resi`` dipisahkan dari kolom Invoice yang terlihat supaya relasi
-    operasional tetap utuh walaupun template menyembunyikan/menghapus kolom RESI.
-    Bila invoice legacy tidak memiliki metadata sumber, relasi lama dipertahankan.
+    Metadata sumber dipakai untuk Invoice dari Billing Queue. Jika tidak ada,
+    nomor Resi pada kolom detail dipakai untuk Invoice yang dibuat manual.
+    Template tanpa kolom Resi mempertahankan relasi yang sudah ada.
     """
-    relasi = set()
-
     sumber = source_resi if isinstance(source_resi, (list, tuple, set)) else []
-    if not sumber:
-        if cursor.execute(
-            "SELECT 1 FROM invoice_resi WHERE no_invoice = ? LIMIT 1",
-            (no_invoice,),
-        ).fetchone():
-            return
+    if not sumber and _item_invoice_memiliki_kolom_resi(items):
+        sumber = _sumber_resi_dari_item_invoice(items)
+    if not sumber and not _item_invoice_memiliki_kolom_resi(items):
+        return
 
     cursor.execute("DELETE FROM invoice_resi WHERE no_invoice = ?", (no_invoice,))
+    relasi = set()
     for item in sumber:
         if isinstance(item, dict):
             nomor_snapshot = str(
                 item.get("no_resi") or item.get("resi") or item.get("nomor_resi") or ""
             ).strip().upper()
-            kode_cabang_snapshot = str(
-                item.get("kode_cabang") or ""
-            ).strip().upper() or None
+            kode_cabang_snapshot = str(item.get("kode_cabang") or "").strip().upper() or None
         else:
             nomor_snapshot = str(item or "").strip().upper()
             kode_cabang_snapshot = None
-
         if not nomor_snapshot:
             continue
-        resolved = _resolve_resi_aktif_cursor(cursor, nomor_snapshot)
+        resolved = _resolve_resi_aktif_cursor(
+            cursor, nomor_snapshot, kode_cabang_snapshot
+        )
         if resolved:
-            no_resi_aktif, kode_cabang_aktif = resolved
-            if kode_cabang_snapshot and kode_cabang_aktif:
-                if kode_cabang_snapshot != str(kode_cabang_aktif).strip().upper():
-                    continue
-            relasi.add((no_resi_aktif, kode_cabang_aktif))
+            relasi.add(resolved)
 
     if relasi:
         cursor.executemany(
             """
-            INSERT OR IGNORE INTO invoice_resi (
-                no_invoice, no_resi, kode_cabang
-            ) VALUES (?, ?, ?)
+            INSERT INTO invoice_resi (no_invoice, no_resi, kode_cabang)
+            VALUES (?, ?, ?)
             """,
             [
                 (no_invoice, no_resi, kode_cabang)
@@ -3773,49 +3992,82 @@ def _alokasikan_nomor_invoice_otomatis_cursor(cursor, header):
     )
     return result.nomor
 
-def _validasi_source_resi_invoice_cursor(cursor, source_resi):
+def _validasi_source_resi_invoice_cursor(cursor, source_resi, no_invoice=None):
+    """Validasi Resi sumber, revision, status aktif, dan eksklusivitas Invoice."""
     sumber = source_resi if isinstance(source_resi, (list, tuple, set)) else []
+    sudah_diperiksa = set()
     for item in sumber:
-        if not isinstance(item, dict):
-            continue
-        nomor = str(item.get("no_resi") or item.get("resi") or "").strip().upper()
-        if not nomor:
-            continue
-        kode_cabang = str(item.get("kode_cabang") or "").strip().upper()
-        revision_diharapkan = item.get("revision")
-        try:
-            revision_diharapkan = int(revision_diharapkan)
-        except (TypeError, ValueError):
-            return f"Revision Resi {nomor} tidak valid. Muat ulang Billing Queue."
-
-        if kode_cabang:
-            row = cursor.execute(
-                """
-                SELECT revision
-                FROM data_resi
-                WHERE UPPER(no_resi) = UPPER(?) AND kode_cabang = ?
-                LIMIT 1
-                """,
-                (nomor, kode_cabang),
-            ).fetchone()
+        if isinstance(item, dict):
+            nomor = str(item.get("no_resi") or item.get("resi") or item.get("nomor_resi") or "").strip().upper()
+            kode_cabang = str(item.get("kode_cabang") or "").strip().upper()
+            raw_revision = item.get("revision")
         else:
-            row = cursor.execute(
-                """
-                SELECT revision
-                FROM data_resi
-                WHERE UPPER(no_resi) = UPPER(?)
-                LIMIT 1
-                """,
-                (nomor,),
-            ).fetchone()
+            nomor = str(item or "").strip().upper()
+            kode_cabang = ""
+            raw_revision = None
+        if not nomor or nomor in sudah_diperiksa:
+            continue
+        sudah_diperiksa.add(nomor)
 
-        if row is None:
-            return f"Resi sumber {nomor} tidak ditemukan. Muat ulang Billing Queue."
-        revision_sekarang = int(row[0] or 0)
-        if revision_sekarang != revision_diharapkan:
+        kandidat = sorted(_varian_nomor_resi_pajak(nomor))
+        placeholders = ",".join("?" for _ in kandidat)
+        query = f"""
+            SELECT no_resi, kode_cabang, revision
+            FROM data_resi
+            WHERE UPPER(no_resi) IN ({placeholders})
+              AND COALESCE(TRIM(deleted_at), '') = ''
+        """
+        params = list(kandidat)
+        if kode_cabang:
+            query += " AND UPPER(kode_cabang) = ?"
+            params.append(kode_cabang)
+        rows = cursor.execute(query, params).fetchall()
+
+        revision_diharapkan = None
+        if raw_revision not in (None, ""):
+            try:
+                revision_diharapkan = int(raw_revision)
+            except (TypeError, ValueError):
+                return f"Revision Resi {nomor} tidak valid. Muat ulang Billing Queue."
+
+        if not rows:
+            # Resi dari Billing Queue wajib masih aktif. Referensi manual yang
+            # bukan Resi lokal tetap boleh ditulis sebagai informasi eksternal.
+            if revision_diharapkan is not None:
+                return f"Resi sumber {nomor} tidak ditemukan atau sudah dihapus. Muat ulang Billing Queue."
+            continue
+        if len(rows) > 1:
+            return f"Nomor Resi {nomor} ditemukan di beberapa cabang. Pilih Resi berdasarkan cabang yang benar."
+
+        no_resi_aktif, cabang_aktif, revision_sekarang = rows[0]
+        if revision_diharapkan is not None and int(revision_sekarang or 0) != revision_diharapkan:
             return (
                 f"Resi {nomor} sudah berubah sejak dipilih. "
                 "Muat ulang Billing Queue sebelum menyimpan Invoice."
+            )
+
+        # Satu Resi aktif hanya boleh terhubung ke satu Invoice yang belum BATAL.
+        query_relasi = f"""
+            SELECT ir.no_invoice
+            FROM invoice_resi AS ir
+            LEFT JOIN invoice_header AS ih ON ih.no_invoice = ir.no_invoice
+            WHERE UPPER(ir.no_resi) IN ({placeholders})
+              AND (UPPER(ir.kode_cabang) = UPPER(?) OR ir.kode_cabang IS NULL)
+              AND (
+                  ih.no_invoice IS NULL
+                  OR UPPER(COALESCE(ih.status, '')) <> 'BATAL'
+              )
+        """
+        params_relasi = [*kandidat, str(cabang_aktif or "").strip().upper()]
+        if no_invoice:
+            query_relasi += " AND UPPER(ir.no_invoice) <> UPPER(?)"
+            params_relasi.append(str(no_invoice).strip().upper())
+        query_relasi += " LIMIT 1"
+        relasi = cursor.execute(query_relasi, params_relasi).fetchone()
+        if relasi:
+            return (
+                f"Resi {no_resi_aktif} sudah terhubung dengan Invoice {relasi[0]}. "
+                "Resi yang sama tidak dapat ditagihkan ke Invoice lain."
             )
     return None
 
@@ -3826,8 +4078,11 @@ def _simpan_header_invoice(cursor, header, no_invoice, now, is_update):
             "SELECT status FROM invoice_header WHERE no_invoice = ? LIMIT 1",
             (no_invoice,),
         ).fetchone()
-        if existing and str(existing[0] or "").strip().upper() == "LUNAS":
+        status_existing = str(existing[0] or "").strip().upper() if existing else ""
+        if status_existing == "LUNAS":
             return "Invoice berstatus LUNAS tidak dapat diubah."
+        if status_existing == "BATAL":
+            return "Invoice berstatus BATAL merupakan arsip dan tidak dapat diubah."
         cursor.execute(
             """
             UPDATE invoice_header
@@ -3890,6 +4145,8 @@ def simpan_atau_update_invoice(header, items, is_update=False):
     auto_prefix = str(header.get("auto_invoice_prefix") or "").strip().upper()
     if is_update and not no_invoice:
         return False, "Nomor invoice tidak boleh kosong."
+    if str(header.get("status") or "").strip().upper() == "BATAL":
+        return False, "Status BATAL hanya dapat ditetapkan melalui aksi Batalkan Invoice."
     if not items:
         return False, "Item invoice tidak boleh kosong."
     # Invoice terpusat di SBY; hak tulis diperiksa pada branch efektif.
@@ -3931,8 +4188,11 @@ def simpan_atau_update_invoice(header, items, is_update=False):
                 return False, "Nomor invoice tidak berhasil dibuat."
             header["no_invoice"] = no_invoice
 
+        source_resi = header.get("source_resi")
+        if not source_resi:
+            source_resi = _sumber_resi_dari_item_invoice(items)
         pesan = _validasi_source_resi_invoice_cursor(
-            cursor, header.get("source_resi")
+            cursor, source_resi, no_invoice
         )
         if pesan:
             conn.rollback()
@@ -3945,7 +4205,7 @@ def simpan_atau_update_invoice(header, items, is_update=False):
 
         _simpan_detail_invoice(cursor, no_invoice, items)
         _sinkronkan_invoice_resi_cursor(
-            cursor, no_invoice, items, header.get("source_resi")
+            cursor, no_invoice, items, source_resi
         )
         conn.commit()
         return True, "Sukses"
@@ -3990,11 +4250,9 @@ def ambil_histori_invoice(limit=300, keyword=""):
     if not keyword:
         query.append("LIMIT ?")
         params.append(max(1, int(limit)))
-    try:
-        return _fetchall("\n".join(query), tuple(params))
-    except Exception as e:
-        logger.error("[Invoice] Gagal mengambil histori: %s", e)
-        return []
+    # Error database diteruskan ke UI. Daftar kosong hanya berarti query
+    # berhasil dan memang tidak ada Invoice yang cocok.
+    return _fetchall("\n".join(query), tuple(params))
 
 def ambil_invoice_by_no(no_invoice):
     """Membaca data lengkap invoice (header & detail) untuk ditampilkan ke editor."""
@@ -4022,9 +4280,12 @@ def ambil_invoice_by_no(no_invoice):
         ).fetchall()
 
         return header, details
-    except Exception as e:
-        logger.error(f"[Invoice] Gagal baca detail invoice: {e}")
-        return None, None
+    except Exception:
+        logger.exception(
+            "[Invoice] Gagal baca detail invoice %s",
+            no_invoice,
+        )
+        raise
     finally:
         _close(conn)
 
@@ -4202,9 +4463,10 @@ def ambil_semua_master_penerima_full(kode_cabang):
                    COALESCE(p.pembayaran, 'TF / INVOICE'),
                    COALESCE(p.status_tagihan, 'NORMAL')
             FROM master_penerima p
-            LEFT JOIN data_resi r 
-                   ON r.kode_cabang = p.kode_cabang 
-                  AND TRIM(UPPER(r.penerima)) = TRIM(UPPER(p.nama))
+            LEFT JOIN data_resi r
+                   ON r.kode_cabang = p.kode_cabang
+                  AND TRIM(UPPER(COALESCE(r.penerima, ''))) = TRIM(UPPER(COALESCE(p.nama, '')))
+                  AND COALESCE(TRIM(r.deleted_at), '') = ''
             WHERE p.kode_cabang = ?
             GROUP BY p.id_penerima
             ORDER BY TRIM(COALESCE(p.nama, '')) COLLATE NOCASE ASC

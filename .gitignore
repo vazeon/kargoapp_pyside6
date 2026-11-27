@@ -1,0 +1,36 @@
+# Python environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+
+# Node modules
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# SQLite database
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
