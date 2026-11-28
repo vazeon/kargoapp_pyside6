@@ -81,6 +81,11 @@ class _InvoiceUniverBridge(QObject):
     def gridReady(self):
         self.owner._on_grid_ready()
 
+    @Slot()
+    def openPageSetup(self):
+        """Open Kargo's existing Page Setup dialog from the Univer ribbon."""
+        self.owner._on_page_setup_requested()
+
     @Slot(str)
     def snapshotAvailable(self, payload: str):
         self.owner._on_snapshot_available(payload)
@@ -142,6 +147,7 @@ class InvoiceSheetContainer(QWidget):
         self._last_error = ""
         self._fallback_label = None
         self._pending_pdf_callback = None
+        self._page_setup_dialog_open = False
         self._pending_pdf_progress_callback = None
         self._last_pdf_progress_message = ""
         self._pending_pdf_request_id = None
@@ -356,6 +362,64 @@ class InvoiceSheetContainer(QWidget):
         QTimer.singleShot(0, _dispatch_capture)
         return True
 
+    def capture_workbook(self, callback):
+        """Ambil snapshot semua sheet + model setiap invoice dari Univer."""
+        if (
+            not callable(callback)
+            or self._view is None
+            or not self._web_ready
+            or not self._grid_ready
+        ):
+            return False
+
+        source = (
+            "(() => {"
+            " try {"
+            "  const capture = window.kargoCaptureWorkbook;"
+            "  return typeof capture === 'function' ? capture() : null;"
+            " } catch (error) {"
+            "  console.error('[Kargo] Workbook capture failed', error);"
+            "  return null;"
+            " }"
+            "})()"
+        )
+
+        def _dispatch_capture():
+            if self._view is None or not self._web_ready or not self._grid_ready:
+                callback(None)
+                return
+            try:
+                self._view.page().runJavaScript(source, callback)
+            except Exception as exc:
+                print(f"[INVOICE-UNIVER] Workbook capture dispatch failed: {exc}")
+                callback(None)
+
+        QTimer.singleShot(0, _dispatch_capture)
+        return True
+
+    def add_invoice_sheet(self, payload, callback=None):
+        if not self._web_ready or not self._grid_ready:
+            return False
+        source = f"window.kargoAddInvoiceSheet({_json_dumps(payload)});"
+        self._run_js(source, callback)
+        return True
+
+    def set_invoice_sheet_meta(self, sheet_id, metadata):
+        if not self._web_ready or not self._grid_ready:
+            return False
+        self._run_js(
+            "window.kargoSetInvoiceSheetMeta(%s,%s);" % (
+                _json_dumps(str(sheet_id or "")), _json_dumps(metadata or {})
+            )
+        )
+        return True
+
+    def activate_invoice_sheet(self, sheet_id):
+        if not self._web_ready or not self._grid_ready:
+            return False
+        self._run_js(f"window.kargoActivateInvoiceSheet({_json_dumps(str(sheet_id or ''))});")
+        return True
+
     def apply_live_snapshot(self, payload):
         """Salin snapshot aktif ke model Python sebelum struktur sheet dibangun ulang."""
         if not isinstance(payload, str) or not payload.strip():
@@ -394,8 +458,14 @@ class InvoiceSheetContainer(QWidget):
             self._run_js(f"window.kargoApplyTheme({_json_dumps(self._pending_theme)});")
         if self._pending_snapshot:
             snapshot = self._pending_snapshot
+            sheet_metadata = getattr(self, "_pending_workbook_sheet_metadata", []) or []
             self._pending_snapshot = None
-            self._run_js(f"window.kargoRestoreSnapshot({_json_dumps(snapshot)});")
+            self._pending_workbook_sheet_metadata = []
+            self._run_js(
+                "window.kargoRestoreSnapshot(%s,%s);" % (
+                    _json_dumps(snapshot), _json_dumps(sheet_metadata)
+                )
+            )
         else:
             self._structure_dirty = True
             self._emit_model_to_web()
@@ -423,8 +493,6 @@ class InvoiceSheetContainer(QWidget):
             try:
                 invoice_data = owner_context()
             except Exception:
-                # The Invoice tab can still be finishing its first layout pass.
-                # A later Page Setup / PDF action will refresh the full context.
                 pass
         self.set_page_setup(self._pending_page_setup, invoice_data)
 
@@ -513,7 +581,18 @@ class InvoiceSheetContainer(QWidget):
             rows.append({
                 "id": token,
                 "cells": cells,
+                "hidden": deepcopy(hidden),
+                "source": self._model.row_source_metadata(row_index),
             })
+        sheet_meta = {}
+        owner_meta_builder = getattr(self._owner, "_meta_sheet_aktif_dari_form", None)
+        if callable(owner_meta_builder):
+            try:
+                active_id = str(getattr(self._owner, "_active_workbook_sheet_id", "") or "")
+                base_meta = getattr(self._owner, "_workbook_sheet_meta", {}).get(active_id, {})
+                sheet_meta = owner_meta_builder(base_meta)
+            except Exception as exc:
+                print(f"[INVOICE-UNIVER] Sheet metadata payload skipped: {exc}")
         return {
             "columns": columns,
             "rows": rows,
@@ -522,17 +601,18 @@ class InvoiceSheetContainer(QWidget):
             "amountKey": str(
                 getattr(self._owner, "active_template", {}).get("amount_key", "amount")
             ),
+            "sheetMeta": sheet_meta if isinstance(sheet_meta, dict) else {},
         }
 
     def _emit_model_to_web(self):
         self._refresh_scheduled = False
-        # The initial workbook must be sent as soon as the WebChannel is ready.
-        # Waiting for _grid_ready here creates a startup deadlock: Univer only
-        # emits gridReady after kargoLoadModel() creates the first workbook.
         if not self._web_ready or self._updates_suppressed:
             return
         payload = self._model_payload()
-        if not self._grid_ready or self._structure_dirty:
+        if self._grid_ready and bool(getattr(self._owner, "_workbook_mode_active", False)):
+            self._structure_dirty = False
+            self._run_js(f"window.kargoSyncActiveSheetModel({_json_dumps(payload)});")
+        elif not self._grid_ready or self._structure_dirty:
             self._structure_dirty = False
             self._run_js(f"window.kargoLoadModel({_json_dumps(payload)});")
         else:
@@ -608,14 +688,29 @@ class InvoiceSheetContainer(QWidget):
             self._handling_web_selection = False
 
     def _on_web_sheet_snapshot_changed(self, payload):
-        if self.mutation_locked:
-            self.refresh_univer()
-            return
         try:
             data = json.loads(payload or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             return
         if not isinstance(data, dict):
+            return
+
+        active_sheet_changed = bool(data.get("activeSheetChanged"))
+        if active_sheet_changed:
+            callback = getattr(self._owner, "_on_workbook_sheet_activated", None)
+            if callable(callback):
+                try:
+                    callback(
+                        str(data.get("sheetId") or ""),
+                        str(data.get("sheetName") or "Sheet"),
+                        data.get("sheetMeta") if isinstance(data.get("sheetMeta"), dict) else {},
+                        data.get("columns") if isinstance(data.get("columns"), list) else [],
+                    )
+                except Exception as exc:
+                    self._on_web_error(f"Gagal mengganti invoice sheet aktif: {exc}")
+                    return
+        if self.mutation_locked and not active_sheet_changed:
+            self.refresh_univer()
             return
 
         columns = data.get("columns")
@@ -698,11 +793,14 @@ class InvoiceSheetContainer(QWidget):
             incoming_tokens.append(token)
             raw_cells = raw_row.get("cells") or {}
             state = old_state.get(token, {})
-            hidden = dict(state.get("hidden") or {})
-            source = state.get("source")
+            raw_hidden = raw_row.get("hidden")
+            hidden = dict(raw_hidden) if isinstance(raw_hidden, dict) else dict(state.get("hidden") or {})
+            source = (
+                deepcopy(raw_row.get("source"))
+                if "source" in raw_row and isinstance(raw_row.get("source"), dict)
+                else (None if "source" in raw_row else state.get("source"))
+            )
 
-            # Preserve removed columns as hidden template values so switching
-            # back to another invoice template cannot silently discard them.
             active_keys = {col["key"] for col in normalized_columns}
             for old_key, old_value in (state.get("cells") or {}).items():
                 if old_key not in active_keys and old_value not in (None, ""):
@@ -803,7 +901,8 @@ class InvoiceSheetContainer(QWidget):
             self._suppress_model_refresh = False
             self._applying_web_snapshot = False
 
-        self._model.sheetEdited.emit()
+        if not active_sheet_changed:
+            self._model.sheetEdited.emit()
         if inserted_blank_row:
             self.refresh_univer()
 
@@ -811,6 +910,37 @@ class InvoiceSheetContainer(QWidget):
         QMessageBox.warning(self._owner or self, "Struktur Invoice", message)
         self._structure_dirty = True
         self.refresh_univer()
+
+    def _on_page_setup_requested(self):
+        """Open Page Setup safely after the WebChannel slot has returned."""
+        if self._page_setup_dialog_open:
+            return
+
+        handler = getattr(self._owner, "atur_page_setup", None)
+        if not callable(handler):
+            QMessageBox.warning(
+                self._owner or self,
+                "Page Setup",
+                "Dialog Page Setup Invoice belum tersedia pada tab aktif.",
+            )
+            return
+
+        self._page_setup_dialog_open = True
+
+        def _open_dialog():
+            try:
+                handler()
+            except Exception as exc:
+                QMessageBox.critical(
+                    self._owner or self,
+                    "Page Setup",
+                    f"Gagal membuka pengaturan halaman Invoice:\n{exc}",
+                )
+            finally:
+                self._page_setup_dialog_open = False
+
+        # Jangan membuka dialog modal di dalam callback WebChannel.
+        QTimer.singleShot(0, _open_dialog)
 
     def set_page_setup(self, page_setup: dict | None, invoice_data: dict | None = None):
         """Apply Page Setup to the live Univer page-break overlay."""
@@ -877,12 +1007,6 @@ class InvoiceSheetContainer(QWidget):
             setup = page_setup or {}
             invoice = invoice_data or {}
 
-            # Cache the latest settings in Python without invoking the WebEngine
-            # page here. kargoGeneratePdf receives the same settings below and
-            # applies them in JavaScript immediately before calculating the PDF.
-            # Calling set_page_setup() here would run kargoSetPageSetup() first,
-            # which synchronously recalculates the page-break plan before the
-            # preflight callback can return.
             try:
                 from utils.printer.invoice_page_setup import normalisasi_page_setup
                 self._pending_page_setup = normalisasi_page_setup(setup)
@@ -891,9 +1015,6 @@ class InvoiceSheetContainer(QWidget):
             if isinstance(invoice, dict):
                 self._pending_page_setup_invoice_data = deepcopy(invoice)
 
-            # First inspect the actual JavaScript context loaded by QtWebEngine.
-            # Searching the built bundle on disk is not sufficient: a stale page,
-            # failed script evaluation, or missing WebChannel slot can still occur.
             diagnostic_source = (
                 "(() => {"
                 " const d = typeof window.kargoPdfBridgeDiagnostics === 'function' "
@@ -1037,10 +1158,6 @@ class InvoiceSheetContainer(QWidget):
         self._pending_pdf_progress_callback = None
         self._pending_pdf_request_id = None
 
-        # Do not execute app callbacks inline from a Qt WebChannel slot. The
-        # initial PDF-ready callback opens a modal QDialog via exec(); queueing
-        # it lets the WebChannel delivery unwind before the nested dialog loop
-        # starts, so later QtWebEngine runJavaScript callbacks can be processed.
         byte_count = len(pdf_bytes) if isinstance(pdf_bytes, (bytes, bytearray)) else 0
         print(
             "[INVOICE-UNIVER] PDF request completed; callback queued: "
@@ -1140,24 +1257,27 @@ class InvoiceSheetContainer(QWidget):
     def get_univer_snapshot(self):
         return deepcopy(self._last_snapshot) if isinstance(self._last_snapshot, dict) else None
 
-    def restore_univer_snapshot(self, snapshot):
+    def restore_univer_snapshot(self, snapshot, sheets_metadata=None):
         if not isinstance(snapshot, dict):
             return
         self._pending_snapshot = deepcopy(snapshot)
+        self._pending_workbook_sheet_metadata = deepcopy(list(sheets_metadata or []))
         if self._web_ready:
             pending = self._pending_snapshot
+            sheet_metadata = self._pending_workbook_sheet_metadata
             self._pending_snapshot = None
-            self._run_js(f"window.kargoRestoreSnapshot({_json_dumps(pending)});")
+            self._pending_workbook_sheet_metadata = []
+            self._run_js(
+                "window.kargoRestoreSnapshot(%s,%s);" % (
+                    _json_dumps(pending), _json_dumps(sheet_metadata)
+                )
+            )
 
     def clear_univer_snapshot(self):
         self._pending_snapshot = None
         self._last_snapshot = None
 
     def apply_theme(self, is_dark, font_size_pt, row_height=28):
-        """Terapkan warna dan tipografi tanpa mengubah zoom QWebEngineView.
-
-        Zoom kanvas spreadsheet sepenuhnya dikelola oleh kontrol zoom Univer.
-        """
         palette = QApplication.palette()
         theme = {
             "dark": bool(is_dark),
@@ -1168,8 +1288,6 @@ class InvoiceSheetContainer(QWidget):
             "header": palette.color(QPalette.ColorRole.Button).name(),
             "fontSize": float(font_size_pt),
             "rowHeight": int(row_height),
-            # Gunakan sumber font global Kargo, bukan font widget model yang
-            # bisa berbeda jika model mendapat override lokal.
             "fontFamily": str(
                 dapatkan_font_aplikasi_aktif()
                 or self._model.font().family()

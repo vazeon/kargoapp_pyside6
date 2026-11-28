@@ -1,3 +1,4 @@
+# utils/validator.py
 from typing import Optional
 
 from PySide6.QtCore import QLocale

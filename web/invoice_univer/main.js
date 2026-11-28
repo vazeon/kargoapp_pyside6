@@ -1,3 +1,5 @@
+// web/invoice_univer/main.js
+
 import { createUniver, LocaleType, mergeLocales } from '@univerjs/presets'
 import { buildInvoicePdfBlob, calculateInvoicePagePlan } from './pdfmake_export.js'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
@@ -58,6 +60,9 @@ let eventDisposables = []
 let lastColumnKeys = []
 // Preserve Kargo row identity when native Univer sorting moves spreadsheet rows.
 let lastBridgeRows = []
+let sheetMetaById = {}
+let lastModelPayload = null
+let suppressSheetCreatedEvent = false
 
 // Kargo Page Break Preview. The same pagination calculator is shared with
 // pdfmake so editor guides and the generated PDF use one layout definition.
@@ -81,6 +86,34 @@ const APP_VERSION = '1.6.1'
 // Only rows/columns with model metadata or user-entered content are bridged to Python.
 const MIN_SHEET_ROWS = 100
 const MIN_SHEET_COLUMNS = 26
+
+function cloneJson(value) {
+  try { return JSON.parse(JSON.stringify(value ?? {})) } catch (_) { return {} }
+}
+
+function sheetMetaFor(sheet = worksheet) {
+  if (!sheet) return {}
+  const id = String(sheet.getSheetId?.() || '')
+  const rowMeta = sheet.getRowCustomMetadata?.(0) || {}
+  const stored = rowMeta.kargoInvoiceMeta
+  if (stored && typeof stored === 'object') sheetMetaById[id] = cloneJson(stored)
+  return cloneJson(sheetMetaById[id] || {})
+}
+
+function setSheetMetaFor(sheet, meta) {
+  if (!sheet) return false
+  const id = String(sheet.getSheetId?.() || '')
+  if (!id) return false
+  const value = cloneJson(meta)
+  sheetMetaById[id] = value
+  try {
+    const current = sheet.getRowCustomMetadata?.(0) || {}
+    sheet.setRowCustomMetadata(0, { ...current, kargoHeader: true, kargoInvoiceMeta: value })
+  } catch (error) {
+    console.warn('[Kargo] Unable to attach invoice metadata to sheet', id, error)
+  }
+  return true
+}
 
 function safeCall(name, ...args) {
   // Invoke the QWebChannel proxy as a property call so its receiver remains
@@ -422,6 +455,70 @@ function registerEvents() {
       safeCall('selectionChanged', JSON.stringify(selected))
     }))
   }
+  if (events.ActiveSheetChanged) {
+    eventDisposables.push(univerAPI.addEvent(events.ActiveSheetChanged, (params) => {
+      if (!params?.activeSheet) return
+      worksheet = params.activeSheet
+      lastBridgeRows = []
+      const meta = sheetMetaFor(worksheet)
+      locked = ['LUNAS', 'BATAL'].includes(String(meta.status || '').toUpperCase())
+      document.body.classList.toggle('kargo-locked', locked)
+      emitSnapshot({ activeSheetChanged: true })
+      schedulePageBreakDraw()
+    }))
+  }
+  if (events.SheetCreated) {
+    eventDisposables.push(univerAPI.addEvent(events.SheetCreated, (params) => {
+      const created = params?.worksheet
+      if (!created || suppressSheetCreatedEvent) return
+      const sheetId = String(created.getSheetId?.() || '')
+      if (!sheetId || sheetMetaById[sheetId]) return
+      const baseMeta = sheetMetaFor(worksheet)
+      const newMeta = {
+        ...baseMeta,
+        no_invoice: '',
+        status: 'DRAFT',
+        template_name: baseMeta.template_name || 'Standar',
+        sheet_name: String(created.getSheetName?.() || 'Sheet'),
+        is_new_sheet: true,
+      }
+      setSheetMetaFor(created, newMeta)
+      if (lastModelPayload) {
+        const blankPayload = { ...cloneJson(lastModelPayload), rows: [], locked: false }
+        populateWorksheetFromModel(created, blankPayload)
+      }
+      workbook?.setActiveSheet?.(created)
+      // Mark the workbook dirty when the user uses Univer's native + button.
+      scheduleSnapshot()
+    }))
+  }
+  if (events.BeforeSheetDelete) {
+    eventDisposables.push(univerAPI.addEvent(events.BeforeSheetDelete, (params) => {
+      const target = params?.worksheet
+      const meta = sheetMetaFor(target)
+      if (String(meta.no_invoice || '').trim()) {
+        params.cancel = true
+        console.warn('[Kargo] Sheet invoice tersimpan tidak dapat dihapus dari workbook.')
+      }
+    }))
+  }
+  if (events.SheetDeleted) {
+    eventDisposables.push(univerAPI.addEvent(events.SheetDeleted, (params) => {
+      const sheetId = String(params?.sheetId || '')
+      if (sheetId) delete sheetMetaById[sheetId]
+      scheduleSnapshot()
+    }))
+  }
+  if (events.SheetNameChanged) {
+    eventDisposables.push(univerAPI.addEvent(events.SheetNameChanged, (params) => {
+      const target = params?.worksheet
+      if (!target) return
+      const meta = sheetMetaFor(target)
+      meta.sheet_name = String(params?.newName || target.getSheetName?.() || '')
+      setSheetMetaFor(target, meta)
+      scheduleSnapshot()
+    }))
+  }
   if (events.BeforeSheetEditStart) {
     eventDisposables.push(univerAPI.addEvent(events.BeforeSheetEditStart, (event) => {
       if (locked) {
@@ -436,7 +533,11 @@ function registerEvents() {
     eventDisposables.push(univerAPI.addEvent(events.BeforeCommandExecute, (event) => {
       if (!locked) return
       const id = String(event?.id || '').toLowerCase()
-      if (id.includes('sheet.command') || id.includes('sheet.command.')) event.cancel = true
+      const isSheetCommand = id.includes('sheet.command') || id.includes('sheet.command.')
+      // A paid/cancelled invoice sheet is immutable, but users must still be
+      // able to navigate to another sheet in the same workbook.
+      const isSheetActivation = /active|activate|switch/.test(id)
+      if (isSheetCommand && !isSheetActivation) event.cancel = true
     }))
   }
 }
@@ -454,7 +555,18 @@ function currentSnapshot() {
   if (!workbook || !worksheet) return null
   try {
     const saved = workbook.save()
-    return saved && typeof saved === 'object' ? saved : null
+    if (!saved || typeof saved !== 'object') return null
+    const sheetMeta = {}
+    for (const sheet of (workbook.getSheets?.() || [])) {
+      const id = String(sheet.getSheetId?.() || '')
+      if (id) sheetMeta[id] = sheetMetaFor(sheet)
+    }
+    saved.custom = {
+      ...(saved.custom && typeof saved.custom === 'object' ? saved.custom : {}),
+      kargoInvoiceSheets: sheetMeta,
+      kargoActiveSheetId: String(worksheet.getSheetId?.() || ''),
+    }
+    return saved
   } catch (error) {
     console.error('[Kargo] Unable to save Univer snapshot', error)
     return null
@@ -618,12 +730,22 @@ function buildBridgePayload() {
       }
       cells[key] = { value, formula }
     }
-    rows.push({ id, cells })
+    rows.push({
+      id,
+      cells,
+      hidden: cloneJson(meta.kargoHiddenValues || {}),
+      source: meta.kargoSourceResi && typeof meta.kargoSourceResi === 'object'
+        ? cloneJson(meta.kargoSourceResi) : null,
+    })
     nextBridgeRows.push({ id, signature: record.signature })
   }
   lastBridgeRows = nextBridgeRows
   let saved = currentSnapshot()
+  const activeMeta = sheetMetaFor(worksheet)
   return {
+    sheetId: String(worksheet.getSheetId?.() || ''),
+    sheetName: String(worksheet.getSheetName?.() || 'Sheet 1'),
+    sheetMeta: activeMeta,
     columns,
     rows,
     rowTokens,
@@ -634,7 +756,7 @@ function buildBridgePayload() {
   }
 }
 
-async function emitSnapshot() {
+async function emitSnapshot(options = {}) {
   if (!worksheet || programmaticChange) return
   try {
     // Do not wait for onCalculationResultApplied() here: that API waits for a
@@ -645,6 +767,7 @@ async function emitSnapshot() {
     if (!worksheet || programmaticChange) return
     const payload = buildBridgePayload()
     if (!payload) return
+    if (options?.activeSheetChanged) payload.activeSheetChanged = true
     const json = JSON.stringify(payload)
     safeCall('sheetSnapshotChanged', json)
     safeCall('snapshotAvailable', json)
@@ -672,10 +795,65 @@ function registerColumnMetadata(sheet, columns) {
 function registerRowMetadata(sheet, rows) {
   const metadata = {}
   rows.forEach((row, index) => {
-    metadata[index + 1] = { kargoRowId: String(row.id || newId()) }
+    metadata[index + 1] = {
+      kargoRowId: String(row.id || newId()),
+      kargoHiddenValues: cloneJson(row.hidden || {}),
+      kargoSourceResi: row.source && typeof row.source === 'object' ? cloneJson(row.source) : null,
+    }
   })
   sheet.setRowCustom(metadata)
-  sheet.setRowCustomMetadata(0, { kargoHeader: true })
+  const headerMeta = sheet.getRowCustomMetadata?.(0) || {}
+  sheet.setRowCustomMetadata(0, { ...headerMeta, kargoHeader: true })
+}
+
+function populateWorksheetFromModel(targetSheet, payload) {
+  if (!targetSheet) return false
+  const columns = Array.isArray(payload?.columns) ? payload.columns : []
+  const rows = Array.isArray(payload?.rows) ? payload.rows : []
+  const modelColumnCount = Math.max(1, columns.length)
+  const modelRowCount = Math.max(2, rows.length + 1)
+  const columnCount = Math.max(MIN_SHEET_COLUMNS, modelColumnCount)
+  const rowCount = Math.max(MIN_SHEET_ROWS, modelRowCount)
+  try {
+    targetSheet.clear()
+    targetSheet.setRowCount(rowCount)
+    targetSheet.setColumnCount(columnCount)
+    const matrix = [columns.map((column) => String(column.title || column.key || ''))]
+    for (const row of rows) {
+      matrix.push(columns.map((column) => {
+        const cell = row.cells?.[column.key] || {}
+        return parseNumber(cell.value, column.type)
+      }))
+    }
+    targetSheet.getRange(`A1:${columnName(modelColumnCount - 1)}${modelRowCount}`).setValues(matrix)
+    registerColumnMetadata(targetSheet, columns)
+    registerRowMetadata(targetSheet, rows)
+    targetSheet.setFrozenRows(1)
+    columns.forEach((column, index) => {
+      targetSheet.setColumnWidth(index, Number(column.width || 110))
+      if (column.type === 'currency') {
+        targetSheet.getRange(`${columnName(index)}2:${columnName(index)}${rowCount}`).setNumberFormat('"Rp" #,##0')
+      } else if (column.type === 'decimal') {
+        targetSheet.getRange(`${columnName(index)}2:${columnName(index)}${rowCount}`).setNumberFormat('#,##0.##')
+      } else if (column.type === 'integer') {
+        targetSheet.getRange(`${columnName(index)}2:${columnName(index)}${rowCount}`).setNumberFormat('#,##0')
+      }
+    })
+    const header = targetSheet.getRange(`A1:${columnName(columnCount - 1)}1`)
+    header.setFontWeight('bold')
+    header.setHorizontalAlignment('center')
+    header.setBackgroundColor('#e7ebf0')
+    rows.forEach((row, rowIndex) => {
+      columns.forEach((column, columnIndex) => {
+        const formula = String(row.cells?.[column.key]?.formula || '')
+        if (formula) targetSheet.getRange(`${columnName(columnIndex)}${rowIndex + 2}`).setFormula(formula)
+      })
+    })
+    return true
+  } catch (error) {
+    console.error('[Kargo] Populate worksheet failed', error)
+    return false
+  }
 }
 
 function createWorkbookFromModel(payload) {
@@ -690,51 +868,11 @@ function createWorkbookFromModel(payload) {
     worksheet = workbook.getActiveSheet()
     const columns = Array.isArray(payload.columns) ? payload.columns : []
     const rows = Array.isArray(payload.rows) ? payload.rows : []
-    const modelColumnCount = Math.max(1, columns.length)
-    const modelRowCount = Math.max(2, rows.length + 1)
-    const columnCount = Math.max(MIN_SHEET_COLUMNS, modelColumnCount)
-    const rowCount = Math.max(MIN_SHEET_ROWS, modelRowCount)
-    worksheet.setRowCount(rowCount)
-    worksheet.setColumnCount(columnCount)
-
-    const matrix = [columns.map((column) => String(column.title || column.key || ''))]
-    for (const row of rows) {
-      const values = columns.map((column) => {
-        const cell = row.cells?.[column.key] || {}
-        return parseNumber(cell.value, column.type)
-      })
-      matrix.push(values)
-    }
-    worksheet.getRange(`A1:${columnName(modelColumnCount - 1)}${modelRowCount}`).setValues(matrix)
-    registerColumnMetadata(worksheet, columns)
-    registerRowMetadata(worksheet, rows)
-    worksheet.setFrozenRows(1)
+    if (!populateWorksheetFromModel(worksheet, payload)) throw new Error('Gagal membuat sheet invoice.')
+    sheetMetaById = {}
+    setSheetMetaFor(worksheet, payload.sheetMeta || {})
+    lastModelPayload = cloneJson(payload)
     workbook.setNumfmtLocal?.('id')
-    columns.forEach((column, index) => {
-      worksheet.setColumnWidth(index, Number(column.width || 110))
-      if (column.type === 'currency') {
-        worksheet.getRange(`${columnName(index)}2:${columnName(index)}${rowCount}`).setNumberFormat('"Rp" #,##0')
-      } else if (column.type === 'decimal') {
-        worksheet.getRange(`${columnName(index)}2:${columnName(index)}${rowCount}`).setNumberFormat('#,##0.##')
-      } else if (column.type === 'integer') {
-        worksheet.getRange(`${columnName(index)}2:${columnName(index)}${rowCount}`).setNumberFormat('#,##0')
-      }
-    })
-    if (columnCount > 0) {
-      const header = worksheet.getRange(`A1:${columnName(columnCount - 1)}1`)
-      header.setFontWeight('bold')
-      header.setHorizontalAlignment('center')
-      header.setBackgroundColor('#e7ebf0')
-    }
-    rows.forEach((row, rowIndex) => {
-      columns.forEach((column, columnIndex) => {
-        const formula = String(row.cells?.[column.key]?.formula || '')
-        if (formula) {
-          const address = `${columnName(columnIndex)}${rowIndex + 2}`
-          worksheet.getRange(address).setFormula(formula)
-        }
-      })
-    })
     locked = Boolean(payload.locked)
     registerEvents()
     if (locked) document.body.classList.add('kargo-locked')
@@ -742,7 +880,9 @@ function createWorkbookFromModel(payload) {
     safeCall('gridReady')
     const snapshotPayload = buildBridgePayload()
     if (snapshotPayload) {
-      safeCall('snapshotAvailable', JSON.stringify(snapshotPayload))
+      const json = JSON.stringify({ ...snapshotPayload, activeSheetChanged: true })
+      safeCall('sheetSnapshotChanged', json)
+      safeCall('snapshotAvailable', json)
       refreshPageBreakPlan(snapshotPayload.workbook)
     }
   } finally {
@@ -764,7 +904,19 @@ function syncWorkbookFromModel(payload) {
   const sameKeys = keys.length === lastColumnKeys.length && keys.every((key, index) => key === lastColumnKeys[index])
   const targetColumns = Math.max(MIN_SHEET_COLUMNS, columns.length)
   if (!sameKeys || oldColumns !== targetColumns) {
-    createWorkbookFromModel(payload)
+    programmaticChange = true
+    try {
+      if (!populateWorksheetFromModel(worksheet, payload)) throw new Error('Gagal memperbarui struktur sheet aktif.')
+      lastBridgeRows = []
+      lastModelPayload = cloneJson(payload)
+      const snapshotPayload = buildBridgePayload()
+      if (snapshotPayload) {
+        safeCall('snapshotAvailable', JSON.stringify(snapshotPayload))
+        refreshPageBreakPlan(snapshotPayload.workbook)
+      }
+    } finally {
+      programmaticChange = false
+    }
     return
   }
   const metadataMismatch = columns.some((column, columnIndex) => {
@@ -772,7 +924,19 @@ function syncWorkbookFromModel(payload) {
     return meta.kargoKey !== column.key
   })
   if (metadataMismatch) {
-    createWorkbookFromModel(payload)
+    programmaticChange = true
+    try {
+      if (!populateWorksheetFromModel(worksheet, payload)) throw new Error('Gagal menyelaraskan metadata sheet aktif.')
+      lastBridgeRows = []
+      lastModelPayload = cloneJson(payload)
+      const snapshotPayload = buildBridgePayload()
+      if (snapshotPayload) {
+        safeCall('snapshotAvailable', JSON.stringify(snapshotPayload))
+        refreshPageBreakPlan(snapshotPayload.workbook)
+      }
+    } finally {
+      programmaticChange = false
+    }
     return
   }
   programmaticChange = true
@@ -804,6 +968,7 @@ function syncWorkbookFromModel(payload) {
       const current = worksheet.getRowCustomMetadata(rowIndex + 1) || {}
       if (current.kargoRowId !== row.id) worksheet.setRowCustomMetadata(rowIndex + 1, { kargoRowId: row.id })
     })
+    lastModelPayload = cloneJson(payload)
     locked = Boolean(payload.locked)
     if (locked) document.body.classList.add('kargo-locked')
     else document.body.classList.remove('kargo-locked')
@@ -857,7 +1022,7 @@ function getRestoredSheetRowCount(sheetSnapshot) {
   return Math.max(MIN_SHEET_ROWS, lastUsedRow + 1)
 }
 
-function restoreWorkbook(snapshot) {
+function restoreWorkbook(snapshot, sheetsMetadata = []) {
   if (!snapshot || typeof snapshot !== 'object') return
   programmaticChange = true
   lastBridgeRows = []
@@ -866,7 +1031,42 @@ function restoreWorkbook(snapshot) {
       try { univerAPI.disposeUnit(workbook.getId()) } catch (_) { /* Ignore old workbook. */ }
     }
     workbook = univerAPI.createWorkbook(snapshot)
-    worksheet = workbook.getActiveSheet()
+    const snapshotCustom = snapshot.custom && typeof snapshot.custom === 'object' ? snapshot.custom : {}
+    sheetMetaById = cloneJson(snapshotCustom.kargoInvoiceSheets || {})
+    const restoredSheets = workbook.getSheets?.() || []
+    for (const [index, sheetData] of (Array.isArray(sheetsMetadata) ? sheetsMetadata : []).entries()) {
+      const targetSheetId = String(sheetData?.sheetId || '')
+      // Legacy snapshots predate the persistent Kargo sheet_id. Match the
+      // stored sheet metadata by workbook order if its historical ID differs.
+      const targetSheet = (targetSheetId ? workbook.getSheetBySheetId(targetSheetId) : null)
+        || restoredSheets[index]
+      if (!targetSheet) continue
+      const actualSheetId = String(targetSheet.getSheetId?.() || '')
+      if (actualSheetId && targetSheetId && actualSheetId !== targetSheetId) {
+        sheetMetaById[actualSheetId] = cloneJson(sheetData.sheetMeta || {})
+      }
+      if (sheetData.sheetMeta && typeof sheetData.sheetMeta === 'object') {
+        setSheetMetaFor(targetSheet, sheetData.sheetMeta)
+      }
+      const rowMetadata = Array.isArray(sheetData.rows) ? sheetData.rows : []
+      rowMetadata.forEach((rowData, index) => {
+        const current = targetSheet.getRowCustomMetadata?.(index + 1) || {}
+        targetSheet.setRowCustomMetadata(index + 1, {
+          ...current,
+          kargoRowId: String(current.kargoRowId || rowData?.id || newId()),
+          kargoHiddenValues: cloneJson(rowData?.hidden || {}),
+          kargoSourceResi: rowData?.source && typeof rowData.source === 'object'
+            ? cloneJson(rowData.source) : null,
+        })
+      })
+    }
+    const requestedActiveId = String(snapshotCustom.kargoActiveSheetId || '')
+    const requestedActive = requestedActiveId ? workbook.getSheetBySheetId(requestedActiveId) : null
+    worksheet = requestedActive || restoredSheets[0] || workbook.getActiveSheet()
+    if (requestedActive) workbook.setActiveSheet(requestedActive)
+    const activeMeta = sheetMetaFor(worksheet)
+    locked = ['LUNAS', 'BATAL'].includes(String(activeMeta.status || '').toUpperCase())
+    document.body.classList.toggle('kargo-locked', locked)
     const restoredSheet = worksheet.getSheet().getSnapshot()
     const targetRows = getRestoredSheetRowCount(restoredSheet)
     const restoredRows = Math.max(1, Number(restoredSheet.rowCount || 1))
@@ -878,7 +1078,16 @@ function restoreWorkbook(snapshot) {
     safeCall('gridReady')
     const payload = buildBridgePayload()
     if (payload) {
-      safeCall('snapshotAvailable', JSON.stringify(payload))
+      lastModelPayload = {
+        columns: cloneJson(payload.columns || []),
+        rows: cloneJson(payload.rows || []),
+        locked,
+        locale: 'id',
+      }
+      payload.activeSheetChanged = true
+      const json = JSON.stringify(payload)
+      safeCall('sheetSnapshotChanged', json)
+      safeCall('snapshotAvailable', json)
       refreshPageBreakPlan(payload.workbook)
     }
   } catch (error) {
@@ -887,6 +1096,121 @@ function restoreWorkbook(snapshot) {
   } finally {
     programmaticChange = false
   }
+}
+
+function captureWorkbookPayload() {
+  if (!workbook || !worksheet) return null
+  const activeSheetId = String(worksheet.getSheetId?.() || '')
+  const originalSheet = worksheet
+  const originalRows = lastBridgeRows
+  const originalKeys = lastColumnKeys
+  const sheets = []
+  try {
+    for (const sheet of workbook.getSheets?.() || []) {
+      worksheet = sheet
+      lastBridgeRows = []
+      const payload = buildBridgePayload()
+      if (!payload) continue
+      const meta = sheetMetaFor(sheet)
+      sheets.push({
+        sheetId: String(sheet.getSheetId?.() || ''),
+        sheetName: String(sheet.getSheetName?.() || 'Sheet'),
+        sheetMeta: meta,
+        columns: payload.columns,
+        rows: payload.rows,
+        rowTokens: payload.rowTokens,
+      })
+    }
+    worksheet = workbook.getSheetBySheetId(activeSheetId) || originalSheet
+    lastBridgeRows = originalRows
+    lastColumnKeys = originalKeys
+    return JSON.stringify({
+      workbookSnapshot: currentSnapshot(),
+      activeSheetId,
+      sheets,
+    })
+  } catch (error) {
+    worksheet = originalSheet
+    lastBridgeRows = originalRows
+    lastColumnKeys = originalKeys
+    console.error('[Kargo] Capture workbook failed', error)
+    return null
+  }
+}
+
+function addInvoiceSheet(payload) {
+  if (!workbook || !payload) return null
+  const name = String(payload.sheetName || `Invoice ${workbook.getSheets().length + 1}`)
+  const previousLock = locked
+  try {
+    // Kargo can add a new invoice sheet even while the active invoice is locked.
+    // The new sheet is a separate draft; the paid sheet remains immutable.
+    locked = false
+    document.body.classList.remove('kargo-locked')
+    suppressSheetCreatedEvent = true
+    const sheet = workbook.insertSheet(name)
+    suppressSheetCreatedEvent = false
+    if (!sheet) {
+      locked = previousLock
+      document.body.classList.toggle('kargo-locked', locked)
+      return null
+    }
+    const model = {
+      columns: Array.isArray(payload.columns) ? payload.columns : [],
+      rows: [],
+      locked: false,
+    }
+    if (!populateWorksheetFromModel(sheet, model)) {
+      locked = previousLock
+      document.body.classList.toggle('kargo-locked', locked)
+      return null
+    }
+    const meta = {
+      ...(payload.sheetMeta && typeof payload.sheetMeta === 'object' ? payload.sheetMeta : {}),
+      no_invoice: '',
+      status: 'DRAFT',
+      sheet_name: name,
+      is_new_sheet: true,
+    }
+    setSheetMetaFor(sheet, meta)
+    workbook.setActiveSheet(sheet)
+    lastBridgeRows = []
+    locked = false
+    lastModelPayload = cloneJson(model)
+    document.body.classList.remove('kargo-locked')
+    const activePayload = buildBridgePayload()
+    if (activePayload) {
+      activePayload.activeSheetChanged = true
+      const json = JSON.stringify(activePayload)
+      safeCall('sheetSnapshotChanged', json)
+      safeCall('snapshotAvailable', json)
+      refreshPageBreakPlan(activePayload.workbook)
+    }
+    return String(sheet.getSheetId?.() || '')
+  } catch (error) {
+    suppressSheetCreatedEvent = false
+    locked = previousLock
+    document.body.classList.toggle('kargo-locked', locked)
+    console.error('[Kargo] Add invoice sheet failed', error)
+    safeCall('webError', `Gagal menambah sheet invoice: ${error?.message || error}`)
+    return null
+  }
+}
+
+function setInvoiceSheetMeta(sheetId, meta) {
+  if (!workbook) return false
+  const sheet = sheetId ? workbook.getSheetBySheetId(String(sheetId)) : worksheet
+  if (!sheet) return false
+  setSheetMetaFor(sheet, meta)
+  return true
+}
+
+function activateInvoiceSheet(sheetId) {
+  if (!workbook || !sheetId) return false
+  const sheet = workbook.getSheetBySheetId(String(sheetId))
+  if (!sheet) return false
+  workbook.setActiveSheet(sheet)
+  return true
 }
 
 function setModelCell(row, key, value, formula) {
@@ -949,6 +1273,55 @@ function getKargoNativeRibbonTabList() {
   }) || null
 }
 
+function ensureKargoRibbonTooltipSuppression(tabList) {
+  if (!tabList) return
+
+  // Hide only tooltip popups triggered by the top-level ribbon tabs. Tooltips
+  // for buttons, selectors, cells and context menus remain native Univer UI.
+  if (!document.getElementById('kargo-main-ribbon-tooltip-style')) {
+    const style = document.createElement('style')
+    style.id = 'kargo-main-ribbon-tooltip-style'
+    style.textContent = `
+      html.kargo-main-ribbon-tooltip-off [role="tooltip"],
+      html.kargo-main-ribbon-tooltip-off .univer-tooltip {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    `
+    document.head.appendChild(style)
+  }
+
+  const triggerSelector = 'button[role="tab"], button[data-kargo-page-setup="true"]'
+  for (const button of tabList.querySelectorAll(triggerSelector)) {
+    // Remove browser-native title tooltips if a Univer version adds them.
+    button.removeAttribute('title')
+    button.removeAttribute('data-tooltip')
+  }
+
+  if (tabList.dataset.kargoTooltipSuppressionReady === 'true') return
+  tabList.dataset.kargoTooltipSuppressionReady = 'true'
+
+  const isRibbonTabTarget = (target) => {
+    if (!(target instanceof Element)) return false
+    return Boolean(target.closest(triggerSelector))
+  }
+  const hideTooltip = () => document.documentElement.classList.add('kargo-main-ribbon-tooltip-off')
+  const showTooltip = () => document.documentElement.classList.remove('kargo-main-ribbon-tooltip-off')
+
+  tabList.addEventListener('pointerover', (event) => {
+    if (isRibbonTabTarget(event.target)) hideTooltip()
+  }, true)
+  tabList.addEventListener('pointerleave', showTooltip)
+  tabList.addEventListener('focusin', (event) => {
+    if (isRibbonTabTarget(event.target)) hideTooltip()
+  }, true)
+  tabList.addEventListener('focusout', (event) => {
+    if (!isRibbonTabTarget(event.relatedTarget)) showTooltip()
+  }, true)
+}
+
 function ensureKargoPageSetupRibbonButton() {
   const root = document.getElementById('univer-app')
   if (!root) return false
@@ -958,8 +1331,14 @@ function ensureKargoPageSetupRibbonButton() {
   const tabList = getKargoNativeRibbonTabList()
   if (!tabList) return false
 
+  ensureKargoRibbonTooltipSuppression(tabList)
+
   const current = tabList.querySelector('[data-kargo-page-setup="true"]')
-  if (current) return true
+  if (current) {
+    current.removeAttribute('title')
+    ensureKargoRibbonTooltipSuppression(tabList)
+    return true
+  }
 
   const nativeTabs = [...tabList.querySelectorAll('button[role="tab"]')]
   if (!nativeTabs.length) return false
@@ -973,7 +1352,6 @@ function ensureKargoPageSetupRibbonButton() {
   button.type = 'button'
   button.dataset.kargoPageSetup = 'true'
   button.textContent = 'Page Setup'
-  button.title = 'Atur ukuran kertas, orientasi, margin, dan scaling Invoice'
   button.setAttribute('aria-label', 'Page Setup Invoice')
   button.setAttribute('aria-haspopup', 'dialog')
   button.tabIndex = 0
@@ -1007,6 +1385,7 @@ function ensureKargoPageSetupRibbonButton() {
   })
 
   referenceTab.insertAdjacentElement('afterend', button)
+  ensureKargoRibbonTooltipSuppression(tabList)
   return true
 }
 
@@ -1058,7 +1437,7 @@ window.kargoCaptureCurrentModel = () => {
     return null
   }
 }
-window.kargoRestoreSnapshot = (snapshot) => restoreWorkbook(snapshot)
+window.kargoRestoreSnapshot = (snapshot, sheetsMetadata = []) => restoreWorkbook(snapshot, sheetsMetadata)
 window.kargoSetPageSetup = (pageSetup = {}, invoiceData = null) => {
   currentPageSetup = { ...(currentPageSetup || {}), ...(pageSetup || {}) }
   if (invoiceData && typeof invoiceData === 'object') currentInvoicePdfData = { ...invoiceData }
@@ -1157,6 +1536,11 @@ window.kargoGeneratePdf = async (pageSetup = {}, invoiceData = null, requestId =
     sendPdfEvent('pdfError', { message: String(error?.message || error) })
   }
 }
+window.kargoCaptureWorkbook = () => captureWorkbookPayload()
+window.kargoAddInvoiceSheet = (payload) => addInvoiceSheet(payload)
+window.kargoSetInvoiceSheetMeta = (sheetId, meta) => setInvoiceSheetMeta(sheetId, meta)
+window.kargoActivateInvoiceSheet = (sheetId) => activateInvoiceSheet(sheetId)
+window.kargoSyncActiveSheetModel = (payload) => syncWorkbookFromModel(payload)
 window.kargoSetModelCell = (row, key, value, formula = '') => setModelCell(row, key, value, formula)
 window.kargoSetModelSelection = (row, key) => setModelSelection(row, key)
 window.kargoSetLocked = (value) => {

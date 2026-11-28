@@ -10,7 +10,7 @@ from audit_context import install_sqlite_audit_functions
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_NAME = "database_cargo.db"
-DB_SCHEMA_VERSION = 20
+DB_SCHEMA_VERSION = 21
 
 _SCHEMA_STATEMENTS = (
     """
@@ -2507,6 +2507,143 @@ def _migration_v20(cursor) -> None:
         )
 
 
+def _migration_v21(cursor) -> None:
+    """Workbook Invoice: satu workbook menampung beberapa invoice-sheet.
+
+    Invoice lama dimasukkan sebagai workbook satu-sheet tanpa mengubah nomor,
+    detail, metadata, relasi Resi, atau status historisnya.
+    """
+    existing_columns = {
+        str(row[1]).strip()
+        for row in cursor.execute("PRAGMA table_info(invoice_header)").fetchall()
+    }
+    for name, sql_type in (
+        ("workbook_id", "TEXT"),
+        ("sheet_id", "TEXT"),
+        ("sheet_name", "TEXT"),
+        ("sheet_order", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in existing_columns:
+            cursor.execute(f"ALTER TABLE invoice_header ADD COLUMN {name} {sql_type}")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invoice_workbook (
+            workbook_id TEXT PRIMARY KEY,
+            no_workbook TEXT NOT NULL UNIQUE,
+            client TEXT NOT NULL DEFAULT '',
+            tanggal TEXT NOT NULL DEFAULT '',
+            snapshot_json TEXT NOT NULL DEFAULT '',
+            sheet_order_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_by_user_id TEXT,
+            created_by_username TEXT,
+            created_by_name TEXT,
+            updated_by_user_id TEXT,
+            updated_by_username TEXT,
+            updated_by_name TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS invoice_payment (
+            payment_id TEXT PRIMARY KEY,
+            no_invoice TEXT NOT NULL,
+            tanggal TEXT NOT NULL,
+            nominal INTEGER NOT NULL CHECK (nominal > 0),
+            metode TEXT NOT NULL DEFAULT '',
+            referensi TEXT NOT NULL DEFAULT '',
+            catatan TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_by_user_id TEXT,
+            created_by_username TEXT,
+            created_by_name TEXT,
+            FOREIGN KEY (no_invoice)
+                REFERENCES invoice_header (no_invoice)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_invoice_header_workbook_order "
+        "ON invoice_header(workbook_id, sheet_order, id)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_header_workbook_sheet "
+        "ON invoice_header(workbook_id, sheet_id) WHERE workbook_id IS NOT NULL AND sheet_id IS NOT NULL"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_invoice_payment_invoice_tanggal "
+        "ON invoice_payment(no_invoice, tanggal, created_at)"
+    )
+
+    # Backfill legacy invoices as one-sheet workbooks. Deterministic IDs make
+    # the migration safe to resume if a database was partially upgraded.
+    legacy_rows = cursor.execute(
+        """
+        SELECT no_invoice, tanggal, client, metadata_json, created_at,
+               created_by_user_id, created_by_username, created_by_name
+        FROM invoice_header
+        WHERE workbook_id IS NULL OR TRIM(workbook_id) = ''
+        ORDER BY id
+        """
+    ).fetchall()
+    for row in legacy_rows:
+        (no_invoice, tanggal, client, metadata_text, created_at,
+         created_user_id, created_username, created_name) = row
+        invoice_no = str(no_invoice or '').strip().upper()
+        if not invoice_no:
+            continue
+        workbook_id = 'WB-' + uuid.uuid5(uuid.NAMESPACE_URL, 'kargo-invoice:' + invoice_no).hex[:20].upper()
+        sheet_id = 'SHEET-' + uuid.uuid5(uuid.NAMESPACE_URL, 'kargo-sheet:' + invoice_no).hex[:20].upper()
+        sheet_name = 'Sheet 1'
+        snapshot_json = ''
+        try:
+            metadata = json.loads(metadata_text or '{}')
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        snapshot = metadata.get('univer_snapshot')
+        if isinstance(snapshot, dict):
+            snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(',', ':'))
+            custom = snapshot.get('custom') if isinstance(snapshot.get('custom'), dict) else {}
+            orders = snapshot.get('sheetOrder') if isinstance(snapshot.get('sheetOrder'), list) else []
+            candidate = str(custom.get('kargoActiveSheetId') or (orders[0] if orders else '')).strip()
+            if candidate:
+                sheet_id = candidate
+            sheets = snapshot.get('sheets') if isinstance(snapshot.get('sheets'), dict) else {}
+            sheet_data = sheets.get(sheet_id) if isinstance(sheets, dict) else None
+            if isinstance(sheet_data, dict):
+                sheet_name = str(sheet_data.get('name') or sheet_data.get('sheetName') or sheet_name)
+        no_workbook = 'WB-' + uuid.uuid5(uuid.NAMESPACE_URL, 'kargo-workbook:' + invoice_no).hex[:10].upper()
+        order_json = json.dumps([sheet_id], ensure_ascii=False)
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO invoice_workbook (
+                workbook_id, no_workbook, client, tanggal, snapshot_json,
+                sheet_order_json, metadata_json, created_at,
+                created_by_user_id, created_by_username, created_by_name
+            ) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?)
+            """,
+            (workbook_id, no_workbook, str(client or ''), str(tanggal or ''),
+             snapshot_json, order_json, created_at, created_user_id,
+             created_username, created_name),
+        )
+        cursor.execute(
+            """
+            UPDATE invoice_header
+            SET workbook_id = ?, sheet_id = ?, sheet_name = ?, sheet_order = 0
+            WHERE no_invoice = ? AND (workbook_id IS NULL OR TRIM(workbook_id) = '')
+            """,
+            (workbook_id, sheet_id, sheet_name, invoice_no),
+        )
+
+
+
 _SCHEMA_MIGRATIONS = {
     1: _migration_v1,
     2: _migration_v2,
@@ -2528,6 +2665,7 @@ _SCHEMA_MIGRATIONS = {
     18: _migration_v18,
     19: _migration_v19,
     20: _migration_v20,
+    21: _migration_v21,
 }
 
 

@@ -3509,7 +3509,7 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
         existing = cursor.execute(
-            "SELECT status FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+            "SELECT status, workbook_id FROM invoice_header WHERE no_invoice = ? LIMIT 1",
             (invoice,),
         ).fetchone()
         if not existing:
@@ -3517,6 +3517,7 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
             return False, f"Invoice {invoice} tidak ditemukan."
 
         status_lama = str(existing[0] or "").strip().upper()
+        workbook_id = str(existing[1] or "").strip()
         if status_lama == status:
             conn.rollback()
             return True, f"Invoice {invoice} sudah berstatus {status}."
@@ -3531,6 +3532,18 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
             return False, (
                 f"Invoice {invoice} sudah BATAL dan statusnya tidak dapat diaktifkan kembali."
             )
+        if status == "BATAL":
+            pembayaran = cursor.execute(
+                "SELECT COALESCE(SUM(nominal), 0) FROM invoice_payment WHERE no_invoice = ?",
+                (invoice,),
+            ).fetchone()
+            total_pembayaran = int(pembayaran[0] or 0) if pembayaran else 0
+            if total_pembayaran > 0:
+                conn.rollback()
+                return False, (
+                    f"Invoice {invoice} sudah menerima pembayaran Rp {total_pembayaran:,}. "
+                    "Catat pengembalian dana terlebih dahulu sebelum membatalkan invoice."
+                )
 
         cursor.execute(
             """
@@ -3540,6 +3553,12 @@ def ubah_status_penagihan_invoice(no_invoice, status_baru, kode_cabang=None):
             """,
             (status, invoice),
         )
+
+        if workbook_id:
+            cursor.execute(
+                "UPDATE invoice_workbook SET updated_at = CURRENT_TIMESTAMP WHERE workbook_id = ?",
+                (workbook_id,),
+            )
 
         if status == "BATAL":
             # invoice_detail dan metadata_json tetap menjadi arsip snapshot.
@@ -4072,7 +4091,62 @@ def _validasi_source_resi_invoice_cursor(cursor, source_resi, no_invoice=None):
     return None
 
 
+def _upsert_invoice_workbook_cursor(cursor, workbook_data, now):
+    workbook_id = str(workbook_data.get("workbook_id") or "").strip()
+    no_workbook = str(workbook_data.get("no_workbook") or "").strip().upper()
+    if not workbook_id:
+        workbook_id = "WB-" + uuid.uuid4().hex[:20].upper()
+        workbook_data["workbook_id"] = workbook_id
+    if not no_workbook:
+        no_workbook = "WB-" + uuid.uuid4().hex[:10].upper()
+        workbook_data["no_workbook"] = no_workbook
+
+    actor_id, actor_username, actor_name = _audit_actor_values()
+    cursor.execute(
+        """
+        INSERT INTO invoice_workbook (
+            workbook_id, no_workbook, client, tanggal, snapshot_json,
+            sheet_order_json, metadata_json, updated_at,
+            created_by_user_id, created_by_username, created_by_name,
+            updated_by_user_id, updated_by_username, updated_by_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(workbook_id) DO UPDATE SET
+            no_workbook = excluded.no_workbook,
+            client = excluded.client,
+            tanggal = excluded.tanggal,
+            snapshot_json = excluded.snapshot_json,
+            sheet_order_json = excluded.sheet_order_json,
+            metadata_json = excluded.metadata_json,
+            updated_at = excluded.updated_at,
+            updated_by_user_id = excluded.updated_by_user_id,
+            updated_by_username = excluded.updated_by_username,
+            updated_by_name = excluded.updated_by_name
+        """,
+        (
+            workbook_id,
+            no_workbook,
+            str(workbook_data.get("client") or "").strip().upper(),
+            str(workbook_data.get("tanggal") or "").strip(),
+            str(workbook_data.get("snapshot_json") or ""),
+            str(workbook_data.get("sheet_order_json") or "[]"),
+            str(workbook_data.get("metadata_json") or "{}"),
+            now,
+            actor_id, actor_username, actor_name,
+            actor_id, actor_username, actor_name,
+        ),
+    )
+    return workbook_id
+
+
 def _simpan_header_invoice(cursor, header, no_invoice, now, is_update):
+    workbook_id = str(header.get("workbook_id") or "").strip()
+    sheet_id = str(header.get("sheet_id") or "").strip()
+    sheet_name = str(header.get("sheet_name") or "Sheet 1").strip() or "Sheet 1"
+    try:
+        sheet_order = max(0, int(header.get("sheet_order", 0) or 0))
+    except (TypeError, ValueError):
+        sheet_order = 0
+
     if is_update:
         existing = cursor.execute(
             "SELECT status FROM invoice_header WHERE no_invoice = ? LIMIT 1",
@@ -4088,14 +4162,16 @@ def _simpan_header_invoice(cursor, header, no_invoice, now, is_update):
             UPDATE invoice_header
             SET tanggal = ?, client = ?, tipe_invoice = ?, jenis_pajak = ?,
                 subtotal = ?, total_akhir = ?, status = ?, metadata_json = ?,
-                template_version = ?, updated_at = ?
+                template_version = ?, workbook_id = ?, sheet_id = ?,
+                sheet_name = ?, sheet_order = ?, updated_at = ?
             WHERE no_invoice = ?
             """,
             (
                 header["tanggal"], header["client"], header["tipe_invoice"],
                 header["jenis_pajak"], header["subtotal"], header["total_akhir"],
                 header["status"], header["metadata_json"],
-                header["template_version"], now, no_invoice,
+                header["template_version"], workbook_id, sheet_id,
+                sheet_name, sheet_order, now, no_invoice,
             ),
         )
         if cursor.rowcount == 0:
@@ -4113,14 +4189,16 @@ def _simpan_header_invoice(cursor, header, no_invoice, now, is_update):
         INSERT INTO invoice_header (
             no_invoice, tanggal, client, tipe_invoice, jenis_pajak,
             subtotal, total_akhir, status, created_at,
-            metadata_json, template_version, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            metadata_json, template_version, updated_at,
+            workbook_id, sheet_id, sheet_name, sheet_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             no_invoice, header["tanggal"], header["client"], header["tipe_invoice"],
             header["jenis_pajak"], header["subtotal"], header["total_akhir"],
             header["status"], now, header["metadata_json"],
             header["template_version"], now,
+            workbook_id, sheet_id, sheet_name, sheet_order,
         ),
     )
     return None
@@ -4136,6 +4214,438 @@ def _simpan_detail_invoice(cursor, no_invoice, items):
             (no_invoice, item["nomor_urut"], item["data_kolom"], item["nominal"])
             for item in items
         ],
+    )
+
+
+def _snapshot_metadata_invoice(metadata_json):
+    try:
+        metadata = json.loads(str(metadata_json or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    snapshot = metadata.get("univer_snapshot")
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
+def _sumber_resi_dari_header_items(items):
+    sumber = []
+    seen = set()
+    for item in items or []:
+        try:
+            data = json.loads(str(item.get("data_kolom") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            data = {}
+        if not isinstance(data, dict):
+            continue
+        source = data.get("__source_resi__")
+        if not isinstance(source, dict):
+            continue
+        nomor = str(source.get("no_resi") or "").strip().upper()
+        cabang = str(source.get("kode_cabang") or "").strip().upper() or None
+        if not nomor or (nomor, cabang) in seen:
+            continue
+        seen.add((nomor, cabang))
+        sumber.append({
+            "no_resi": nomor,
+            "kode_cabang": cabang,
+            "revision": source.get("revision"),
+        })
+    return sumber
+
+
+def simpan_workbook_invoice(workbook_data, daftar_sheet):
+    """Simpan satu workbook beserta semua invoice-sheet dalam satu transaksi."""
+    sheets = [dict(item) for item in (daftar_sheet or []) if isinstance(item, dict)]
+    if not sheets:
+        return False, "Workbook harus memiliki minimal satu sheet invoice."
+
+    sheet_ids = [str(item.get("sheet_id") or "").strip() for item in sheets]
+    if any(not item for item in sheet_ids) or len(set(sheet_ids)) != len(sheet_ids):
+        return False, "Identitas sheet Workbook kosong atau duplikat."
+    submitted_invoice_numbers = [
+        str((item.get("header") or {}).get("no_invoice") or "").strip().upper()
+        for item in sheets
+    ]
+    submitted_invoice_numbers = [item for item in submitted_invoice_numbers if item]
+    if len(set(submitted_invoice_numbers)) != len(submitted_invoice_numbers):
+        return False, "Satu nomor invoice tidak boleh dipakai oleh lebih dari satu sheet."
+
+    clients = {
+        str((item.get("header") or {}).get("client") or "").strip().upper()
+        for item in sheets
+    }
+    clients.discard("")
+    if len(clients) > 1:
+        return False, "Semua sheet dalam satu Workbook harus menggunakan customer yang sama."
+    if not clients:
+        return False, "Nama customer / Bill To tidak boleh kosong."
+
+    invoice_branch = str(numbering_service.CENTRAL_INVOICE_BRANCH).strip().upper()
+    try:
+        _pastikan_boleh_tulis_cabang(invoice_branch)
+    except PermissionError as exc:
+        return False, str(exc)
+
+    conn = None
+    try:
+        from datetime import datetime
+        from copy import deepcopy
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        workbook = dict(workbook_data or {})
+        workbook.setdefault("client", next(iter(clients)))
+        workbook_id = str(workbook.get("workbook_id") or "").strip()
+        if not workbook_id:
+            workbook_id = "WB-" + uuid.uuid4().hex[:20].upper()
+            workbook["workbook_id"] = workbook_id
+        order = []
+        hasil_sheet = []
+
+        # Sheet yang telah memiliki nomor tetapi tidak ikut payload dilarang
+        # hilang diam-diam. Native delete di UI akan dikunci untuk sheet tersimpan.
+        nomor_existing = {
+            str(row[0] or "").strip().upper()
+            for row in cursor.execute(
+                "SELECT no_invoice FROM invoice_header WHERE workbook_id = ?",
+                (workbook_id,),
+            ).fetchall()
+        }
+        nomor_dikirim = {
+            str((sheet.get("header") or {}).get("no_invoice") or "").strip().upper()
+            for sheet in sheets
+        }
+        nomor_dikirim.discard("")
+        if not nomor_existing.issubset(nomor_dikirim):
+            conn.rollback()
+            return False, "Ada invoice tersimpan yang tidak ditemukan di workbook. Tidak ada data yang diubah."
+
+        for order_index, sheet in enumerate(sheets):
+            header = deepcopy(sheet.get("header") or {})
+            items = [dict(item) for item in (sheet.get("items") or []) if isinstance(item, dict)]
+
+            header["workbook_id"] = workbook_id
+            header["sheet_id"] = str(sheet.get("sheet_id") or "").strip()
+            if not header["sheet_id"]:
+                conn.rollback()
+                return False, f"Identitas sheet {order_index + 1} tidak valid."
+            header["sheet_name"] = str(sheet.get("sheet_name") or f"Sheet {order_index + 1}").strip()
+            header["sheet_order"] = order_index
+            header["client"] = str(header.get("client") or workbook.get("client") or "").strip().upper()
+            header["status"] = str(header.get("status") or "BELUM LUNAS").strip().upper()
+            if header["status"] in {"DRAFT", "BELUM DITAGIH", ""}:
+                header["status"] = "BELUM LUNAS"
+            if header["status"] not in {"BELUM LUNAS", "CICILAN", "LUNAS", "BATAL", "MACET"}:
+                header["status"] = "BELUM LUNAS"
+            if not header["client"]:
+                conn.rollback()
+                return False, f"Customer pada sheet {header['sheet_name']} kosong."
+
+            no_invoice = str(header.get("no_invoice") or "").strip().upper()
+            existing_by_sheet = cursor.execute(
+                "SELECT no_invoice FROM invoice_header WHERE workbook_id = ? AND sheet_id = ? LIMIT 1",
+                (workbook_id, header["sheet_id"]),
+            ).fetchone()
+            if existing_by_sheet and not no_invoice:
+                no_invoice = str(existing_by_sheet[0] or "").strip().upper()
+            is_update = bool(no_invoice)
+            if is_update:
+                owner = cursor.execute(
+                    "SELECT workbook_id FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+                    (no_invoice,),
+                ).fetchone()
+                if not owner or str(owner[0] or "") != workbook_id:
+                    conn.rollback()
+                    return False, f"Invoice {no_invoice} tidak terdaftar pada Workbook ini."
+            elif not items:
+                # Sheet baru boleh disimpan sebagai draft kosong di snapshot workbook.
+                # Draft belum memperoleh nomor invoice dan belum dapat menerima pembayaran.
+                order.append(header["sheet_id"])
+                hasil_sheet.append({
+                    "sheet_id": header["sheet_id"],
+                    "sheet_name": header["sheet_name"],
+                    "no_invoice": "",
+                    "status": "DRAFT",
+                    "total_akhir": 0,
+                })
+                continue
+            else:
+                no_invoice = _alokasikan_nomor_invoice_otomatis_cursor(cursor, header)
+                if not no_invoice:
+                    conn.rollback()
+                    return False, f"Nomor invoice untuk sheet {header['sheet_name']} gagal dibuat."
+                header["no_invoice"] = no_invoice
+
+            if is_update and not items:
+                conn.rollback()
+                return False, f"Rincian {no_invoice} tidak boleh dikosongkan. Tambahkan rincian kembali sebelum menyimpan."
+
+            terminal_row = cursor.execute(
+                "SELECT status FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+                (no_invoice,),
+            ).fetchone() if is_update else None
+            terminal_status = str(terminal_row[0] or "").strip().upper() if terminal_row else ""
+            if is_update and terminal_status in {"LUNAS", "BATAL"}:
+                # LUNAS/BATAL sheet adalah arsip immutable. Workbook lain tetap
+                # boleh disimpan tanpa menulis ulang detail atau status sheet ini.
+                header["status"] = terminal_status
+            else:
+                source_resi = header.get("source_resi") or _sumber_resi_dari_header_items(items)
+                pesan = _validasi_source_resi_invoice_cursor(cursor, source_resi, no_invoice)
+                if pesan:
+                    conn.rollback()
+                    return False, pesan
+                paid_row = cursor.execute(
+                    "SELECT COALESCE(SUM(nominal), 0) FROM invoice_payment WHERE no_invoice = ?",
+                    (no_invoice,),
+                ).fetchone() if is_update else (0,)
+                paid_total = int(paid_row[0] or 0) if paid_row else 0
+                invoice_total = max(0, int(header.get("total_akhir") or 0))
+                if paid_total > invoice_total:
+                    conn.rollback()
+                    return False, (
+                        f"Total invoice {no_invoice} tidak boleh lebih kecil dari pembayaran "
+                        f"yang sudah dicatat (Rp {paid_total:,})."
+                    )
+                if paid_total > 0:
+                    header["status"] = "LUNAS" if paid_total == invoice_total else "CICILAN"
+
+                pesan = _simpan_header_invoice(cursor, header, no_invoice, now, is_update)
+                if pesan:
+                    conn.rollback()
+                    return False, pesan
+                _simpan_detail_invoice(cursor, no_invoice, items)
+                _sinkronkan_invoice_resi_cursor(
+                    cursor, no_invoice, items, source_resi
+                )
+
+            order.append(header["sheet_id"])
+            hasil_sheet.append({
+                "sheet_id": header["sheet_id"],
+                "sheet_name": header["sheet_name"],
+                "no_invoice": no_invoice,
+                "status": header["status"],
+                "total_akhir": int(header.get("total_akhir") or 0),
+            })
+
+        workbook["client"] = next(iter(clients))
+        workbook["sheet_order_json"] = json.dumps(order, ensure_ascii=False)
+        workbook["snapshot_json"] = str(workbook.get("snapshot_json") or "")
+        _upsert_invoice_workbook_cursor(cursor, workbook, now)
+        conn.commit()
+        return True, {
+            "workbook_id": workbook_id,
+            "no_workbook": workbook.get("no_workbook"),
+            "sheets": hasil_sheet,
+        }
+    except sqlite3.IntegrityError as exc:
+        _rollback(conn)
+        if "invoice_header.no_invoice" in str(exc):
+            return False, "Nomor invoice sudah digunakan."
+        logger.exception("[InvoiceWorkbook] Integrity error")
+        return False, str(exc)
+    except Exception as exc:
+        _rollback(conn)
+        logger.exception("[InvoiceWorkbook] Gagal menyimpan workbook")
+        return False, str(exc)
+    finally:
+        _close(conn)
+
+
+def ambil_workbook_invoice(workbook_id):
+    """Ambil workbook dan seluruh invoice-sheet, detail, serta pembayaran."""
+    workbook_key = str(workbook_id or "").strip()
+    if not workbook_key:
+        return None
+    conn = None
+    try:
+        conn = get_db_connection()
+        workbook = conn.execute(
+            """
+            SELECT workbook_id, no_workbook, client, tanggal, snapshot_json,
+                   sheet_order_json, metadata_json, created_at, updated_at
+            FROM invoice_workbook WHERE workbook_id = ? OR no_workbook = ? LIMIT 1
+            """,
+            (workbook_key, workbook_key.upper()),
+        ).fetchone()
+        if not workbook:
+            return None
+        wb = dict(zip(("workbook_id", "no_workbook", "client", "tanggal",
+                       "snapshot_json", "sheet_order_json", "metadata_json",
+                       "created_at", "updated_at"), workbook))
+        rows = conn.execute(
+            """
+            SELECT no_invoice, tanggal, client, tipe_invoice, jenis_pajak,
+                   subtotal, total_akhir, status, metadata_json, template_version,
+                   sheet_id, sheet_name, sheet_order, created_by_user_id,
+                   created_by_username, created_by_name
+            FROM invoice_header
+            WHERE workbook_id = ?
+            ORDER BY sheet_order ASC, id ASC
+            """,
+            (wb["workbook_id"],),
+        ).fetchall()
+        sheets = []
+        for row in rows:
+            fields = ("no_invoice", "tanggal", "client", "tipe_invoice", "jenis_pajak",
+                      "subtotal", "total_akhir", "status", "metadata_json", "template_version",
+                      "sheet_id", "sheet_name", "sheet_order", "created_by_user_id",
+                      "created_by_username", "created_by_name")
+            sheet = dict(zip(fields, row))
+            sheet["details"] = conn.execute(
+                "SELECT data_kolom, nomor_urut, nominal_subtotal FROM invoice_detail "
+                "WHERE no_invoice = ? ORDER BY nomor_urut ASC",
+                (sheet["no_invoice"],),
+            ).fetchall()
+            paid = conn.execute(
+                "SELECT COALESCE(SUM(nominal), 0) FROM invoice_payment WHERE no_invoice = ?",
+                (sheet["no_invoice"],),
+            ).fetchone()
+            sheet["paid_total"] = (
+                max(0, int(sheet.get("total_akhir") or 0))
+                if str(sheet.get("status") or "").strip().upper() == "LUNAS"
+                else (int(paid[0] or 0) if paid else 0)
+            )
+            sheet["payments"] = conn.execute(
+                "SELECT payment_id, tanggal, nominal, metode, referensi, catatan, created_at "
+                "FROM invoice_payment WHERE no_invoice = ? ORDER BY tanggal, rowid",
+                (sheet["no_invoice"],),
+            ).fetchall()
+            sheets.append(sheet)
+        return {"workbook": wb, "sheets": sheets}
+    finally:
+        _close(conn)
+
+
+def catat_pembayaran_invoice(no_invoice, nominal, tanggal, metode="TRANSFER", referensi="", catatan=""):
+    """Catat pembayaran pada satu invoice-sheet dan hitung ulang statusnya."""
+    invoice = str(no_invoice or "").strip().upper()
+    try:
+        amount = int(nominal)
+    except (TypeError, ValueError):
+        return False, "Nominal pembayaran tidak valid."
+    if not invoice or amount <= 0:
+        return False, "Nomor invoice dan nominal pembayaran harus valid."
+    try:
+        _pastikan_boleh_tulis_cabang(str(numbering_service.CENTRAL_INVOICE_BRANCH).strip().upper())
+    except PermissionError as exc:
+        return False, str(exc)
+
+    conn = None
+    try:
+        from datetime import datetime
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+        row = cursor.execute(
+            "SELECT total_akhir, status, tanggal FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+            (invoice,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return False, f"Invoice {invoice} tidak ditemukan."
+        total = max(0, int(row[0] or 0))
+        status_now = str(row[1] or "").strip().upper()
+        tanggal_invoice = str(row[2] or "").strip()
+        if status_now in {"LUNAS", "BATAL"}:
+            conn.rollback()
+            return False, f"Invoice {invoice} berstatus {status_now} dan tidak menerima pembayaran baru."
+        paid_row = cursor.execute(
+            "SELECT COALESCE(SUM(nominal), 0) FROM invoice_payment WHERE no_invoice = ?",
+            (invoice,),
+        ).fetchone()
+        paid_before = int(paid_row[0] or 0) if paid_row else 0
+        if paid_before + amount > total:
+            conn.rollback()
+            sisa_saat_ini = max(0, total - paid_before)
+            return False, (
+                f"Pembayaran melebihi sisa tagihan. Sisa saat ini Rp {sisa_saat_ini:,} "
+                f"(nominal invoice Rp {total:,})."
+            )
+        payment_id = uuid.uuid4().hex
+        actor_id, actor_username, actor_name = _audit_actor_values()
+        cursor.execute(
+            """
+            INSERT INTO invoice_payment (
+                payment_id, no_invoice, tanggal, nominal, metode, referensi, catatan,
+                created_by_user_id, created_by_username, created_by_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (payment_id, invoice, str(tanggal or datetime.now().strftime("%Y-%m-%d")),
+             amount, str(metode or "").strip().upper(),
+             str(referensi or "").strip(), str(catatan or "").strip(),
+             actor_id, actor_username, actor_name),
+        )
+        paid_after = paid_before + amount
+        status_new = "LUNAS" if paid_after >= total else "CICILAN"
+        cursor.execute(
+            "UPDATE invoice_header SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE no_invoice = ?",
+            (status_new, invoice),
+        )
+        cursor.execute(
+            """UPDATE invoice_workbook SET updated_at = CURRENT_TIMESTAMP
+               WHERE workbook_id = (SELECT workbook_id FROM invoice_header WHERE no_invoice = ?)""",
+            (invoice,),
+        )
+
+        if status_new == "LUNAS":
+            snapshot_resi = _nomor_resi_snapshot_invoice_cursor(cursor, invoice)
+            for nomor_snapshot in snapshot_resi:
+                nomor = str(nomor_snapshot or "").strip().upper()
+                if not nomor:
+                    continue
+                cursor.execute(
+                    "SELECT no_resi, kode_cabang FROM data_resi WHERE UPPER(no_resi) = UPPER(?)",
+                    (nomor,),
+                )
+                targets = cursor.fetchall()
+                if not targets:
+                    kandidat = sorted(_varian_nomor_resi_pajak(nomor))
+                    if kandidat:
+                        placeholders = ",".join("?" for _ in kandidat)
+                        cursor.execute(
+                            f"SELECT no_resi, kode_cabang FROM data_resi WHERE UPPER(no_resi) IN ({placeholders})",
+                            kandidat,
+                        )
+                        targets = cursor.fetchall()
+                for nomor_aktif, cabang_aktif in targets:
+                    if not _update_buku_gudang_cursor(
+                        cursor, nomor_aktif, cabang_aktif,
+                        {"status_resi": "SELESAI"}, {}, None, None,
+                    ):
+                        conn.rollback()
+                        return False, f"Status Resi {nomor_aktif} gagal diperbarui."
+
+        conn.commit()
+        return True, {
+            "payment_id": payment_id,
+            "no_invoice": invoice,
+            "paid_total": paid_after,
+            "remaining": max(0, total - paid_after),
+            "status": status_new,
+        }
+    except Exception as exc:
+        _rollback(conn)
+        logger.exception("[Invoice] Gagal mencatat pembayaran %s", invoice)
+        return False, str(exc)
+    finally:
+        _close(conn)
+
+
+def ambil_pembayaran_invoice(no_invoice):
+    invoice = str(no_invoice or "").strip().upper()
+    return _fetchall(
+        """
+        SELECT payment_id, tanggal, nominal, metode, referensi, catatan, created_at,
+               created_by_username, created_by_name
+        FROM invoice_payment WHERE no_invoice = ?
+        ORDER BY tanggal ASC, rowid ASC
+        """,
+        (invoice,),
     )
 
 def simpan_atau_update_invoice(header, items, is_update=False):
@@ -4181,12 +4691,40 @@ def simpan_atau_update_invoice(header, items, is_update=False):
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
 
+        if is_update and no_invoice:
+            existing_link = cursor.execute(
+                "SELECT workbook_id, sheet_id, sheet_name, sheet_order FROM invoice_header WHERE no_invoice = ? LIMIT 1",
+                (no_invoice,),
+            ).fetchone()
+            if existing_link:
+                header.setdefault("workbook_id", existing_link[0])
+                header.setdefault("sheet_id", existing_link[1])
+                header.setdefault("sheet_name", existing_link[2])
+                header.setdefault("sheet_order", existing_link[3])
+        if not header.get("workbook_id"):
+            header["workbook_id"] = "WB-" + uuid.uuid4().hex[:20].upper()
+        if not header.get("sheet_id"):
+            header["sheet_id"] = "SHEET-" + uuid.uuid4().hex[:20].upper()
+        header.setdefault("sheet_name", "Sheet 1")
+        header.setdefault("sheet_order", 0)
+
         if not is_update:
             no_invoice = _alokasikan_nomor_invoice_otomatis_cursor(cursor, header)
             if not no_invoice:
                 conn.rollback()
                 return False, "Nomor invoice tidak berhasil dibuat."
             header["no_invoice"] = no_invoice
+
+        snapshot = _snapshot_metadata_invoice(header.get("metadata_json"))
+        workbook_payload = {
+            "workbook_id": header["workbook_id"],
+            "no_workbook": header.get("no_workbook"),
+            "client": header.get("client", ""),
+            "tanggal": header.get("tanggal", ""),
+            "snapshot_json": json.dumps(snapshot, ensure_ascii=False) if snapshot else "",
+            "sheet_order_json": json.dumps([header["sheet_id"]], ensure_ascii=False),
+        }
+        _upsert_invoice_workbook_cursor(cursor, workbook_payload, now)
 
         source_resi = header.get("source_resi")
         if not source_resi:
@@ -4223,36 +4761,78 @@ def simpan_atau_update_invoice(header, items, is_update=False):
         _close(conn)
 
 def ambil_histori_invoice(limit=300, keyword=""):
-    """Ambil histori Invoice.
-
-    Tampilan awal dibatasi ke invoice terbaru agar pembukaan tab tetap ringan.
-    Ketika ada kata kunci, pencarian dilakukan di SQLite terhadap seluruh
-    histori (tanpa batas 300 baris), sehingga hasil lama tidak terlewat hanya
-    karena posisinya berada di luar daftar terbaru.
-    """
+    """Ambil satu baris histori per Workbook, bukan per invoice-sheet."""
     keyword = str(keyword or "").strip().casefold()
-    query = [
-        "SELECT no_invoice, tanggal, client, status, created_by_name",
-        "FROM invoice_header",
-    ]
+    query = """
+        SELECT w.workbook_id, w.no_workbook, w.tanggal, w.client,
+               COUNT(h.no_invoice) AS jumlah_sheet,
+               COALESCE(SUM(CASE WHEN UPPER(COALESCE(h.status, '')) = 'BATAL' THEN 0 ELSE h.total_akhir END), 0) AS total_tagihan,
+               COALESCE(SUM(CASE
+                   WHEN UPPER(COALESCE(h.status, '')) = 'BATAL' THEN 0
+                   WHEN UPPER(COALESCE(h.status, '')) = 'LUNAS' THEN h.total_akhir
+                   ELSE COALESCE(p.total_bayar, 0)
+               END), 0) AS total_dibayar,
+               CASE
+                   WHEN COUNT(h.no_invoice) = 0 THEN 'KOSONG'
+                   WHEN SUM(CASE WHEN UPPER(COALESCE(h.status, '')) <> 'BATAL' THEN 1 ELSE 0 END) = 0 THEN 'BATAL'
+                   WHEN SUM(CASE WHEN UPPER(COALESCE(h.status, '')) = 'LUNAS' THEN 1 ELSE 0 END)
+                        = SUM(CASE WHEN UPPER(COALESCE(h.status, '')) <> 'BATAL' THEN 1 ELSE 0 END) THEN 'LUNAS'
+                   WHEN SUM(CASE WHEN UPPER(COALESCE(h.status, '')) IN ('LUNAS', 'CICILAN') OR COALESCE(p.total_bayar, 0) > 0 THEN 1 ELSE 0 END) > 0 THEN 'SEBAGIAN LUNAS'
+                   WHEN SUM(CASE WHEN UPPER(COALESCE(h.status, '')) = 'MACET' THEN 1 ELSE 0 END) > 0 THEN 'MACET'
+                   ELSE 'BELUM LUNAS'
+               END AS status_workbook,
+               w.sheet_order_json
+        FROM invoice_workbook w
+        LEFT JOIN invoice_header h ON h.workbook_id = w.workbook_id
+        LEFT JOIN (
+            SELECT no_invoice, SUM(nominal) AS total_bayar
+            FROM invoice_payment GROUP BY no_invoice
+        ) p ON p.no_invoice = h.no_invoice
+    """
     params = []
     if keyword:
         pola = f"%{keyword}%"
-        query.append(
-            "WHERE LOWER(COALESCE(no_invoice, '')) LIKE ? "
-            "OR LOWER(COALESCE(tanggal, '')) LIKE ? "
-            "OR LOWER(COALESCE(client, '')) LIKE ? "
-            "OR LOWER(COALESCE(status, '')) LIKE ? "
-            "OR LOWER(COALESCE(created_by_name, '')) LIKE ?"
-        )
-        params.extend((pola, pola, pola, pola, pola))
-    query.append("ORDER BY id DESC")
+        query += " WHERE LOWER(COALESCE(w.no_workbook, '')) LIKE ? OR LOWER(COALESCE(w.client, '')) LIKE ? OR LOWER(COALESCE(w.tanggal, '')) LIKE ? OR LOWER(COALESCE(h.no_invoice, '')) LIKE ? OR LOWER(COALESCE(h.sheet_name, '')) LIKE ? OR LOWER(COALESCE(h.status, '')) LIKE ?"
+        params.extend((pola, pola, pola, pola, pola, pola))
+    query += " GROUP BY w.workbook_id ORDER BY w.updated_at DESC, w.created_at DESC"
     if not keyword:
-        query.append("LIMIT ?")
+        query += " LIMIT ?"
         params.append(max(1, int(limit)))
-    # Error database diteruskan ke UI. Daftar kosong hanya berarti query
-    # berhasil dan memang tidak ada Invoice yang cocok.
-    return _fetchall("\n".join(query), tuple(params))
+    rows = _fetchall(query, tuple(params)) or []
+    hasil = []
+    for row in rows:
+        workbook_id, no_workbook, tanggal, client, jumlah, total, paid, status, order_json = row
+        try:
+            ordered_sheet_ids = json.loads(order_json or "[]")
+            jumlah_sheet = len(ordered_sheet_ids) if isinstance(ordered_sheet_ids, list) else int(jumlah or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            jumlah_sheet = int(jumlah or 0)
+        if jumlah_sheet > int(jumlah or 0):
+            status = "DRAFT" if int(jumlah or 0) == 0 else "ADA DRAFT"
+        hasil.append((
+            workbook_id,
+            no_workbook,
+            tanggal,
+            client,
+            int(jumlah_sheet or 0),
+            int(total or 0),
+            int(paid or 0),
+            max(0, int(total or 0) - int(paid or 0)),
+            status,
+        ))
+    return hasil
+
+def ambil_workbook_id_untuk_invoice(no_invoice):
+    """Ambil ID induk Workbook dari salah satu nomor invoice-sheet."""
+    invoice = str(no_invoice or "").strip().upper()
+    if not invoice:
+        return None
+    row = _fetchone(
+        "SELECT workbook_id FROM invoice_header WHERE UPPER(no_invoice) = ? LIMIT 1",
+        (invoice,),
+    )
+    return str(row[0] or "").strip() if row and row[0] else None
+
 
 def ambil_invoice_by_no(no_invoice):
     """Membaca data lengkap invoice (header & detail) untuk ditampilkan ke editor."""

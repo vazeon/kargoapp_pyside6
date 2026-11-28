@@ -1094,10 +1094,13 @@ class BillingQueueDialog(QDialog):
 
 
 class TabInvoice(QWidget):
-    KOL_HISTORI_NO_INV = 0
+    KOL_HISTORI_NO_WORKBOOK = 0
     KOL_HISTORI_TANGGAL = 1
     KOL_HISTORI_CLIENT = 2
-    KOL_HISTORI_STATUS = 3
+    KOL_HISTORI_JUMLAH_SHEET = 3
+    KOL_HISTORI_TOTAL = 4
+    KOL_HISTORI_SISA = 5
+    KOL_HISTORI_STATUS = 6
 
     SETTINGS_ORGANIZATION = "AplikasiEkspedisi"
     SETTINGS_APPLICATION_HISTORI = "TabInvoiceHistori"
@@ -1108,6 +1111,14 @@ class TabInvoice(QWidget):
     def __init__(self):
         super().__init__()
         self.no_invoice_aktif = None
+        self.workbook_id_aktif = None
+        self.no_workbook_aktif = None
+        self._workbook_mode_active = False
+        self._workbook_dirty = False
+        self._active_workbook_sheet_id = ""
+        self._workbook_sheet_meta = {}
+        self._workbook_sheet_payment = {}
+        self._pending_workbook_capture = False
         self.total_invoice_aktif = 0
         self.status_invoice_aktif = "DRAFT"
 
@@ -1174,16 +1185,16 @@ class TabInvoice(QWidget):
         layout = QVBoxLayout(self.panel_kiri)
         layout.setContentsMargins(0, 0, 8, 0)
 
-        self.lbl_title_histori = QLabel("Histori Invoice")
+        self.lbl_title_histori = QLabel("Histori Workbook Invoice")
         self.txt_cari_invoice = self._buat_lineedit_invoice(
             "Cari invoice...", UppercaseValidator(self),
         )
 
         self.tabel_histori_invoice = QTableWidget()
         pasang_header_wrap(self.tabel_histori_invoice)
-        self.tabel_histori_invoice.setColumnCount(5)
+        self.tabel_histori_invoice.setColumnCount(7)
         self.tabel_histori_invoice.setHorizontalHeaderLabels(
-            ["NO. INV", "TANGGAL", "CLIENT", "STATUS", "PEMBUAT"],
+            ["NO. WORKBOOK", "TANGGAL", "CLIENT", "INVOICE", "TOTAL", "SISA", "STATUS"],
         )
         self.tabel_histori_invoice.verticalHeader().setVisible(False)
         self.tabel_histori_invoice.setSelectionBehavior(
@@ -1203,7 +1214,7 @@ class TabInvoice(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
 
-        btn_baru_kiri = QPushButton("＋ Invoice Baru")
+        btn_baru_kiri = QPushButton("＋ Workbook Baru")
         btn_baru_kiri.clicked.connect(self.buat_invoice_baru)
 
         for widget in (
@@ -1298,8 +1309,14 @@ class TabInvoice(QWidget):
         # Baris/kolom, paste, clear, dan format memakai UI native Univer.
         toolbar = QHBoxLayout()
         self.btn_ambil_resi = QPushButton("Ambil Resi")
+        self.btn_catat_pembayaran = QPushButton("Catat Pembayaran")
+        self.btn_riwayat_pembayaran = QPushButton("Riwayat Pembayaran")
+        self.btn_catat_pembayaran.setEnabled(False)
+        self.btn_riwayat_pembayaran.setEnabled(False)
         toolbar.addWidget(self.btn_ambil_resi)
         toolbar.addStretch()
+        toolbar.addWidget(self.btn_riwayat_pembayaran)
+        toolbar.addWidget(self.btn_catat_pembayaran)
         layout.addLayout(toolbar)
 
     def _bangun_total_invoice(self, layout):
@@ -1320,7 +1337,7 @@ class TabInvoice(QWidget):
     def _bangun_aksi_invoice(self, layout):
         """Aksi utama Invoice: simpan data atau buka satu alur Print Preview."""
         hbox = QHBoxLayout()
-        self.btn_simpan_db = QPushButton("💾 Simpan Invoice")
+        self.btn_simpan_db = QPushButton("💾 Simpan Workbook")
         self.btn_cetak = QPushButton("🖨️ Cetak Invoice")
         # Page Setup dibuka dari tab tambahan di ribbon Univer. Tombol Cetak
         # tidak lagi memiliki dropdown dan selalu langsung membuka Preview.
@@ -1341,6 +1358,8 @@ class TabInvoice(QWidget):
         self.tabel_item_invoice.sheetEdited.connect(self._on_sheet_bulk_edited)
         self.cmb_tipe_invoice.currentIndexChanged.connect(self._on_template_changed)
         self.cmb_pajak.currentIndexChanged.connect(self.ubah_rekening_otomatis)
+        self.btn_catat_pembayaran.clicked.connect(self.buka_dialog_catat_pembayaran)
+        self.btn_riwayat_pembayaran.clicked.connect(self.tampilkan_riwayat_pembayaran)
 
         for field in (
             self.txt_client,
@@ -1755,8 +1774,12 @@ class TabInvoice(QWidget):
         if self._loading_invoice or self._invoice_lunas_locked:
             return
         self._dirty = True
+        if self._workbook_mode_active:
+            self._workbook_dirty = True
         self.btn_simpan_db.setEnabled(True)
         self._update_print_menu_state()
+        if self._workbook_mode_active:
+            self._simpan_meta_sheet_aktif_ke_univer()
         if self.no_invoice_aktif:
             self.lbl_title_editor.setText(f"EDIT INVOICE: {self.no_invoice_aktif} *")
         else:
@@ -1927,7 +1950,7 @@ class TabInvoice(QWidget):
         self._set_rekening_otomatis(tandai_perubahan=True)
 
     def _konfirmasi_buang_perubahan(self, tindakan):
-        if not self._dirty:
+        if not self._dirty and not self._workbook_dirty:
             return True
 
         answer = QMessageBox.question(
@@ -1943,7 +1966,11 @@ class TabInvoice(QWidget):
         return answer == QMessageBox.StandardButton.Yes
 
     def buka_billing_queue(self):
-        if self._invoice_lunas_locked:
+        # In Workbook mode a paid/cancelled sheet stays locked, but the admin
+        # may still open Billing Queue; imported Resi will go to a new sheet.
+        if self._invoice_lunas_locked and not (
+            self._workbook_mode_active and self.tabel_item_invoice.using_univer
+        ):
             return False
         dialog = BillingQueueDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -2000,7 +2027,9 @@ class TabInvoice(QWidget):
         }
 
     def terima_data_baru(self, nama_client, list_resi_data):
-        if self._invoice_lunas_locked:
+        if self._invoice_lunas_locked and not (
+            self._workbook_mode_active and self.tabel_item_invoice.using_univer
+        ):
             return False
         data_resi = [
             dict(item) for item in (list_resi_data or []) if isinstance(item, dict)
@@ -2056,9 +2085,60 @@ class TabInvoice(QWidget):
                 )
                 return False
 
+        nama_client_bersih = str(nama_client or "").strip().upper()
+        in_workbook = bool(
+            self._workbook_mode_active
+            and self._active_workbook_sheet_id
+            and self.tabel_item_invoice.using_univer
+        )
+        if in_workbook:
+            client_workbook = str(self.txt_client.text() or "").strip().upper()
+            if client_workbook and client_workbook != nama_client_bersih:
+                QMessageBox.warning(
+                    self,
+                    "Customer Berbeda",
+                    "Workbook ini sudah dimiliki customer "
+                    f"{client_workbook}. Resi dari {nama_client_bersih} tidak dapat "
+                    "dimasukkan ke Workbook yang sama.",
+                )
+                return False
+
+            has_visible_data = any(
+                (self.tabel_item_invoice.item(row, column) is not None
+                 and bool(self.tabel_item_invoice.item(row, column).text().strip()))
+                for row in range(self.tabel_item_invoice.rowCount())
+                for column in range(self.tabel_item_invoice.columnCount())
+            )
+            needs_new_sheet = bool(
+                self.no_invoice_aktif or has_visible_data or self._invoice_lunas_locked
+            )
+            if needs_new_sheet:
+                # Do not replace a previous invoice sheet. Capture the complete
+                # workbook, insert a new draft, then populate that new sheet.
+                def _populate_new_sheet():
+                    self._isi_sheet_aktif_dari_resi(
+                        nama_client_bersih, data_resi, jenis_pajak_sumber
+                    )
+
+                if not self.tambah_invoice_sheet(on_added=_populate_new_sheet):
+                    return False
+                return True
+            return self._isi_sheet_aktif_dari_resi(
+                nama_client_bersih, data_resi, jenis_pajak_sumber
+            )
+
         if not self.buat_invoice_baru():
             return False
+        return self._isi_sheet_aktif_dari_resi(
+            nama_client_bersih, data_resi, jenis_pajak_sumber
+        )
 
+    def _isi_sheet_aktif_dari_resi(self, nama_client, data_resi, jenis_pajak_sumber):
+        """Isi satu sheet aktif dari Billing Queue tanpa mereset workbook induk."""
+        self.no_invoice_aktif = None
+        self.txt_no_invoice.clear()
+        self.status_invoice_aktif = "DRAFT"
+        self._dirty = False
         self._source_resi = [
             {
                 "no_resi": str(item.get("no_resi") or "").strip().upper(),
@@ -2333,48 +2413,620 @@ class TabInvoice(QWidget):
     def simpan_invoice_ke_db(self):
         if self._sedang_menyimpan_invoice:
             return
+        if self._invoice_lunas_locked and not (
+            self._workbook_mode_active and self._workbook_dirty
+        ):
+            QMessageBox.information(
+                self, "Invoice Terkunci",
+                "Sheet ini sudah LUNAS/BATAL. Tambah sheet baru untuk membuat tagihan berikutnya.",
+            )
+            return
+        if not self.txt_client.text().strip():
+            QMessageBox.warning(self, "Data Belum Lengkap", "Nama customer / Bill To wajib diisi.")
+            self.txt_client.setFocus()
+            return
+        if self.tabel_item_invoice.using_univer and callable(getattr(self.tabel_item_invoice, "capture_workbook", None)):
+            self._sedang_menyimpan_invoice = True
+            self._pending_workbook_capture = True
+            self.btn_simpan_db.setEnabled(False)
 
+            def _captured(raw_payload):
+                try:
+                    if not raw_payload:
+                        raise ValueError("Univer tidak mengembalikan snapshot workbook.")
+                    payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                    if not isinstance(payload, dict):
+                        raise ValueError("Format snapshot workbook tidak valid.")
+                    self._simpan_payload_workbook(payload)
+                except Exception as exc:
+                    QMessageBox.critical(self, "Workbook Tidak Tersimpan", f"Gagal memproses workbook invoice:\n{exc}")
+                finally:
+                    self._pending_workbook_capture = False
+                    self._sedang_menyimpan_invoice = False
+                    self.btn_simpan_db.setEnabled(
+                        (not self._invoice_lunas_locked) and (self._dirty or self._workbook_dirty)
+                    )
+
+            if not self.tabel_item_invoice.capture_workbook(_captured):
+                self._pending_workbook_capture = False
+                self._sedang_menyimpan_invoice = False
+                self.btn_simpan_db.setEnabled(True)
+                QMessageBox.warning(self, "Univer Belum Siap", "Editor Univer belum siap untuk mengambil snapshot workbook.")
+            return
+
+        # Fallback apabila Qt WebEngine/Univer tidak tersedia: simpan invoice
+        # tunggal melalui jalur lama, tetapi tetap otomatis menjadi workbook 1 sheet.
         prepared = self._siapkan_simpan_invoice()
         if prepared is None:
             return
         no_invoice, header_data, items = prepared
-
         self._sedang_menyimpan_invoice = True
         self.btn_simpan_db.setEnabled(False)
         try:
             sukses, pesan = db_service.simpan_atau_update_invoice(
-                header_data,
-                items,
-                self.no_invoice_aktif is not None,
+                header_data, items, self.no_invoice_aktif is not None,
             )
             if not sukses:
                 self._tampilkan_gagal_simpan_invoice(pesan)
                 return
-            nomor_tersimpan = str(
-                header_data.get("no_invoice") or no_invoice
-            ).strip().upper()
+            nomor_tersimpan = str(header_data.get("no_invoice") or no_invoice).strip().upper()
             self._tandai_invoice_tersimpan(nomor_tersimpan)
+            self._workbook_dirty = False
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Gagal menyimpan invoice:\n{exc}")
         finally:
             self._sedang_menyimpan_invoice = False
             self.btn_simpan_db.setEnabled(
-                (not self._invoice_lunas_locked) and self._dirty
+                (not self._invoice_lunas_locked) and (self._dirty or self._workbook_dirty)
             )
 
+    @staticmethod
+    def _parse_meta_json(value):
+        try:
+            parsed = json.loads(value or "{}") if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _meta_sheet_aktif_dari_form(self, base=None):
+        meta = dict(base or {})
+        meta.update({
+            "no_invoice": str(self.no_invoice_aktif or ""),
+            "status": str(self.status_invoice_aktif or "DRAFT").upper(),
+            "template_name": self.cmb_tipe_invoice.currentText(),
+            "template_config": deepcopy(self.active_template),
+            "client": self.txt_client.text().strip().upper(),
+            "tanggal": self.date_invoice.date().toString("yyyy-MM-dd"),
+            "jenis_pajak": self.cmb_pajak.currentText().strip().upper(),
+            "ship_to": self.txt_ship_to.text().strip().upper(),
+            "payment_info": str(self._payment_info_snapshot or "").strip().upper(),
+            "notes": self.txt_catatan.text().strip().upper(),
+            "source_resi": self._source_resi_dari_tabel(),
+            "paid_total": int(meta.get("paid_total") or 0),
+            "sheet_name": str(meta.get("sheet_name") or "Sheet 1"),
+        })
+        return meta
+
+    def _simpan_meta_sheet_aktif_ke_univer(self):
+        sheet_id = str(self._active_workbook_sheet_id or "").strip()
+        if not sheet_id:
+            return
+        meta = self._meta_sheet_aktif_dari_form(self._workbook_sheet_meta.get(sheet_id))
+        self._workbook_sheet_meta[sheet_id] = meta
+        setter = getattr(self.tabel_item_invoice, "set_invoice_sheet_meta", None)
+        if callable(setter):
+            setter(sheet_id, meta)
+
+    def _on_workbook_sheet_activated(self, sheet_id, sheet_name, sheet_meta, columns):
+        # Every Univer workbook (including a fresh one-sheet draft) uses this
+        # state machine. Legacy invoice numbers are opened through their parent
+        # workbook, so a sheet activation always establishes a stable sheet ID.
+        self._workbook_mode_active = True
+        sheet_id = str(sheet_id or "").strip()
+        if not sheet_id:
+            return
+        old_id = str(self._active_workbook_sheet_id or "").strip()
+        if old_id and old_id != sheet_id:
+            old_meta = self._meta_sheet_aktif_dari_form(self._workbook_sheet_meta.get(old_id))
+            self._workbook_sheet_meta[old_id] = old_meta
+            # Keep the metadata inside the matching native Univer sheet in step
+            # with the form. Workbook capture reads sheet metadata from JS, so
+            # updating only the Python cache could otherwise persist stale data.
+            setter = getattr(self.tabel_item_invoice, "set_invoice_sheet_meta", None)
+            if callable(setter):
+                setter(old_id, old_meta)
+
+        meta = dict(sheet_meta or {})
+        if not meta:
+            meta = dict(self._workbook_sheet_meta.get(sheet_id) or {})
+        meta.setdefault("sheet_name", str(sheet_name or "Sheet"))
+        meta.setdefault("status", "DRAFT")
+        meta.setdefault("template_name", self.cmb_tipe_invoice.currentText() or "Standar")
+        if meta.get("is_new_sheet"):
+            # Native Univer '+' creates an unsaved draft sheet. Carry the
+            # currently selected template/config instead of defaulting to Standar.
+            meta["template_name"] = str(self.cmb_tipe_invoice.currentText() or meta.get("template_name") or "Standar")
+            meta["template_config"] = deepcopy(self.active_template)
+            meta.setdefault("client", self.txt_client.text().strip().upper())
+            meta.setdefault("tanggal", self.date_invoice.date().toString("yyyy-MM-dd"))
+            meta.setdefault("jenis_pajak", self.cmb_pajak.currentText().strip().upper())
+            meta.setdefault("ship_to", self.txt_ship_to.text().strip().upper())
+            meta.setdefault("payment_info", str(self._payment_info_snapshot or "").strip().upper())
+            meta.setdefault("notes", self.txt_catatan.text().strip().upper())
+            self._workbook_dirty = True
+        meta["sheet_name"] = str(sheet_name or meta.get("sheet_name") or "Sheet")
+        template_name = str(meta.get("template_name") or "Standar")
+        template_config = meta.get("template_config")
+        if not isinstance(template_config, dict):
+            template_config = deepcopy(
+                self.template_configs.get(template_name, self.template_configs["Custom / Bebas"])
+            )
+        else:
+            template_config = deepcopy(template_config)
+        if isinstance(columns, list) and columns:
+            template_config["columns"] = deepcopy(columns)
+        self.active_template = template_config
+        self.active_columns = deepcopy(template_config.get("columns") or [])
+        self.headers_aktif = [str(col.get("title") or col.get("key") or "") for col in self.active_columns]
+        self.current_template_override = deepcopy(template_config) if template_config.get("customized") else None
+
+        self._active_workbook_sheet_id = sheet_id
+        self._workbook_sheet_meta[sheet_id] = meta
+        setter = getattr(self.tabel_item_invoice, "set_invoice_sheet_meta", None)
+        if callable(setter):
+            setter(sheet_id, meta)
+        self.no_invoice_aktif = str(meta.get("no_invoice") or "").strip().upper() or None
+        self.status_invoice_aktif = str(meta.get("status") or "DRAFT").strip().upper()
+        self.total_invoice_aktif = int(meta.get("total_akhir") or 0)
+        self._created_by_name = str(meta.get("created_by_name") or meta.get("created_by_username") or "").strip()
+        self._created_by_username = str(meta.get("created_by_username") or "").strip().upper()
+
+        self._loading_invoice = True
+        try:
+            client = str(meta.get("client") or self.txt_client.text()).strip().upper()
+            self.txt_client.setText(client)
+            self.txt_no_invoice.setText(self.no_invoice_aktif or "")
+            self.txt_ship_to.setText(str(meta.get("ship_to") or "").strip().upper())
+            self.txt_catatan.setText(str(meta.get("notes") or "").strip().upper())
+            self._payment_info_snapshot = str(meta.get("payment_info") or self._payment_info_otomatis(meta.get("jenis_pajak"))).strip().upper()
+            self.cmb_tipe_invoice.setCurrentText(template_name)
+            self.cmb_pajak.setCurrentText(str(meta.get("jenis_pajak") or "NONPAJAK").strip().upper())
+            self._source_resi = [dict(item) for item in (meta.get("source_resi") or []) if isinstance(item, dict)]
+            self._invoice_dari_resi = bool(self._source_resi)
+            self.cmb_pajak.setEnabled(not self._invoice_dari_resi and self.status_invoice_aktif not in {"LUNAS", "BATAL"})
+            parsed_date = QDate.fromString(str(meta.get("tanggal") or ""), "yyyy-MM-dd")
+            self.date_invoice.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate())
+            self._set_invoice_lunas_locked(
+                self.status_invoice_aktif in {"LUNAS", "BATAL"},
+                dibatalkan=self.status_invoice_aktif == "BATAL",
+            )
+            self._dirty = False
+        finally:
+            self._loading_invoice = False
+        self.lbl_title_editor.setText(
+            f"{self.status_invoice_aktif} INVOICE: {self.no_invoice_aktif or sheet_name}"
+        )
+        self.btn_catat_pembayaran.setEnabled(bool(self.no_invoice_aktif) and self.status_invoice_aktif not in {"LUNAS", "BATAL"})
+        self.btn_riwayat_pembayaran.setEnabled(bool(self.no_invoice_aktif))
+        self.btn_simpan_db.setEnabled(bool(self._workbook_dirty or self._dirty))
+        self._update_print_menu_state()
+        QTimer.singleShot(0, self.hitung_ulang_total_tagihan)
+
+    def _simpan_payload_workbook(self, payload):
+        sheets = payload.get("sheets")
+        if not isinstance(sheets, list) or not sheets:
+            raise ValueError("Workbook harus memiliki minimal satu sheet invoice.")
+        workbook_snapshot = payload.get("workbookSnapshot")
+        if not isinstance(workbook_snapshot, dict):
+            raise ValueError("Snapshot Univer tidak berisi data workbook yang valid.")
+        active_sheet_id = str(payload.get("activeSheetId") or self._active_workbook_sheet_id or "")
+        sheet_entries = []
+        workbook_client = self.txt_client.text().strip().upper()
+
+        for order_index, raw_sheet in enumerate(sheets):
+            if not isinstance(raw_sheet, dict):
+                continue
+            sheet_id = str(raw_sheet.get("sheetId") or "").strip()
+            if not sheet_id:
+                raise ValueError(f"Identitas sheet ke-{order_index + 1} tidak tersedia.")
+            sheet_name = str(raw_sheet.get("sheetName") or f"Sheet {order_index + 1}")
+            meta = dict(raw_sheet.get("sheetMeta") or self._workbook_sheet_meta.get(sheet_id) or {})
+            if sheet_id == active_sheet_id:
+                meta = self._meta_sheet_aktif_dari_form(meta)
+            template_name = str(meta.get("template_name") or "Standar")
+            template_config = meta.get("template_config")
+            if not isinstance(template_config, dict):
+                template_config = deepcopy(self.template_configs.get(template_name, self.template_configs["Custom / Bebas"]))
+            else:
+                template_config = deepcopy(template_config)
+            columns = raw_sheet.get("columns") or template_config.get("columns") or []
+            if not isinstance(columns, list) or not columns:
+                raise ValueError(f"Kolom pada {sheet_name} tidak valid.")
+            template_config["columns"] = deepcopy(columns)
+            amount_key = str(template_config.get("amount_key") or "amount")
+            amount_col = next((col for col in columns if str(col.get("key")) == amount_key), None)
+            if amount_col is None:
+                raise ValueError(f"Kolom nominal '{amount_key}' tidak ditemukan di {sheet_name}.")
+
+            items = []
+            subtotal = 0
+            for row_index, raw_row in enumerate(raw_sheet.get("rows") or []):
+                if not isinstance(raw_row, dict):
+                    continue
+                raw_cells = raw_row.get("cells") or {}
+                data_row = {}
+                row_has_data = False
+                amount_value = ""
+                for column in columns:
+                    key = str(column.get("key") or "")
+                    cell = raw_cells.get(key, {}) if isinstance(raw_cells, dict) else {}
+                    if not isinstance(cell, dict):
+                        cell = {"value": cell}
+                    value = cell.get("value", "")
+                    value = "" if value is None else str(value).strip()
+                    data_row[key] = value
+                    if value:
+                        row_has_data = True
+                    if key == amount_key:
+                        amount_value = value
+                row_id = str(raw_row.get("id") or "").strip()
+                if row_id:
+                    data_row["__row_id__"] = row_id
+                hidden = raw_row.get("hidden")
+                if isinstance(hidden, dict) and hidden:
+                    data_row["__template_values__"] = deepcopy(hidden)
+                source = raw_row.get("source")
+                if isinstance(source, dict) and str(source.get("no_resi") or "").strip():
+                    data_row["__source_resi__"] = deepcopy(source)
+                    row_has_data = True
+                if not row_has_data:
+                    continue
+                try:
+                    nominal = int(_parse_invoice_number(amount_value, "currency"))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Nominal pada {sheet_name}, baris {row_index + 2}: {exc}") from exc
+                subtotal += nominal
+                items.append({
+                    "nomor_urut": row_index + 1,
+                    "data_kolom": json.dumps(data_row, ensure_ascii=False),
+                    "nominal": nominal,
+                })
+            tax_name = str(meta.get("jenis_pajak") or "NONPAJAK").strip().upper()
+            if not items and str(meta.get("no_invoice") or "").strip():
+                raise ValueError(f"Rincian {meta.get('no_invoice')} tidak boleh dikosongkan.")
+            tax_value = (
+                int((Decimal(subtotal) * Decimal("0.011")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                if items and tax_name == "PPN 1,1%" else 0
+            )
+            total = subtotal + tax_value
+            status = str(meta.get("status") or "DRAFT").strip().upper()
+            if not items and not str(meta.get("no_invoice") or "").strip():
+                status = "DRAFT"
+            if status in {"DRAFT", "BELUM DITAGIH", ""}:
+                status = "BELUM LUNAS"
+            if status not in {"BELUM LUNAS", "CICILAN", "LUNAS", "BATAL", "MACET"}:
+                status = "BELUM LUNAS"
+            client = str(meta.get("client") or workbook_client).strip().upper()
+            if not client:
+                raise ValueError(f"Customer pada {sheet_name} belum diisi.")
+            if workbook_client and client != workbook_client:
+                raise ValueError("Semua sheet dalam satu Workbook harus memakai customer yang sama.")
+            meta.update({
+                "sheet_name": sheet_name,
+                "template_name": template_name,
+                "template_config": template_config,
+                "client": client,
+                "tanggal": str(meta.get("tanggal") or self.date_invoice.date().toString("yyyy-MM-dd")),
+                "jenis_pajak": tax_name,
+                "status": status,
+                "subtotal": subtotal,
+                "total_akhir": total,
+            })
+            # This sheet is now part of a persisted workbook, not a transient
+            # native Univer sheet creation event.
+            meta.pop("is_new_sheet", None)
+            self._workbook_sheet_meta[sheet_id] = meta
+            metadata = {
+                "ship_to": str(meta.get("ship_to") or "").strip().upper(),
+                "payment_info": str(meta.get("payment_info") or "").strip().upper(),
+                "notes": str(meta.get("notes") or "").strip().upper(),
+                "template_config": template_config,
+                "source_resi": meta.get("source_resi") or [],
+            }
+            header = {
+                "no_invoice": str(meta.get("no_invoice") or "").strip().upper(),
+                "tanggal": meta["tanggal"],
+                "client": client,
+                "tipe_invoice": template_name,
+                "jenis_pajak": tax_name,
+                "subtotal": subtotal,
+                "total_akhir": total,
+                "status": status,
+                "metadata_json": json.dumps(metadata, ensure_ascii=False),
+                "template_version": int(template_config.get("version", 1) or 1),
+                "source_resi": meta.get("source_resi") or [],
+            }
+            sheet_entries.append({
+                "sheet_id": sheet_id,
+                "sheet_name": sheet_name,
+                "header": header,
+                "items": items,
+            })
+        if not sheet_entries:
+            raise ValueError("Tidak ada sheet invoice yang dapat disimpan.")
+
+        # Persist business metadata for every sheet in the workbook snapshot,
+        # including an empty first-sheet draft that has no invoice_header row yet.
+        snapshot_custom = workbook_snapshot.get("custom")
+        if not isinstance(snapshot_custom, dict):
+            snapshot_custom = {}
+            workbook_snapshot["custom"] = snapshot_custom
+        snapshot_sheet_meta = snapshot_custom.get("kargoInvoiceSheets")
+        if not isinstance(snapshot_sheet_meta, dict):
+            snapshot_sheet_meta = {}
+        for entry in sheet_entries:
+            sheet_id = str(entry["sheet_id"])
+            meta = self._workbook_sheet_meta.get(sheet_id)
+            if isinstance(meta, dict):
+                snapshot_sheet_meta[sheet_id] = deepcopy(meta)
+        snapshot_custom["kargoInvoiceSheets"] = snapshot_sheet_meta
+        snapshot_custom["kargoActiveSheetId"] = active_sheet_id
+
+        active_meta = self._workbook_sheet_meta.get(active_sheet_id) or {}
+        workbook_data = {
+            "workbook_id": self.workbook_id_aktif or "",
+            "no_workbook": self.no_workbook_aktif or "",
+            "client": workbook_client or str(active_meta.get("client") or ""),
+            "tanggal": str(active_meta.get("tanggal") or self.date_invoice.date().toString("yyyy-MM-dd")),
+            "snapshot_json": json.dumps(workbook_snapshot, ensure_ascii=False),
+            "sheet_order_json": json.dumps([entry["sheet_id"] for entry in sheet_entries], ensure_ascii=False),
+            "metadata_json": "{}",
+        }
+        sukses, hasil = db_service.simpan_workbook_invoice(workbook_data, sheet_entries)
+        if not sukses:
+            self._tampilkan_gagal_simpan_invoice(hasil)
+            return False
+
+        self.workbook_id_aktif = hasil.get("workbook_id")
+        self.no_workbook_aktif = hasil.get("no_workbook")
+        for result_sheet in hasil.get("sheets", []):
+            sheet_id = str(result_sheet.get("sheet_id") or "")
+            meta = self._workbook_sheet_meta.get(sheet_id, {})
+            meta["no_invoice"] = result_sheet.get("no_invoice") or meta.get("no_invoice") or ""
+            meta["status"] = result_sheet.get("status") or meta.get("status") or "BELUM LUNAS"
+            self._workbook_sheet_meta[sheet_id] = meta
+            setter = getattr(self.tabel_item_invoice, "set_invoice_sheet_meta", None)
+            if callable(setter):
+                setter(sheet_id, meta)
+            if sheet_id == active_sheet_id:
+                self.no_invoice_aktif = str(meta.get("no_invoice") or "").strip().upper() or None
+                self.status_invoice_aktif = str(meta.get("status") or "BELUM LUNAS").upper()
+        self._workbook_mode_active = True
+        self._workbook_dirty = False
+        self._dirty = False
+        self._set_invoice_lunas_locked(
+            self.status_invoice_aktif in {"LUNAS", "BATAL"},
+            dibatalkan=self.status_invoice_aktif == "BATAL",
+        )
+        self.txt_no_invoice.setText(self.no_invoice_aktif or "")
+        self.lbl_title_editor.setText(
+            f"{self.status_invoice_aktif} INVOICE: {self.no_invoice_aktif or self.no_workbook_aktif or 'WORKBOOK'}"
+        )
+        self.btn_simpan_db.setEnabled(False)
+        self.btn_catat_pembayaran.setEnabled(bool(self.no_invoice_aktif) and self.status_invoice_aktif not in {"LUNAS", "BATAL"})
+        self.btn_riwayat_pembayaran.setEnabled(bool(self.no_invoice_aktif))
+        self.load_histori_invoice()
+        QMessageBox.information(
+            self, "Workbook Invoice Tersimpan",
+            f"Workbook {self.no_workbook_aktif} berhasil disimpan.\n"
+            f"Jumlah sheet: {len(sheet_entries)} (termasuk sheet DRAFT).",
+        )
+        return True
+
+    def tambah_invoice_sheet(self, on_added=None):
+        if not callable(on_added):
+            on_added = None
+        if not self.tabel_item_invoice.using_univer:
+            QMessageBox.warning(self, "Univer Tidak Siap", "Tambah sheet memerlukan editor Univer aktif.")
+            return False
+        if not self.txt_client.text().strip():
+            QMessageBox.warning(self, "Customer Belum Diisi", "Isi nama customer sebelum menambah invoice sheet.")
+            self.txt_client.setFocus()
+            return False
+        capture = getattr(self.tabel_item_invoice, "capture_workbook", None)
+        if not callable(capture):
+            return False
+
+        def _captured(raw_payload):
+            try:
+                if not raw_payload:
+                    raise ValueError("Snapshot sheet aktif tidak tersedia.")
+                data = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                active_id = str(data.get("activeSheetId") or "")
+                active_sheet = next((item for item in data.get("sheets", []) if str(item.get("sheetId")) == active_id), None)
+                if not active_sheet:
+                    raise ValueError("Sheet aktif tidak ditemukan di workbook.")
+                active_meta = self._meta_sheet_aktif_dari_form(active_sheet.get("sheetMeta") or {})
+                active_meta["no_invoice"] = str(self.no_invoice_aktif or "")
+                self._workbook_sheet_meta[active_id] = active_meta
+                self._workbook_mode_active = True
+                self._workbook_dirty = True
+                self.tabel_item_invoice.set_invoice_sheet_meta(active_id, active_meta)
+                new_name = f"Invoice {len(data.get('sheets') or []) + 1}"
+                new_meta = deepcopy(active_meta)
+                new_meta.update({"no_invoice": "", "status": "DRAFT", "paid_total": 0, "total_akhir": 0, "subtotal": 0, "source_resi": [], "is_new_sheet": True})
+                new_columns = deepcopy(active_sheet.get("columns") or self.active_columns)
+                def _sheet_inserted(new_sheet_id=None):
+                    if not new_sheet_id:
+                        QMessageBox.warning(
+                            self, "Gagal Menambah Sheet",
+                            "Univer tidak berhasil membuat sheet invoice baru.",
+                        )
+                        return
+                    self.btn_simpan_db.setEnabled(True)
+                    if on_added is not None:
+                        # Let the ActiveSheetChanged WebChannel callback finish
+                        # applying the new blank sheet to the Python model first.
+                        QTimer.singleShot(0, on_added)
+
+                self.tabel_item_invoice.add_invoice_sheet(
+                    {
+                        "sheetName": new_name,
+                        "columns": new_columns,
+                        "sheetMeta": new_meta,
+                    },
+                    _sheet_inserted,
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Gagal Menambah Sheet", str(exc))
+
+        return bool(capture(_captured))
+
+    def buka_dialog_catat_pembayaran(self):
+        no_invoice = str(self.no_invoice_aktif or "").strip().upper()
+        if not no_invoice:
+            QMessageBox.information(self, "Invoice Belum Tersimpan", "Simpan Workbook terlebih dahulu sebelum mencatat pembayaran.")
+            return False
+        if self._invoice_lunas_locked or self.status_invoice_aktif == "BATAL":
+            return False
+        if self._dirty or self._workbook_dirty:
+            QMessageBox.information(
+                self, "Simpan Perubahan Terlebih Dahulu",
+                "Simpan perubahan Workbook terlebih dahulu sebelum mencatat pembayaran, "
+                "agar nominal pembayaran sesuai dengan total invoice yang tersimpan.",
+            )
+            return False
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Catat Pembayaran — {no_invoice}")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"Invoice: {no_invoice}"))
+        txt_nominal = QLineEdit()
+        txt_nominal.setPlaceholderText("Nominal pembayaran, contoh 1.500.000")
+        txt_nominal.setValidator(InvoiceCellValidator("currency", txt_nominal))
+        atur_tinggi_input(txt_nominal)
+        date_payment = QDateEdit(QDate.currentDate())
+        date_payment.setCalendarPopup(True)
+        date_payment.setDisplayFormat("dd/MM/yyyy")
+        cmb_metode = QComboBox()
+        cmb_metode.addItems(["TRANSFER", "TUNAI", "LAINNYA"])
+        txt_referensi = QLineEdit()
+        txt_referensi.setPlaceholderText("Nomor referensi / bukti (opsional)")
+        txt_catatan = QLineEdit()
+        txt_catatan.setPlaceholderText("Catatan pembayaran (opsional)")
+        for label, widget in (
+            ("Nominal", txt_nominal), ("Tanggal", date_payment), ("Metode", cmb_metode),
+            ("Referensi", txt_referensi), ("Catatan", txt_catatan),
+        ):
+            layout.addWidget(QLabel(label))
+            layout.addWidget(widget)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        btn_cancel = QPushButton("Batal")
+        btn_save = QPushButton("Simpan Pembayaran")
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_save.clicked.connect(dialog.accept)
+        buttons.addWidget(btn_cancel)
+        buttons.addWidget(btn_save)
+        layout.addLayout(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        try:
+            nominal = int(_parse_invoice_number(txt_nominal.text(), "currency"))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Nominal Tidak Valid", str(exc))
+            return False
+        if nominal <= 0:
+            QMessageBox.warning(self, "Nominal Tidak Valid", "Nominal pembayaran harus lebih besar dari nol.")
+            return False
+        sukses, hasil = db_service.catat_pembayaran_invoice(
+            no_invoice,
+            nominal,
+            date_payment.date().toString("yyyy-MM-dd"),
+            cmb_metode.currentText(),
+            txt_referensi.text().strip(),
+            txt_catatan.text().strip(),
+        )
+        if not sukses:
+            QMessageBox.warning(self, "Pembayaran Tidak Tersimpan", str(hasil))
+            return False
+        self.status_invoice_aktif = str(hasil.get("status") or "CICILAN").upper()
+        meta = self._meta_sheet_aktif_dari_form(self._workbook_sheet_meta.get(self._active_workbook_sheet_id))
+        meta.update({
+            "status": self.status_invoice_aktif,
+            "paid_total": int(hasil.get("paid_total") or 0),
+            "total_akhir": int(self.total_invoice_aktif or meta.get("total_akhir") or 0),
+        })
+        self._workbook_sheet_meta[self._active_workbook_sheet_id] = meta
+        self.tabel_item_invoice.set_invoice_sheet_meta(self._active_workbook_sheet_id, meta)
+        self._set_invoice_lunas_locked(self.status_invoice_aktif == "LUNAS", dibatalkan=False)
+        self.btn_catat_pembayaran.setEnabled(self.status_invoice_aktif != "LUNAS")
+        self.btn_riwayat_pembayaran.setEnabled(True)
+        self.lbl_title_editor.setText(f"{self.status_invoice_aktif} INVOICE: {no_invoice}")
+        self.load_histori_invoice()
+        QMessageBox.information(
+            self, "Pembayaran Tersimpan",
+            f"Pembayaran Rp {nominal:,} berhasil dicatat.\n"
+            f"Total dibayar: Rp {int(hasil.get('paid_total') or 0):,}\n"
+            f"Sisa tagihan: Rp {int(hasil.get('remaining') or 0):,}\n"
+            f"Status: {self.status_invoice_aktif}.",
+        )
+        return True
+
+    def tampilkan_riwayat_pembayaran(self):
+        no_invoice = str(self.no_invoice_aktif or "").strip().upper()
+        if not no_invoice:
+            return False
+        try:
+            payments = db_service.ambil_pembayaran_invoice(no_invoice)
+        except Exception as exc:
+            QMessageBox.warning(self, "Riwayat Pembayaran", f"Gagal membaca riwayat pembayaran: {exc}")
+            return False
+        if not payments:
+            message = "Belum ada catatan transaksi pembayaran untuk invoice ini.\n"
+            if self.status_invoice_aktif == "LUNAS":
+                message += "Status LUNAS berasal dari pencatatan invoice versi lama; rincian transaksinya belum tersedia."
+        else:
+            lines = []
+            for payment in payments:
+                _, tanggal, nominal, metode, referensi, catatan, created_at, *_ = payment
+                lines.append(
+                    f"{tanggal} | Rp {int(nominal or 0):,} | {metode or '-'}"
+                    + (f" | Ref: {referensi}" if referensi else "")
+                    + (f" | {catatan}" if catatan else "")
+                )
+            message = "\n".join(lines)
+        QMessageBox.information(self, f"Riwayat Pembayaran — {no_invoice}", message)
+        return True
+
     def _tambahkan_baris_histori_invoice(self, tabel, data):
+        # Bentuk query: workbook_id, no_workbook, tanggal, client,
+        # jumlah_sheet, total_tagihan, total_dibayar, sisa_tagihan, status.
         row = tabel.rowCount()
         tabel.insertRow(row)
-        for column in range(min(len(data), tabel.columnCount())):
-            value = data[column]
-            item = buat_tabel_item(
-                text=str(value if value is not None else ""),
-                editable=False,
-            )
+        workbook_id = str(data[0] or "") if len(data) > 0 else ""
+        no_workbook = str(data[1] or "") if len(data) > 1 else ""
+        tanggal = str(data[2] or "") if len(data) > 2 else ""
+        client = str(data[3] or "") if len(data) > 3 else ""
+        jumlah_sheet = int(data[4] or 0) if len(data) > 4 else 0
+        total = int(data[5] or 0) if len(data) > 5 else 0
+        sisa = int(data[7] or 0) if len(data) > 7 else 0
+        status = str(data[8] or "") if len(data) > 8 else ""
+        values = (
+            no_workbook,
+            tanggal,
+            client,
+            f"{jumlah_sheet} sheet",
+            f"Rp {total:,}",
+            f"Rp {sisa:,}",
+            status,
+        )
+        for column, value in enumerate(values):
+            item = buat_tabel_item(text=str(value), editable=False)
             item.setFont(tabel.font())
-            item.setFlags(
-                Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled,
-            )
+            item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            if column == self.KOL_HISTORI_NO_WORKBOOK:
+                item.setData(Qt.ItemDataRole.UserRole, workbook_id)
             tabel.setItem(row, column, item)
 
     @db_service.profile_performance("Invoice.load_history", threshold=0.05)
@@ -2431,37 +3083,64 @@ class TabInvoice(QWidget):
         row = tabel.rowAt(position.y())
         if row < 0:
             return
-
         tabel.selectRow(row)
-        item_no = tabel.item(row, self.KOL_HISTORI_NO_INV)
-        item_status = tabel.item(row, self.KOL_HISTORI_STATUS)
-        no_invoice = str(item_no.text() if item_no else "").strip().upper()
-        status = str(item_status.text() if item_status else "").strip().upper()
-        if not no_invoice:
+        item = tabel.item(row, self.KOL_HISTORI_NO_WORKBOOK)
+        workbook_id = str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+        if not workbook_id:
             return
-
         menu = QMenu(self)
-        action_buka = menu.addAction("Buka Invoice")
-        action_batal = menu.addAction("Batalkan Invoice")
-        action_batal.setEnabled(status not in {"LUNAS", "BATAL"})
+        action_buka = menu.addAction("Buka Workbook Invoice")
+        batal_menu = menu.addMenu("Batalkan Invoice Sheet")
+        try:
+            loaded = db_service.ambil_workbook_invoice(workbook_id) or {}
+            sheets = loaded.get("sheets") or []
+        except Exception as exc:
+            sheets = []
+            print(f"[INVOICE-WORKBOOK] Gagal membaca daftar sheet untuk pembatalan: {exc}")
+        cancel_actions = {}
+        for sheet in sheets:
+            no_invoice = str(sheet.get("no_invoice") or "").strip().upper()
+            status = str(sheet.get("status") or "").strip().upper()
+            if not no_invoice or status in {"LUNAS", "BATAL"}:
+                continue
+            sheet_name = str(sheet.get("sheet_name") or no_invoice)
+            paid_total = int(sheet.get("paid_total") or 0)
+            if paid_total > 0:
+                action = batal_menu.addAction(
+                    f"{sheet_name} — {no_invoice} (ADA PEMBAYARAN; refund belum didukung)"
+                )
+                action.setEnabled(False)
+                continue
+            action = batal_menu.addAction(f"{sheet_name} — {no_invoice} ({status})")
+            cancel_actions[action] = no_invoice
+        if not batal_menu.actions():
+            batal_menu.setEnabled(False)
         dipilih = menu.exec(tabel.viewport().mapToGlobal(position))
-
         if dipilih == action_buka:
-            self.load_invoice_by_no(no_invoice)
-        elif dipilih == action_batal:
-            self._batalkan_invoice_dari_histori(no_invoice)
+            self.load_workbook_invoice(workbook_id)
+        elif dipilih in cancel_actions:
+            self._batalkan_invoice_dari_histori(cancel_actions[dipilih])
 
     def _batalkan_invoice_dari_histori(self, no_invoice):
         no_invoice = str(no_invoice or "").strip().upper()
         if not no_invoice:
             return False
 
-        if (
-            self.no_invoice_aktif == no_invoice
-            and self._dirty
-            and not self._konfirmasi_buang_perubahan("membatalkan Invoice yang sedang diedit")
-        ):
+        workbook_editing = bool(
+            self._workbook_mode_active
+            and self.workbook_id_aktif
+            and (self._dirty or self._workbook_dirty)
+        )
+        if workbook_editing:
+            QMessageBox.information(
+                self,
+                "Simpan Workbook Terlebih Dahulu",
+                "Simpan atau buang perubahan Workbook terlebih dahulu sebelum membatalkan salah satu invoice sheet.",
+            )
             return False
+        if self.no_invoice_aktif == no_invoice and self._dirty:
+            if not self._konfirmasi_buang_perubahan("membatalkan Invoice yang sedang diedit"):
+                return False
 
         jawaban = QMessageBox.question(
             self,
@@ -2486,12 +3165,28 @@ class TabInvoice(QWidget):
             QMessageBox.warning(self, "Invoice Tidak Dibatalkan", str(pesan))
             return False
 
+        if self._workbook_mode_active and self.workbook_id_aktif:
+            try:
+                loaded_workbook = db_service.ambil_workbook_invoice(self.workbook_id_aktif) or {}
+                for sheet in loaded_workbook.get("sheets") or []:
+                    if str(sheet.get("no_invoice") or "").strip().upper() != no_invoice:
+                        continue
+                    sheet_id = str(sheet.get("sheet_id") or "")
+                    meta = dict(self._workbook_sheet_meta.get(sheet_id) or {})
+                    meta.update({"no_invoice": no_invoice, "status": "BATAL"})
+                    self._workbook_sheet_meta[sheet_id] = meta
+                    self.tabel_item_invoice.set_invoice_sheet_meta(sheet_id, meta)
+                    break
+            except Exception as exc:
+                print(f"[INVOICE-WORKBOOK] Gagal memperbarui status sheet yang dibatalkan: {exc}")
+
         if self.no_invoice_aktif == no_invoice:
             self.status_invoice_aktif = "BATAL"
             self._dirty = False
             self._set_invoice_lunas_locked(True, dibatalkan=True)
             self.lbl_title_editor.setText(f"BATAL INVOICE: {no_invoice}")
             self.btn_simpan_db.setEnabled(False)
+            self.btn_catat_pembayaran.setEnabled(False)
 
         self.load_histori_invoice()
         QMessageBox.information(
@@ -2506,15 +3201,232 @@ class TabInvoice(QWidget):
         selected = selection_model.selectedRows() if selection_model else []
         if not selected:
             return False
-
         item = self.tabel_histori_invoice.item(
-            selected[0].row(),
-            self.KOL_HISTORI_NO_INV,
+            selected[0].row(), self.KOL_HISTORI_NO_WORKBOOK,
         )
-        no_invoice = item.text().strip() if item else ""
-        if not no_invoice:
+        workbook_id = str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+        return self.load_workbook_invoice(workbook_id) if workbook_id else False
+
+    def load_workbook_invoice(self, workbook_id):
+        workbook_key = str(workbook_id or "").strip()
+        if not workbook_key:
             return False
-        return self.load_invoice_by_no(no_invoice)
+        if not self._konfirmasi_buang_perubahan("membuka Workbook Invoice lain"):
+            return False
+
+        try:
+            loaded = db_service.ambil_workbook_invoice(workbook_key)
+            if not loaded:
+                QMessageBox.warning(self, "Workbook Tidak Ditemukan", f"Workbook {workbook_key} tidak ditemukan.")
+                return False
+            workbook = loaded.get("workbook") or {}
+            db_sheets = list(loaded.get("sheets") or [])
+            snapshot = self._parse_meta_json(workbook.get("snapshot_json"))
+            if not snapshot:
+                # Kompatibilitas untuk invoice lama yang masih menyimpan snapshot
+                # Univer di metadata_json per invoice, bukan pada induk workbook.
+                for sheet in db_sheets:
+                    old_meta = self._parse_meta_json(sheet.get("metadata_json"))
+                    candidate = old_meta.get("univer_snapshot")
+                    if isinstance(candidate, dict) and candidate:
+                        snapshot = candidate
+                        break
+
+            order_ids = []
+            try:
+                raw_order = json.loads(workbook.get("sheet_order_json") or "[]")
+                if isinstance(raw_order, list):
+                    order_ids = [str(value) for value in raw_order if str(value or "").strip()]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                order_ids = []
+
+            sheets_by_id = {
+                str(sheet.get("sheet_id") or ""): sheet
+                for sheet in db_sheets
+                if str(sheet.get("sheet_id") or "").strip()
+            }
+            snapshot_custom = snapshot.get("custom") if isinstance(snapshot.get("custom"), dict) else {}
+            snapshot_sheet_meta = snapshot_custom.get("kargoInvoiceSheets")
+            if not isinstance(snapshot_sheet_meta, dict):
+                snapshot_sheet_meta = {}
+            snapshot_sheet_order = snapshot.get("sheetOrder")
+            if not order_ids and isinstance(snapshot_sheet_order, list):
+                order_ids = [str(value) for value in snapshot_sheet_order if str(value or "").strip()]
+            if not order_ids:
+                order_ids = [str(sheet.get("sheet_id") or "") for sheet in db_sheets if sheet.get("sheet_id")]
+
+            sheets_metadata = []
+            sheet_meta_map = {}
+            for index, sheet_id in enumerate(order_ids):
+                sheet = sheets_by_id.get(sheet_id)
+                if sheet:
+                    invoice_meta = self._parse_meta_json(sheet.get("metadata_json"))
+                    template_name = str(sheet.get("tipe_invoice") or "Standar")
+                    template_config = invoice_meta.get("template_config")
+                    if not isinstance(template_config, dict):
+                        template_config = deepcopy(
+                            self.template_configs.get(template_name, self.template_configs["Custom / Bebas"])
+                        )
+                    source_resi = invoice_meta.get("source_resi")
+                    if not isinstance(source_resi, list):
+                        source_resi = []
+                    meta = dict(snapshot_sheet_meta.get(sheet_id) or {})
+                    meta.update({
+                        "no_invoice": str(sheet.get("no_invoice") or "").strip().upper(),
+                        "status": str(sheet.get("status") or "DRAFT").strip().upper(),
+                        "template_name": template_name,
+                        "template_config": template_config,
+                        "client": str(sheet.get("client") or workbook.get("client") or "").strip().upper(),
+                        "tanggal": str(sheet.get("tanggal") or workbook.get("tanggal") or ""),
+                        "jenis_pajak": str(sheet.get("jenis_pajak") or "NONPAJAK").strip().upper(),
+                        "ship_to": str(invoice_meta.get("ship_to") or "").strip().upper(),
+                        "payment_info": str(invoice_meta.get("payment_info") or "").strip().upper(),
+                        "notes": str(invoice_meta.get("notes") or "").strip().upper(),
+                        "source_resi": source_resi,
+                        "paid_total": int(sheet.get("paid_total") or 0),
+                        "subtotal": int(sheet.get("subtotal") or 0),
+                        "total_akhir": int(sheet.get("total_akhir") or 0),
+                        "created_by_user_id": sheet.get("created_by_user_id"),
+                        "created_by_username": sheet.get("created_by_username"),
+                        "created_by_name": sheet.get("created_by_name"),
+                    })
+                    sheet_name = str(sheet.get("sheet_name") or meta.get("sheet_name") or f"Invoice {index + 1}")
+                    meta["sheet_name"] = sheet_name
+                    rows_metadata = []
+                    for detail in sheet.get("details") or []:
+                        data_row = self._parse_json_object(detail[0] if detail else None)
+                        rows_metadata.append({
+                            "id": str(data_row.get("__row_id__") or ""),
+                            "hidden": data_row.get("__template_values__") if isinstance(data_row.get("__template_values__"), dict) else {},
+                            "source": data_row.get("__source_resi__") if isinstance(data_row.get("__source_resi__"), dict) else None,
+                        })
+                else:
+                    # Sheet DRAFT kosong disimpan di snapshot workbook, belum punya invoice_header.
+                    meta = dict(snapshot_sheet_meta.get(sheet_id) or {})
+                    template_name = str(meta.get("template_name") or "Standar")
+                    template_config = meta.get("template_config")
+                    if not isinstance(template_config, dict):
+                        template_config = deepcopy(
+                            self.template_configs.get(template_name, self.template_configs["Custom / Bebas"])
+                        )
+                    meta.update({
+                        "no_invoice": "",
+                        "status": "DRAFT",
+                        "template_name": template_name,
+                        "template_config": template_config,
+                        "client": str(meta.get("client") or workbook.get("client") or "").strip().upper(),
+                        "tanggal": str(meta.get("tanggal") or workbook.get("tanggal") or ""),
+                        "jenis_pajak": str(meta.get("jenis_pajak") or "NONPAJAK").strip().upper(),
+                        "paid_total": 0,
+                        "subtotal": 0,
+                        "total_akhir": 0,
+                        "sheet_name": str(meta.get("sheet_name") or f"Invoice {index + 1}"),
+                    })
+                    rows_metadata = []
+                sheet_meta_map[sheet_id] = meta
+                sheets_metadata.append({
+                    "sheetId": sheet_id,
+                    "sheetMeta": meta,
+                    "rows": rows_metadata,
+                })
+
+            if not order_ids and not db_sheets:
+                raise ValueError("Workbook tidak memiliki sheet invoice.")
+            if not snapshot:
+                # Fallback hanya untuk workbook legacy tanpa snapshot. Bangun sheet
+                # pertama dari detail invoice yang tersimpan, lalu kaitkan id baru Univer.
+                if not db_sheets:
+                    raise ValueError("Snapshot Workbook tidak tersedia untuk dipulihkan.")
+                first = db_sheets[0]
+                invoice_meta = self._parse_meta_json(first.get("metadata_json"))
+                header = (
+                    first.get("client"), first.get("tipe_invoice"), first.get("jenis_pajak"),
+                    first.get("status"), first.get("tanggal"), first.get("metadata_json"),
+                    first.get("created_by_user_id"), first.get("created_by_username"),
+                    first.get("created_by_name"),
+                )
+                self._workbook_mode_active = False
+                self._workbook_dirty = False
+                self.workbook_id_aktif = str(workbook.get("workbook_id") or "")
+                self.no_workbook_aktif = str(workbook.get("no_workbook") or "")
+                self._workbook_sheet_meta = sheet_meta_map
+                self._active_workbook_sheet_id = str(first.get("sheet_id") or "")
+                self._loading_invoice = True
+                self._sedang_memuat_item = True
+                try:
+                    self._terapkan_header_invoice_loaded(str(first.get("no_invoice") or ""), header)
+                    self._muat_detail_invoice(first.get("details") or [])
+                    self._set_invoice_lunas_locked(
+                        str(first.get("status") or "").upper() in {"LUNAS", "BATAL"},
+                        dibatalkan=str(first.get("status") or "").upper() == "BATAL",
+                    )
+                finally:
+                    self._sedang_memuat_item = False
+                    self._loading_invoice = False
+                self._workbook_mode_active = True
+                self._workbook_dirty = False
+                self._dirty = False
+
+                def _attach_legacy_sheet(_payload=None):
+                    def _captured(raw_payload):
+                        try:
+                            data = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                            active_id = str((data or {}).get("activeSheetId") or "")
+                            if not active_id:
+                                return
+                            meta = dict(sheet_meta_map.get(str(first.get("sheet_id") or "")) or {})
+                            meta["sheet_name"] = str((data.get("sheets") or [{}])[0].get("sheetName") or "Sheet 1")
+                            self._active_workbook_sheet_id = active_id
+                            self._workbook_sheet_meta = {active_id: meta}
+                            self.tabel_item_invoice.set_invoice_sheet_meta(active_id, meta)
+                        except Exception as exc:
+                            print(f"[INVOICE-WORKBOOK] Legacy metadata attach failed: {exc}")
+
+                    self.tabel_item_invoice.capture_workbook(_captured)
+
+                QTimer.singleShot(100, _attach_legacy_sheet)
+                self.lbl_title_editor.setText(f"{self.status_invoice_aktif} INVOICE: {self.no_invoice_aktif}")
+                self.btn_catat_pembayaran.setEnabled(bool(self.no_invoice_aktif) and self.status_invoice_aktif not in {"LUNAS", "BATAL"})
+                self.btn_riwayat_pembayaran.setEnabled(bool(self.no_invoice_aktif))
+                self.btn_simpan_db.setEnabled(False)
+                self.load_histori_invoice()
+                return True
+
+            active_id = str(snapshot_custom.get("kargoActiveSheetId") or "").strip()
+            if active_id not in order_ids:
+                active_id = order_ids[0]
+            if not isinstance(snapshot.get("custom"), dict):
+                snapshot["custom"] = {}
+            snapshot["custom"]["kargoInvoiceSheets"] = sheet_meta_map
+            snapshot["custom"]["kargoActiveSheetId"] = active_id
+
+            self.workbook_id_aktif = str(workbook.get("workbook_id") or "")
+            self.no_workbook_aktif = str(workbook.get("no_workbook") or "")
+            self._workbook_mode_active = True
+            self._workbook_dirty = False
+            self._dirty = False
+            self._active_workbook_sheet_id = active_id
+            self._workbook_sheet_meta = sheet_meta_map
+            self._workbook_sheet_payment = {
+                str(sheet.get("no_invoice") or ""): list(sheet.get("payments") or [])
+                for sheet in db_sheets if str(sheet.get("no_invoice") or "").strip()
+            }
+            self._loading_invoice = True
+            try:
+                self.txt_client.setText(str(workbook.get("client") or "").strip().upper())
+                self.lbl_title_editor.setText(f"WORKBOOK INVOICE: {self.no_workbook_aktif}")
+                self._set_invoice_lunas_locked(False, dibatalkan=False)
+                self._dirty = False
+            finally:
+                self._loading_invoice = False
+            self.tabel_item_invoice.restore_univer_snapshot(snapshot, sheets_metadata)
+            self._workbook_dirty = False
+            self.btn_simpan_db.setEnabled(False)
+            self.load_histori_invoice()
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Gagal Membuka Workbook", f"Workbook Invoice tidak dapat dibuka:\n{exc}")
+            return False
 
     def _source_resi_yang_berubah(self):
         """Kembalikan Resi sumber yang revision-nya tidak lagi sama."""
@@ -2654,7 +3566,10 @@ class TabInvoice(QWidget):
             widget.setEnabled(not locked)
 
         self.tabel_item_invoice.set_mutation_locked(locked)
-        self.btn_simpan_db.setEnabled((not locked) and self._dirty)
+        if bool(getattr(self, "_workbook_mode_active", False)):
+            self.btn_simpan_db.setEnabled(bool(self._dirty or self._workbook_dirty))
+        else:
+            self.btn_simpan_db.setEnabled((not locked) and self._dirty)
         self._update_print_menu_state()
 
     def _terapkan_invoice_loaded(self, no_invoice, header, details):
@@ -2685,10 +3600,24 @@ class TabInvoice(QWidget):
 
     def load_invoice_by_no(self, no_invoice):
         no_invoice = str(no_invoice or "").strip().upper()
-        if not no_invoice or not self._konfirmasi_buang_perubahan("membuka invoice lain"):
+        if not no_invoice:
+            return False
+        # Nomor invoice tetap dapat dipakai sebagai pintasan pembuka, tetapi
+        # konten dibuka melalui parent workbook agar sheet lain tidak hilang.
+        workbook_id = db_service.ambil_workbook_id_untuk_invoice(no_invoice)
+        if workbook_id:
+            return self.load_workbook_invoice(workbook_id)
+        if not self._konfirmasi_buang_perubahan("membuka invoice lain"):
             return False
 
         try:
+            self.workbook_id_aktif = None
+            self.no_workbook_aktif = None
+            self._workbook_mode_active = False
+            self._workbook_dirty = False
+            self._active_workbook_sheet_id = ""
+            self._workbook_sheet_meta = {}
+            self._workbook_sheet_payment = {}
             header, details = db_service.ambil_invoice_by_no(no_invoice)
             if not header:
                 QMessageBox.warning(
@@ -2715,6 +3644,13 @@ class TabInvoice(QWidget):
 
         self._loading_invoice = True
         try:
+            self.workbook_id_aktif = None
+            self.no_workbook_aktif = None
+            self._workbook_mode_active = False
+            self._workbook_dirty = False
+            self._active_workbook_sheet_id = ""
+            self._workbook_sheet_meta = {}
+            self._workbook_sheet_payment = {}
             self.no_invoice_aktif = None
             self._created_by_name = str(
                 CURRENT_SESSION.get("nama_lengkap")
@@ -2750,8 +3686,10 @@ class TabInvoice(QWidget):
         self.hitung_ulang_total_tagihan()
         self._dirty = False
         self.btn_simpan_db.setEnabled(True)
+        self.btn_catat_pembayaran.setEnabled(False)
+        self.btn_riwayat_pembayaran.setEnabled(False)
         self._update_print_menu_state()
-        self.lbl_title_editor.setText("DRAFT INVOICE BARU")
+        self.lbl_title_editor.setText("DRAFT WORKBOOK INVOICE")
         return True
 
     def _confirm_clear_table(self):
@@ -2859,8 +3797,7 @@ class TabInvoice(QWidget):
             if kota_tanda_tangan
             else self._esc(date_text)
         )
-        # Nama penanda tangan mengikuti identitas pembuat invoice / pengguna login.
-        # Tidak ada lagi override manual dari form Invoice.
+
         signer = default_signer.upper()
         return {
             "invoice_number": invoice_number,
@@ -3366,7 +4303,6 @@ class TabInvoice(QWidget):
         self._terapkan_tema_statis_invoice(is_dark, styles)
         self._terapkan_combobox_statis_invoice()
 
-        # Tabel histori tetap mengikuti tema, tetapi tidak diberi zoom global.
         ukuran_font_pt = get_fixed_font_sizes_pt()["body_small"]
         terapkan_tema_tabel(
             self.tabel_histori_invoice,

@@ -1,4 +1,4 @@
-
+# utils/printer/common.py
 """Komponen bersama untuk preview, cetak, dan ekspor dokumen."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# utils/printer/invoice_page_setup.py
 """Dialog dan penyimpanan pengaturan halaman khusus Invoice."""
 from __future__ import annotations
 
@@ -278,28 +279,6 @@ class InvoicePageSetupDialog(QDialog):
         self._load_controls()
         self._building = False
         self._update_enabled_state()
-
-        # Live Preview: debounce rapid control changes (for example, paper
-        # selection also changes orientation and preset margins) into a single
-        # PDF regeneration request. This keeps the QWebChannel/pdfmake pipeline
-        # from receiving several overlapping requests for one user action.
-        self._live_preview_timer = QTimer(self)
-        self._live_preview_timer.setSingleShot(True)
-        self._live_preview_timer.setInterval(450)
-        self._live_preview_timer.timeout.connect(self._emit_apply)
-
-        for signal in (
-            self.cmb_paper.currentIndexChanged,
-            self.cmb_orientation.currentIndexChanged,
-            self.cmb_margin.currentIndexChanged,
-            self.cmb_scaling.currentIndexChanged,
-            self.chk_gridlines.toggled,
-            self.spin_width.valueChanged,
-            self.spin_height.valueChanged,
-            self.spin_repeat_header_rows.valueChanged,
-            *(spin.valueChanged for spin in self.margin_spins.values()),
-        ):
-            signal.connect(self._schedule_live_preview)
 
     @staticmethod
     def _buat_spin(minimum: float, maximum: float, decimals: int) -> QDoubleSpinBox:
